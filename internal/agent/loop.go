@@ -68,7 +68,7 @@ type AgentLoop struct {
 }
 
 // NewAgentLoop creates a new AgentLoop with the given provider.
-func NewAgentLoop(b *chat.Hub, provider providers.LLMProvider, model string, maxIterations int, workspace string, scheduler *cron.Scheduler, mcpServers map[string]config.MCPServerConfig) *AgentLoop {
+func NewAgentLoop(b *chat.Hub, provider providers.LLMProvider, model string, maxIterations int, workspace string, scheduler *cron.Scheduler, mcpServers map[string]config.MCPServerConfig, allowedDirs []string) *AgentLoop {
 	if model == "" {
 		model = provider.GetDefaultModel()
 	}
@@ -91,7 +91,8 @@ func NewAgentLoop(b *chat.Hub, provider providers.LLMProvider, model string, max
 	}
 	reg.Register(fsTool)
 
-	reg.Register(tools.NewExecTool(60))
+	allDirs := append([]string{workspace}, allowedDirs...)
+	reg.Register(tools.NewExecToolWithAllowedDirs(60, workspace, allDirs))
 	reg.Register(tools.NewWebTool())
 	reg.Register(tools.NewWebSearchTool())
 	reg.Register(tools.NewSpawnTool())
@@ -227,7 +228,14 @@ func (a *AgentLoop) Run(ctx context.Context) {
 			// get file-backed memory context (long-term + today)
 			memCtx, _ := a.memory.GetMemoryContext()
 			memories := a.memory.Recent(5)
-			messages := a.context.BuildMessages(sess.GetHistory(), msg.Content, msg.Channel, msg.ChatID, memCtx, memories)
+			userContent := msg.Content
+			if len(msg.Media) > 0 {
+				userContent += "\n\n[Attached files saved to:]"
+				for _, p := range msg.Media {
+					userContent += "\n- " + p
+				}
+			}
+			messages := a.context.BuildMessages(sess.GetHistory(), userContent, msg.Channel, msg.ChatID, memCtx, memories)
 
 			iteration := 0
 			finalContent := ""

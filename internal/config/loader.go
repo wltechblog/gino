@@ -7,13 +7,9 @@ import (
 	"strconv"
 )
 
-// LoadConfig loads config from ~/.picobot/config.json if present, then applies any environment variable overrides on top.
-func LoadConfig() (Config, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		home = "."
-	}
-	path := filepath.Join(home, ".picobot", "config.json")
+// LoadConfig loads config from <homeDir>/config.json if present, then applies any environment variable overrides on top.
+func LoadConfig(homeDir string) (Config, error) {
+	path := filepath.Join(homeDir, "config.json")
 	var cfg Config
 	f, err := os.Open(path)
 	if err == nil {

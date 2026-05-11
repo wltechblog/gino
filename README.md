@@ -87,6 +87,20 @@ go build -o picobot ./cmd/picobot
 ./picobot gateway                     # long-running mode with Telegram
 ```
 
+### Running Multiple Instances
+
+Use `--home` to run separate picobot instances with independent configs and workspaces:
+
+```sh
+./picobot --home /opt/bot1 onboard
+./picobot --home /opt/bot1 gateway &
+
+./picobot --home /opt/bot2 onboard
+./picobot --home /opt/bot2 gateway &
+```
+
+All subcommands respect the `--home` flag. Default is `~/.picobot`.
+
 ## Architecture
 
 Actually the logic is simple and straightforward. Messages flow through a **Chat Hub** (inbound/outbound channels) into the **Agent Loop**, which builds context from memory/sessions/skills, calls the LLM via OpenAI-compatible API, and executes tools (filesystem, exec, web, etc.) before sending replies back through the hub.
@@ -156,6 +170,8 @@ Chat with your agent from your phone. Set up in 2 minutes:
 2. Add the token to config or pass as `TELEGRAM_BOT_TOKEN` env var
 3. Start the communication gateway
 
+Telegram supports **file transfer** — send documents and photos to the agent (they're downloaded and made available in the workspace), and the agent can send files back. Received files are saved to `/tmp/picobot-media/<chatID>/` and the agent is told their location. To send files back, the agent includes file paths in outbound messages.
+
 See [HOW_TO_START.md](docs/HOW_TO_START.md) for a detailed BotFather walkthrough.
 
 ### Discord Integration
@@ -191,7 +207,7 @@ A configurable periodic check (default: 60s) that reads `HEARTBEAT.md` for sched
 
 ## Configuration
 
-Picobot uses a single JSON config at `~/.picobot/config.json`:
+Picobot uses a single JSON config at `~/.picobot/config.json` (or `<home>/config.json` when `--home` is set):
 
 ```json
 {
@@ -200,7 +216,8 @@ Picobot uses a single JSON config at `~/.picobot/config.json`:
       "model": "google/gemini-2.5-flash",
       "maxTokens": 8192,
       "temperature": 0.7,
-      "maxToolIterations": 200
+      "maxToolIterations": 200,
+      "allowedDirs": ["/home/user/projects", "/tmp"]
     }
   },
   "providers": {
@@ -224,6 +241,8 @@ Picobot uses a single JSON config at `~/.picobot/config.json`:
 }
 ```
 
+**`allowedDirs`** — a list of directories the `exec` tool is permitted to access with absolute paths. The workspace directory is always allowed implicitly. Paths containing `..` or `~` are always rejected.
+
 Supports any **OpenAI-compatible API** (OpenAI, OpenRouter, Ollama, etc.). See [CONFIG.md](docs/CONFIG.md) for more details.
 
 ## CLI Reference
@@ -231,10 +250,12 @@ Supports any **OpenAI-compatible API** (OpenAI, OpenRouter, Ollama, etc.). See [
 ```
 picobot version                        # print version
 picobot onboard                        # create config + workspace
+picobot --home /path/to/home onboard   # create config + workspace at custom location
 picobot agent -m "..."                 # one-shot query
 picobot agent -M model -m "..."        # query with specific model
 picobot channels login                 # login to channels (Telegram, Discord, Slack, WhatsApp)
 picobot gateway                        # start long-running agent
+picobot --home /opt/bot2 gateway       # start gateway for a specific instance
 picobot memory read today|long         # read memory
 picobot memory append today|long -c "" # append to memory
 picobot memory write long -c ""        # overwrite long-term memory

@@ -2,9 +2,14 @@ package channels
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -14,10 +19,8 @@ import (
 
 func TestStartTelegramWithBase(t *testing.T) {
 	token := "testtoken"
-	// channel to capture sendMessage posts
 	sent := make(chan url.Values, 4)
 
-	// simple stateful handler: first getUpdates returns one update, subsequent return empty
 	first := true
 	h := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
@@ -53,11 +56,8 @@ func TestStartTelegramWithBase(t *testing.T) {
 	if err := StartTelegramWithBase(ctx, b, token, base, nil); err != nil {
 		t.Fatalf("StartTelegramWithBase failed: %v", err)
 	}
-	// Start the hub router so outbound messages sent to b.Out are dispatched
-	// to each channel's subscription (telegram in this test).
 	b.StartRouter(ctx)
 
-	// Wait for inbound from getUpdates
 	select {
 	case msg := <-b.In:
 		if msg.Content != "hello" {
@@ -70,7 +70,6 @@ func TestStartTelegramWithBase(t *testing.T) {
 		t.Fatal("timeout waiting for inbound message")
 	}
 
-	// send an outbound message and ensure server receives it
 	out := chat.Outbound{Channel: "telegram", ChatID: "456", Content: "reply"}
 	b.Out <- out
 
@@ -83,8 +82,165 @@ func TestStartTelegramWithBase(t *testing.T) {
 		t.Fatal("timeout waiting for sendMessage to be posted")
 	}
 
-	// cancel and allow goroutines to stop
 	cancel()
-	// give a small grace period
 	time.Sleep(50 * time.Millisecond)
+}
+
+func TestTelegramDocumentInbound(t *testing.T) {
+	token := "testtoken"
+	fileContent := "hello file data"
+
+	first := true
+	h := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		if strings.HasSuffix(path, "/getUpdates") {
+			w.Header().Set("Content-Type", "application/json")
+			if first {
+				first = false
+				w.Write([]byte(fmt.Sprintf(`{"ok":true,"result":[{"update_id":2,"message":{"message_id":2,"from":{"id":123},"chat":{"id":456},"caption":"here is a file","document":{"file_id":"doc123","file_name":"test.txt"}}}]}`)))
+				return
+			}
+			w.Write([]byte(`{"ok":true,"result":[]}`))
+			return
+		}
+		if strings.HasSuffix(path, "/getFile") {
+			r.ParseForm()
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"ok":true,"result":{"file_id":"doc123","file_path":"documents/test.txt"}}`))
+			return
+		}
+		if strings.Contains(path, "/file/bot") {
+			w.Write([]byte(fileContent))
+			return
+		}
+		w.WriteHeader(404)
+	}))
+	defer h.Close()
+
+	base := h.URL + "/bot" + token
+	b := chat.NewHub(10)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := StartTelegramWithBase(ctx, b, token, base, nil); err != nil {
+		t.Fatalf("StartTelegramWithBase failed: %v", err)
+	}
+
+	select {
+	case msg := <-b.In:
+		if !strings.Contains(msg.Content, "[File received: test.txt]") {
+			t.Fatalf("expected file info in content, got: %s", msg.Content)
+		}
+		if len(msg.Media) != 1 {
+			t.Fatalf("expected 1 media file, got %d", len(msg.Media))
+		}
+		data, err := os.ReadFile(msg.Media[0])
+		if err != nil {
+			t.Fatalf("failed to read downloaded file: %v", err)
+		}
+		if string(data) != fileContent {
+			t.Fatalf("file content mismatch: got %q, want %q", string(data), fileContent)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout waiting for inbound document message")
+	}
+
+	cancel()
+	time.Sleep(50 * time.Millisecond)
+}
+
+func TestTelegramOutboundWithMedia(t *testing.T) {
+	token := "testtoken"
+	sentDocs := make(chan string, 4)
+
+	tmp := t.TempDir()
+	testFile := filepath.Join(tmp, "output.txt")
+	os.WriteFile(testFile, []byte("output data"), 0o644)
+
+	h := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		if strings.HasSuffix(path, "/getUpdates") {
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"ok":true,"result":[]}`))
+			return
+		}
+		if strings.HasSuffix(path, "/sendDocument") {
+			r.ParseMultipartForm(10 << 20)
+			sentDocs <- r.FormValue("chat_id")
+			file, _, err := r.FormFile("document")
+			if err != nil {
+				t.Errorf("failed to read document from form: %v", err)
+			} else {
+				data, _ := io.ReadAll(file)
+				if string(data) != "output data" {
+					t.Errorf("file content mismatch: got %q", string(data))
+				}
+				file.Close()
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"ok":true,"result":{}}`))
+			return
+		}
+		w.WriteHeader(404)
+	}))
+	defer h.Close()
+
+	base := h.URL + "/bot" + token
+	b := chat.NewHub(10)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := StartTelegramWithBase(ctx, b, token, base, nil); err != nil {
+		t.Fatalf("StartTelegramWithBase failed: %v", err)
+	}
+	b.StartRouter(ctx)
+
+	out := chat.Outbound{
+		Channel: "telegram",
+		ChatID:  "456",
+		Content: "here is the result",
+		Media:   []string{testFile},
+	}
+	b.Out <- out
+
+	select {
+	case chatID := <-sentDocs:
+		if chatID != "456" {
+			t.Fatalf("expected chat_id=456, got %s", chatID)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout waiting for sendDocument")
+	}
+
+	cancel()
+	time.Sleep(50 * time.Millisecond)
+}
+
+func TestTelegramGetFilePath(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/getFile") {
+			r.ParseForm()
+			fileID := r.FormValue("file_id")
+			resp := map[string]interface{}{
+				"ok": true,
+				"result": map[string]string{
+					"file_id":   fileID,
+					"file_path": "photos/file.jpg",
+				},
+			}
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
+		w.WriteHeader(404)
+	}))
+	defer srv.Close()
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	path, err := tgGetFilePath(client, srv.URL, "abc123")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if path != "photos/file.jpg" {
+		t.Fatalf("expected photos/file.jpg, got %s", path)
+	}
 }

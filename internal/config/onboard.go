@@ -11,10 +11,11 @@ import (
 )
 
 // DefaultConfig returns a minimal default Config with sensible defaults.
-func DefaultConfig() Config {
+// homeDir is the picobot home directory used to set default paths (workspace, etc).
+func DefaultConfig(homeDir string) Config {
 	return Config{
 		Agents: AgentsConfig{Defaults: AgentDefaults{
-			Workspace:                   "~/.picobot/workspace",
+			Workspace:                   filepath.Join(homeDir, "workspace"),
 			Model:                       "stub-model",
 			MaxTokens:                   8192,
 			Temperature:                 0.7,
@@ -362,24 +363,29 @@ func extractEmbeddedSkills(targetDir string) error {
 	})
 }
 
-// ResolveDefaultPaths returns absolute paths for the config and workspace based on home directory.
+// ResolvePaths returns absolute paths for the config and workspace based on homeDir.
+func ResolvePaths(homeDir string) (cfgPath string, workspacePath string, err error) {
+	cfgPath = filepath.Join(homeDir, "config.json")
+	workspacePath = filepath.Join(homeDir, "workspace")
+	return cfgPath, workspacePath, nil
+}
+
+// ResolveDefaultPaths returns absolute paths using ~/.picobot as the home directory.
 func ResolveDefaultPaths() (cfgPath string, workspacePath string, err error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", "", err
 	}
-	cfgPath = filepath.Join(home, ".picobot", "config.json")
-	workspacePath = filepath.Join(home, ".picobot", "workspace")
-	return cfgPath, workspacePath, nil
+	return ResolvePaths(filepath.Join(home, ".picobot"))
 }
 
-// Onboard writes default config and initializes the workspace at the user's home.
-func Onboard() (string, string, error) {
-	cfgPath, workspacePath, err := ResolveDefaultPaths()
+// Onboard writes default config and initializes the workspace at homeDir.
+func Onboard(homeDir string) (string, string, error) {
+	cfgPath, workspacePath, err := ResolvePaths(homeDir)
 	if err != nil {
 		return "", "", err
 	}
-	cfg := DefaultConfig()
+	cfg := DefaultConfig(homeDir)
 	// set workspace path in config
 	cfg.Agents.Defaults.Workspace = workspacePath
 	if err := SaveConfig(cfg, cfgPath); err != nil {

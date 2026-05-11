@@ -21,15 +21,25 @@ import (
 type ExecTool struct {
 	timeout    time.Duration
 	allowedDir string
+	allowedDirs []string
 }
 
 func NewExecTool(timeoutSecs int) *ExecTool {
 	return &ExecTool{timeout: time.Duration(timeoutSecs) * time.Second}
 }
 
-// NewExecToolWithWorkspace creates an ExecTool restricted to the provided workspace directory.
 func NewExecToolWithWorkspace(timeoutSecs int, allowedDir string) *ExecTool {
 	return &ExecTool{timeout: time.Duration(timeoutSecs) * time.Second, allowedDir: allowedDir}
+}
+
+func NewExecToolWithAllowedDirs(timeoutSecs int, allowedDir string, allowedDirs []string) *ExecTool {
+	dirs := make([]string, 0, len(allowedDirs))
+	for _, d := range allowedDirs {
+		if d != "" {
+			dirs = append(dirs, filepath.Clean(d))
+		}
+	}
+	return &ExecTool{timeout: time.Duration(timeoutSecs) * time.Second, allowedDir: allowedDir, allowedDirs: dirs}
 }
 
 func (t *ExecTool) Name() string { return "exec" }
@@ -70,11 +80,20 @@ func isDangerousProg(prog string) bool {
 	return ok
 }
 
-func hasUnsafeArg(s string) bool {
-	if strings.HasPrefix(s, "/") || strings.HasPrefix(s, "~") || strings.Contains(s, "..") {
+func hasUnsafeArg(s string, allowedDirs []string) bool {
+	if strings.HasPrefix(s, "~") || strings.Contains(s, "..") {
 		return true
 	}
-	return false
+	if !strings.HasPrefix(s, "/") {
+		return false
+	}
+	cleaned := filepath.Clean(s)
+	for _, d := range allowedDirs {
+		if cleaned == d || strings.HasPrefix(cleaned, d+string(filepath.Separator)) {
+			return false
+		}
+	}
+	return true
 }
 
 func (t *ExecTool) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
@@ -110,7 +129,7 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]interface{}) (st
 		return "", fmt.Errorf("exec: program '%s' is disallowed", prog)
 	}
 	for _, a := range argv[1:] {
-		if hasUnsafeArg(a) {
+		if hasUnsafeArg(a, t.allowedDirs) {
 			return "", fmt.Errorf("exec: argument '%s' looks unsafe", a)
 		}
 	}

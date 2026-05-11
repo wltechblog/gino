@@ -1,23 +1,24 @@
 package channels
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"mime/multipart"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/local/picobot/internal/chat"
 )
 
-// StartTelegram is a convenience wrapper that uses the real polling implementation
-// with the standard Telegram base URL.
-// allowFrom is a list of Telegram user IDs permitted to interact with the bot.
-// If empty, ALL users are allowed (open mode).
 func StartTelegram(ctx context.Context, hub *chat.Hub, token string, allowFrom []string) error {
 	if token == "" {
 		return fmt.Errorf("telegram token not provided")
@@ -26,22 +27,19 @@ func StartTelegram(ctx context.Context, hub *chat.Hub, token string, allowFrom [
 	return StartTelegramWithBase(ctx, hub, token, base, allowFrom)
 }
 
-// StartTelegramWithBase starts long-polling against the given base URL (e.g., https://api.telegram.org/bot<TOKEN> or a test server URL).
-// allowFrom restricts which Telegram user IDs may send messages. Empty means allow all.
 func StartTelegramWithBase(ctx context.Context, hub *chat.Hub, token, base string, allowFrom []string) error {
 	if base == "" {
 		return fmt.Errorf("base URL is required")
 	}
 
-	// Build a fast lookup set for allowed user IDs.
 	allowed := make(map[string]struct{}, len(allowFrom))
 	for _, id := range allowFrom {
 		allowed[id] = struct{}{}
 	}
 
 	client := &http.Client{Timeout: 45 * time.Second}
+	fileBase := strings.Replace(base, "/bot"+token, "/file/bot"+token, 1)
 
-	// inbound polling goroutine
 	go func() {
 		offset := int64(0)
 		for {
@@ -55,8 +53,7 @@ func StartTelegramWithBase(ctx context.Context, hub *chat.Hub, token, base strin
 			values := url.Values{}
 			values.Set("offset", strconv.FormatInt(offset, 10))
 			values.Set("timeout", "30")
-			u := base + "/getUpdates"
-			resp, err := client.PostForm(u, values)
+			resp, err := client.PostForm(base+"/getUpdates", values)
 			if err != nil {
 				log.Printf("telegram getUpdates error: %v", err)
 				time.Sleep(1 * time.Second)
@@ -71,12 +68,24 @@ func StartTelegramWithBase(ctx context.Context, hub *chat.Hub, token, base strin
 					Message  *struct {
 						MessageID int64 `json:"message_id"`
 						From      *struct {
-							ID int64 `json:"id"`
+							ID        int64  `json:"id"`
+							FirstName string `json:"first_name"`
 						} `json:"from"`
 						Chat struct {
 							ID int64 `json:"id"`
 						} `json:"chat"`
-						Text string `json:"text"`
+						Text     string `json:"text"`
+						Caption  string `json:"caption"`
+						Document *struct {
+							FileID   string `json:"file_id"`
+							FileName string `json:"file_name"`
+						} `json:"document"`
+						Photo []struct {
+							FileID   string `json:"file_id"`
+							Width    int    `json:"width"`
+							Height   int    `json:"height"`
+							FileSize int    `json:"file_size"`
+						} `json:"photo"`
 					} `json:"message"`
 				} `json:"result"`
 			}
@@ -96,7 +105,6 @@ func StartTelegramWithBase(ctx context.Context, hub *chat.Hub, token, base strin
 				if m.From != nil {
 					fromID = strconv.FormatInt(m.From.ID, 10)
 				}
-				// Enforce allowFrom: if the list is non-empty, reject unknown senders.
 				if len(allowed) > 0 {
 					if _, ok := allowed[fromID]; !ok {
 						log.Printf("telegram: dropping message from unauthorized user %s", fromID)
@@ -104,35 +112,82 @@ func StartTelegramWithBase(ctx context.Context, hub *chat.Hub, token, base strin
 					}
 				}
 				chatID := strconv.FormatInt(m.Chat.ID, 10)
+				content := m.Text
+				var media []string
+
+				if m.Document != nil {
+					saved, err := tgDownloadFile(client, base, fileBase, m.Document.FileID, m.Document.FileName, chatID)
+					if err != nil {
+						log.Printf("telegram: failed to download document: %v", err)
+						content += "\n[Failed to download attached file: " + m.Document.FileName + "]"
+					} else {
+						media = append(media, saved)
+						if content == "" {
+							content = "[File received: " + m.Document.FileName + "]"
+						} else {
+							content += "\n[File received: " + m.Document.FileName + "]"
+						}
+					}
+				}
+
+				if len(m.Photo) > 0 {
+					photo := m.Photo[len(m.Photo)-1]
+					filename := "photo_" + strconv.FormatInt(time.Now().UnixMilli(), 10) + ".jpg"
+					saved, err := tgDownloadFile(client, base, fileBase, photo.FileID, filename, chatID)
+					if err != nil {
+						log.Printf("telegram: failed to download photo: %v", err)
+						content += "\n[Failed to download attached photo]"
+					} else {
+						media = append(media, saved)
+						if content == "" {
+							content = "[Photo received]"
+						}
+					}
+				}
+
+				if content == "" && len(media) == 0 {
+					continue
+				}
+
 				hub.In <- chat.Inbound{
 					Channel:   "telegram",
 					SenderID:  fromID,
 					ChatID:    chatID,
-					Content:   m.Text,
+					Content:   content,
 					Timestamp: time.Now(),
+					Media:     media,
 				}
 			}
 		}
 	}()
 
-	// Subscribe to the outbound queue before launching the goroutine so the
-	// registration is visible to the hub router from the moment this function returns.
 	outCh := hub.Subscribe("telegram")
 
-	// outbound sender goroutine
 	go func() {
-		client := &http.Client{Timeout: 10 * time.Second}
+		outClient := &http.Client{Timeout: 60 * time.Second}
 		for {
 			select {
 			case <-ctx.Done():
 				log.Println("telegram: stopping outbound sender")
 				return
 			case out := <-outCh:
+				if len(out.Media) > 0 {
+					for i, p := range out.Media {
+						caption := ""
+						if i == 0 {
+							caption = out.Content
+						}
+						if err := tgSendDocument(outClient, base, out.ChatID, p, caption); err != nil {
+							log.Printf("telegram sendDocument error: %v", err)
+						}
+					}
+					continue
+				}
 				u := base + "/sendMessage"
 				v := url.Values{}
 				v.Set("chat_id", out.ChatID)
 				v.Set("text", out.Content)
-				resp, err := client.PostForm(u, v)
+				resp, err := outClient.PostForm(u, v)
 				if err != nil {
 					log.Printf("telegram sendMessage error: %v", err)
 					continue
@@ -143,5 +198,89 @@ func StartTelegramWithBase(ctx context.Context, hub *chat.Hub, token, base strin
 		}
 	}()
 
+	return nil
+}
+
+func tgDownloadFile(client *http.Client, base, fileBase, fileID, filename, chatID string) (string, error) {
+	filePath, err := tgGetFilePath(client, base, fileID)
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Join(os.TempDir(), "picobot-media", chatID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	dest := filepath.Join(dir, filename)
+
+	downloadURL := fileBase + "/" + filePath
+	resp, err := client.Get(downloadURL)
+	if err != nil {
+		return "", fmt.Errorf("download: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("download: status %d", resp.StatusCode)
+	}
+	f, err := os.Create(dest)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	if _, err := io.Copy(f, resp.Body); err != nil {
+		return "", err
+	}
+	return dest, nil
+}
+
+func tgGetFilePath(client *http.Client, base, fileID string) (string, error) {
+	v := url.Values{}
+	v.Set("file_id", fileID)
+	resp, err := client.PostForm(base+"/getFile", v)
+	if err != nil {
+		return "", fmt.Errorf("getFile: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	var result struct {
+		OK   bool `json:"ok"`
+		File struct {
+			FilePath string `json:"file_path"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", fmt.Errorf("getFile parse: %w", err)
+	}
+	if !result.OK || result.File.FilePath == "" {
+		return "", fmt.Errorf("getFile no path: %s", strings.TrimSpace(string(body)))
+	}
+	return result.File.FilePath, nil
+}
+
+func tgSendDocument(client *http.Client, base, chatID, filePath, caption string) error {
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	_ = w.WriteField("chat_id", chatID)
+	if caption != "" {
+		_ = w.WriteField("caption", caption)
+	}
+	part, err := w.CreateFormFile("document", filepath.Base(filePath))
+	if err != nil {
+		return fmt.Errorf("form file: %w", err)
+	}
+	f, err := os.Open(filePath)
+	if err != nil {
+		return fmt.Errorf("open: %w", err)
+	}
+	defer f.Close()
+	if _, err := io.Copy(part, f); err != nil {
+		return fmt.Errorf("copy: %w", err)
+	}
+	w.Close()
+	resp, err := client.Post(base+"/sendDocument", w.FormDataContentType(), &buf)
+	if err != nil {
+		return fmt.Errorf("sendDocument: %w", err)
+	}
+	io.ReadAll(resp.Body)
+	resp.Body.Close()
 	return nil
 }

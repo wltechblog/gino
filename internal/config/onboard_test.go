@@ -42,7 +42,7 @@ func TestInitializeWorkspaceCreatesFiles(t *testing.T) {
 
 func TestSaveAndLoadConfig(t *testing.T) {
 	d := t.TempDir()
-	cfg := DefaultConfig()
+	cfg := DefaultConfig(d)
 	cfg.Agents.Defaults.Workspace = d
 	path := filepath.Join(d, "config.json")
 	if err := SaveConfig(cfg, path); err != nil {
@@ -70,7 +70,7 @@ func TestSaveAndLoadConfig(t *testing.T) {
 }
 
 func TestDefaultConfig_IncludesWhatsApp(t *testing.T) {
-	cfg := DefaultConfig()
+	cfg := DefaultConfig("/tmp/picobot")
 
 	// WhatsApp must be present and disabled by default.
 	if cfg.Channels.WhatsApp.Enabled {
@@ -91,7 +91,7 @@ func TestDefaultConfig_IncludesWhatsApp(t *testing.T) {
 
 func TestDefaultConfig_WhatsAppRoundTrips(t *testing.T) {
 	d := t.TempDir()
-	cfg := DefaultConfig()
+	cfg := DefaultConfig(d)
 	cfg.Channels.WhatsApp = WhatsAppConfig{
 		Enabled:   true,
 		DBPath:    "~/.picobot/whatsapp.db",

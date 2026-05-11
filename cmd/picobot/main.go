@@ -34,6 +34,8 @@ func NewRootCmd() *cobra.Command {
 		Short: "picobot — lightweight clawbot in Go",
 	}
 
+	rootCmd.PersistentFlags().String("home", "", "picobot home directory (default: ~/.picobot)")
+
 	rootCmd.AddCommand(&cobra.Command{
 		Use:   "version",
 		Short: "Print version",
@@ -46,7 +48,8 @@ func NewRootCmd() *cobra.Command {
 		Use:   "onboard",
 		Short: "Create default config and workspace",
 		Run: func(cmd *cobra.Command, args []string) {
-			cfgPath, workspacePath, err := config.Onboard()
+			homeDir := resolveHomeDir(cmd)
+			cfgPath, workspacePath, err := config.Onboard(homeDir)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "onboard failed: %v\n", err)
 				return
@@ -81,12 +84,13 @@ func NewRootCmd() *cobra.Command {
 			choice, _ := reader.ReadString('\n')
 			choice = strings.TrimSpace(strings.ToLower(choice))
 
-			cfg, err := config.LoadConfig()
+			homeDir := resolveHomeDir(cmd)
+			cfg, err := config.LoadConfig(homeDir)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "failed to load config: %v\n", err)
 				return
 			}
-			cfgPath, _, err := config.ResolveDefaultPaths()
+			cfgPath, _, err := config.ResolvePaths(homeDir)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "failed to resolve config path: %v\n", err)
 				return
@@ -100,7 +104,7 @@ func NewRootCmd() *cobra.Command {
 			case "3", "slack":
 				setupSlackInteractive(reader, cfg, cfgPath)
 			case "4", "whatsapp":
-				setupWhatsAppInteractive(cfg, cfgPath)
+				setupWhatsAppInteractive(cfg, cfgPath, homeDir)
 			default:
 				fmt.Fprintf(os.Stderr, "invalid choice %q — please enter 1, 2, 3 or 4\n", choice)
 			}
@@ -121,8 +125,9 @@ func NewRootCmd() *cobra.Command {
 				return
 			}
 
+			homeDir := resolveHomeDir(cmd)
 			hub := chat.NewHub(100)
-			cfg, _ := config.LoadConfig()
+			cfg, _ := config.LoadConfig(homeDir)
 			provider := providers.NewProviderFromConfig(cfg)
 
 			// choose model: flag > config default > provider default
@@ -138,7 +143,12 @@ func NewRootCmd() *cobra.Command {
 			if maxIter <= 0 {
 				maxIter = 100
 			}
-			ag := agent.NewAgentLoop(hub, provider, model, maxIter, cfg.Agents.Defaults.Workspace, nil, cfg.MCPServers)
+			ws := expandWorkspace(cfg.Agents.Defaults.Workspace, homeDir)
+			if err := os.Chdir(ws); err != nil {
+				fmt.Fprintf(os.Stderr, "failed to chdir to workspace %q: %v\n", ws, err)
+				return
+			}
+			ag := agent.NewAgentLoop(hub, provider, model, maxIter, ws, nil, cfg.MCPServers, cfg.Agents.Defaults.AllowedDirs)
 			defer ag.Close()
 			if cfg.Agents.Defaults.EnableToolActivityIndicator != nil && !*cfg.Agents.Defaults.EnableToolActivityIndicator {
 				ag.SetToolActivityIndicator(false)
@@ -160,8 +170,9 @@ func NewRootCmd() *cobra.Command {
 		Use:   "gateway",
 		Short: "Start long-running gateway (agent, channels, heartbeat)",
 		Run: func(cmd *cobra.Command, args []string) {
+			homeDir := resolveHomeDir(cmd)
 			hub := chat.NewHub(200)
-			cfg, _ := config.LoadConfig()
+			cfg, _ := config.LoadConfig(homeDir)
 			provider := providers.NewProviderFromConfig(cfg)
 
 			// choose model: flag > config > provider default
@@ -189,7 +200,12 @@ func NewRootCmd() *cobra.Command {
 			if maxIter <= 0 {
 				maxIter = 100
 			}
-			ag := agent.NewAgentLoop(hub, provider, model, maxIter, cfg.Agents.Defaults.Workspace, scheduler, cfg.MCPServers)
+			ws := expandWorkspace(cfg.Agents.Defaults.Workspace, homeDir)
+			if err := os.Chdir(ws); err != nil {
+				fmt.Fprintf(os.Stderr, "failed to chdir to workspace %q: %v\n", ws, err)
+				return
+			}
+			ag := agent.NewAgentLoop(hub, provider, model, maxIter, ws, scheduler, cfg.MCPServers, cfg.Agents.Defaults.AllowedDirs)
 			defer ag.Close()
 			if cfg.Agents.Defaults.EnableToolActivityIndicator != nil && !*cfg.Agents.Defaults.EnableToolActivityIndicator {
 				ag.SetToolActivityIndicator(false)
@@ -208,7 +224,7 @@ func NewRootCmd() *cobra.Command {
 			if hbInterval <= 0 {
 				hbInterval = 60 * time.Second
 			}
-			heartbeat.StartHeartbeat(ctx, cfg.Agents.Defaults.Workspace, hbInterval, hub)
+			heartbeat.StartHeartbeat(ctx, ws, hbInterval, hub)
 
 			// start telegram if enabled
 			if cfg.Channels.Telegram.Enabled {
@@ -235,12 +251,12 @@ func NewRootCmd() *cobra.Command {
 			if cfg.Channels.WhatsApp.Enabled {
 				dbPath := cfg.Channels.WhatsApp.DBPath
 				if dbPath == "" {
-					dbPath = "~/.picobot/whatsapp.db"
+					dbPath = filepath.Join(homeDir, "whatsapp.db")
 				}
 				// Expand home directory
 				if strings.HasPrefix(dbPath, "~/") {
-					home, _ := os.UserHomeDir()
-					dbPath = filepath.Join(home, dbPath[2:])
+					userHome, _ := os.UserHomeDir()
+					dbPath = filepath.Join(userHome, dbPath[2:])
 				}
 				if err := channels.StartWhatsApp(ctx, hub, dbPath, cfg.Channels.WhatsApp.AllowFrom); err != nil {
 					fmt.Fprintf(os.Stderr, "failed to start whatsapp: %v\n", err)
@@ -276,15 +292,9 @@ func NewRootCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			target := args[0]
-			cfg, _ := config.LoadConfig()
-			ws := cfg.Agents.Defaults.Workspace
-			if ws == "" {
-				ws = "~/.picobot/workspace"
-			}
-			home, _ := os.UserHomeDir()
-			if strings.HasPrefix(ws, "~/") {
-				ws = filepath.Join(home, ws[2:])
-			}
+			homeDir := resolveHomeDir(cmd)
+			cfg, _ := config.LoadConfig(homeDir)
+			ws := expandWorkspace(cfg.Agents.Defaults.Workspace, homeDir)
 			mem := memory.NewMemoryStoreWithWorkspace(ws, 100)
 			switch target {
 			case "today":
@@ -310,15 +320,9 @@ func NewRootCmd() *cobra.Command {
 				fmt.Fprintln(cmd.ErrOrStderr(), "-c content required")
 				return
 			}
-			cfg, _ := config.LoadConfig()
-			ws := cfg.Agents.Defaults.Workspace
-			if ws == "" {
-				ws = "~/.picobot/workspace"
-			}
-			home, _ := os.UserHomeDir()
-			if strings.HasPrefix(ws, "~/") {
-				ws = filepath.Join(home, ws[2:])
-			}
+			homeDir := resolveHomeDir(cmd)
+			cfg, _ := config.LoadConfig(homeDir)
+			ws := expandWorkspace(cfg.Agents.Defaults.Workspace, homeDir)
 			mem := memory.NewMemoryStoreWithWorkspace(ws, 100)
 			switch target {
 			case "today":
@@ -359,15 +363,9 @@ func NewRootCmd() *cobra.Command {
 				fmt.Fprintln(cmd.ErrOrStderr(), "-c content required")
 				return
 			}
-			cfg, _ := config.LoadConfig()
-			ws := cfg.Agents.Defaults.Workspace
-			if ws == "" {
-				ws = "~/.picobot/workspace"
-			}
-			home, _ := os.UserHomeDir()
-			if strings.HasPrefix(ws, "~/") {
-				ws = filepath.Join(home, ws[2:])
-			}
+			homeDir := resolveHomeDir(cmd)
+			cfg, _ := config.LoadConfig(homeDir)
+			ws := expandWorkspace(cfg.Agents.Defaults.Workspace, homeDir)
 			mem := memory.NewMemoryStoreWithWorkspace(ws, 100)
 			if err := mem.WriteLongTerm(content); err != nil {
 				fmt.Fprintln(cmd.ErrOrStderr(), "write failed:", err)
@@ -383,15 +381,9 @@ func NewRootCmd() *cobra.Command {
 		Short: "Show recent N days' notes",
 		Run: func(cmd *cobra.Command, args []string) {
 			days, _ := cmd.Flags().GetInt("days")
-			cfg, _ := config.LoadConfig()
-			ws := cfg.Agents.Defaults.Workspace
-			if ws == "" {
-				ws = "~/.picobot/workspace"
-			}
-			home, _ := os.UserHomeDir()
-			if strings.HasPrefix(ws, "~/") {
-				ws = filepath.Join(home, ws[2:])
-			}
+			homeDir := resolveHomeDir(cmd)
+			cfg, _ := config.LoadConfig(homeDir)
+			ws := expandWorkspace(cfg.Agents.Defaults.Workspace, homeDir)
 			mem := memory.NewMemoryStoreWithWorkspace(ws, 100)
 			out, _ := mem.GetRecentMemories(days)
 			fmt.Fprintln(cmd.OutOrStdout(), out)
@@ -416,15 +408,9 @@ func NewRootCmd() *cobra.Command {
 			}
 			top, _ := cmd.Flags().GetInt("top")
 			verbose, _ := cmd.Flags().GetBool("verbose")
-			cfg, _ := config.LoadConfig()
-			ws := cfg.Agents.Defaults.Workspace
-			if ws == "" {
-				ws = "~/.picobot/workspace"
-			}
-			home, _ := os.UserHomeDir()
-			if strings.HasPrefix(ws, "~/") {
-				ws = filepath.Join(home, ws[2:])
-			}
+			homeDir := resolveHomeDir(cmd)
+			cfg, _ := config.LoadConfig(homeDir)
+			ws := expandWorkspace(cfg.Agents.Defaults.Workspace, homeDir)
 			mem := memory.NewMemoryStoreWithWorkspace(ws, 100)
 			// Build memory items from today's file (split into lines) and long-term memory
 			items := make([]memory.MemoryItem, 0)
@@ -477,6 +463,30 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+func resolveHomeDir(cmd *cobra.Command) string {
+	home, _ := cmd.Flags().GetString("home")
+	if home == "" {
+		userHome, _ := os.UserHomeDir()
+		return filepath.Join(userHome, ".picobot")
+	}
+	if strings.HasPrefix(home, "~/") {
+		userHome, _ := os.UserHomeDir()
+		home = filepath.Join(userHome, home[2:])
+	}
+	return home
+}
+
+func expandWorkspace(ws, homeDir string) string {
+	if ws == "" {
+		return filepath.Join(homeDir, "workspace")
+	}
+	if strings.HasPrefix(ws, "~/") {
+		userHome, _ := os.UserHomeDir()
+		return filepath.Join(userHome, ws[2:])
+	}
+	return ws
 }
 
 // promptLine prints a prompt and returns the trimmed input line.
@@ -646,17 +656,17 @@ func setupSlackInteractive(reader *bufio.Reader, cfg config.Config, cfgPath stri
 	fmt.Println("Slack configured! Run 'picobot gateway' to start.")
 }
 
-func setupWhatsAppInteractive(cfg config.Config, cfgPath string) {
+func setupWhatsAppInteractive(cfg config.Config, cfgPath string, homeDir string) {
 	fmt.Println()
 	fmt.Println("=== WhatsApp Setup ===")
 	fmt.Println()
 
 	dbPath := cfg.Channels.WhatsApp.DBPath
 	if dbPath == "" {
-		dbPath = "~/.picobot/whatsapp.db"
+		dbPath = filepath.Join(homeDir, "whatsapp.db")
 	}
-	home, _ := os.UserHomeDir()
 	if strings.HasPrefix(dbPath, "~/") {
+		home, _ := os.UserHomeDir()
 		dbPath = filepath.Join(home, dbPath[2:])
 	}
 
