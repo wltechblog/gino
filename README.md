@@ -63,25 +63,70 @@ cd picobot
 docker build -t picobot .
 ```
 
-**With brain (recommended):**
-
-```sh
-docker compose -f docker/docker-compose.yml up -d
-```
-
-That starts both Picobot and an Ollama container with the embedding model. Edit `docker/docker-compose.yml` with your API key and channel tokens first.
-
-**Picobot only (no brain):**
+**Just chat (no brain):**
 
 ```sh
 docker run -d --name picobot \
   -e OPENAI_API_KEY="your-key" \
   -e OPENAI_API_BASE="https://openrouter.ai/api/v1" \
-  -e PICOBOT_MODEL="openrouter/free" \
+  -e PICOBOT_MODEL="google/gemini-2.5-flash" \
   -e PICOBOT_MAX_TOKENS=8192 \
   -e PICOBOT_MAX_TOOL_ITERATIONS=200 \
   -e TELEGRAM_BOT_TOKEN="your-token" \
   -e TELEGRAM_ALLOW_FROM="your-user-id" \
+  -v ./picobot-data:/home/picobot/.picobot \
+  --restart unless-stopped \
+  picobot
+```
+
+**With brain — Raspberry Pi (recommended):**
+
+Install Ollama natively (~425MB total vs 3.5GB Docker image):
+
+```sh
+curl -fsSL https://ollama.com/install.sh | sh
+ollama pull nomic-embed-text
+```
+
+Then run Picobot in Docker, pointing to the host's Ollama:
+
+```sh
+docker run -d --name picobot \
+  -e OPENAI_API_KEY="your-key" \
+  -e PICOBOT_MODEL="google/gemini-2.5-flash" \
+  -e PICOBOT_BRAIN_ENABLED=true \
+  -e PICOBOT_BRAIN_EMBEDDING_MODEL=nomic-embed-text \
+  -e PICOBOT_BRAIN_OLLAMA_URL=http://host.docker.internal:11434 \
+  -e TELEGRAM_BOT_TOKEN="your-token" \
+  -e TELEGRAM_ALLOW_FROM="your-user-id" \
+  -v ./picobot-data:/home/picobot/.picobot \
+  --restart unless-stopped \
+  picobot
+```
+
+**With brain — x86 server (Ollama in Docker):**
+
+```sh
+# Build the slim Ollama image (one-time, ~200MB vs 3.5GB official)
+cd docker/ollama-lite && docker build -t ollama-lite . && cd ../..
+
+# Start everything
+docker compose -f docker/docker-compose.yml up -d
+```
+
+Edit `.env` with your API key and channel tokens. See `docker/docker-compose.yml` for all options.
+
+**With brain — remote API (no local Ollama needed):**
+
+```sh
+docker run -d --name picobot \
+  -e OPENAI_API_KEY="your-key" \
+  -e PICOBOT_MODEL="google/gemini-2.5-flash" \
+  -e PICOBOT_BRAIN_ENABLED=true \
+  -e PICOBOT_BRAIN_REMOTE_API_BASE="https://api.openai.com/v1" \
+  -e PICOBOT_BRAIN_REMOTE_API_KEY="your-embedding-key" \
+  -e PICOBOT_BRAIN_REMOTE_MODEL="text-embedding-3-small" \
+  -e TELEGRAM_BOT_TOKEN="your-token" \
   -v ./picobot-data:/home/picobot/.picobot \
   --restart unless-stopped \
   picobot

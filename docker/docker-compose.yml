@@ -1,83 +1,77 @@
-services:
-  # One-shot init: pulls the embedding model into Ollama on first run
-  ollama-init:
-    image: curlimages/curl
-    container_name: ollama-init
-    restart: "no"
-    depends_on:
-      - ollama
-    entrypoint: ["sh", "-c"]
-    command:
-      - |
-        echo "Waiting for Ollama..."
-        until curl -s http://ollama:11434/api/tags > /dev/null 2>&1; do sleep 2; done
-        MODEL=${PICOBOT_BRAIN_EMBEDDING_MODEL:-nomic-embed-text}
-        echo "Pulling embedding model: $MODEL"
-        curl -s http://ollama:11434/api/pull -d "{\"name\": \"$MODEL\"}"
-        echo "Done."
+# Picobot with optional knowledge brain
+#
+# Quick start (brain OFF, just chat):
+#   1. Copy .env.example to .env and fill in your values
+#   2. docker compose up -d picobot
+#
+# With brain (semantic search, knowledge graph):
+#   Option A — Native Ollama (recommended for Raspberry Pi):
+#     curl -fsSL https://ollama.com/install.sh | sh
+#     ollama pull nomic-embed-text
+#     # Then set PICOBOT_BRAIN_OLLAMA_URL=http://host.docker.internal:11434 in .env
+#     docker compose up -d picobot
+#
+#   Option B — Ollama in Docker (x86 servers, not recommended for Pi):
+#     docker compose up -d
+#
+#   Option C — Remote embedding API (no local Ollama needed):
+#     # Set PICOBOT_BRAIN_REMOTE_* vars in .env
+#     docker compose up -d picobot
 
+services:
   picobot:
     build:
       context: ..
       dockerfile: docker/Dockerfile
     container_name: picobot
     restart: unless-stopped
-    depends_on:
-      ollama-init:
-        condition: service_completed_successfully
-      ollama:
-        condition: service_started
     environment:
-      # Required: OpenAI-compatible API key (works with OpenRouter, OpenAI, etc.)
+      # --- Required ---
       - OPENAI_API_KEY=${OPENAI_API_KEY:-sk-or-v1-REPLACE_ME}
-      # Optional: OpenAI-compatible API base URL
+      # --- LLM Provider ---
       - OPENAI_API_BASE=${OPENAI_API_BASE:-https://openrouter.ai/api/v1}
-      # Required: The LLM model to use
       - PICOBOT_MODEL=${PICOBOT_MODEL:-google/gemini-2.5-flash}
-      # Optional: Maximum tokens for LLM responses (default: 8192)
       - PICOBOT_MAX_TOKENS=${PICOBOT_MAX_TOKENS:-8192}
-      # Optional: Maximum tool iterations per request (default: 100)
       - PICOBOT_MAX_TOOL_ITERATIONS=${PICOBOT_MAX_TOOL_ITERATIONS:-100}
-      # Optional: Show tool activity indicators during tool calls (default: true).
       - PICOBOT_ENABLE_TOOL_ACTIVITY_INDICATOR=${PICOBOT_ENABLE_TOOL_ACTIVITY_INDICATOR:-true}
-      # Optional: Telegram bot token from @BotFather
+      # --- Telegram ---
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
-      # Optional: Comma-separated Telegram user IDs allowed to chat
       - TELEGRAM_ALLOW_FROM=${TELEGRAM_ALLOW_FROM:-}
-      # Optional: Discord bot token from Developer Portal
+      # --- Discord ---
       - DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN:-}
-      # Optional: Comma-separated Discord user IDs allowed to chat
       - DISCORD_ALLOW_FROM=${DISCORD_ALLOW_FROM:-}
-      # Optional: Slack App-Level Token (xapp-...), also enables the channel
+      # --- Slack ---
       - SLACK_APP_TOKEN=${SLACK_APP_TOKEN:-}
-      # Optional: Slack Bot Token (xoxb-...), also enables the channel
       - SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN:-}
-      # Optional: Comma-separated Slack user IDs allowed to chat
       - SLACK_ALLOW_USERS=${SLACK_ALLOW_USERS:-}
-      # Optional: Comma-separated Slack channel IDs allowed to chat
       - SLACK_ALLOW_CHANNELS=${SLACK_ALLOW_CHANNELS:-}
-      # Brain / Knowledge System
-      - PICOBOT_BRAIN_ENABLED=${PICOBOT_BRAIN_ENABLED:-true}
+      # --- Knowledge Brain ---
+      - PICOBOT_BRAIN_ENABLED=${PICOBOT_BRAIN_ENABLED:-false}
       - PICOBOT_BRAIN_EMBEDDING_MODEL=${PICOBOT_BRAIN_EMBEDDING_MODEL:-nomic-embed-text}
-      - PICOBOT_BRAIN_OLLAMA_URL=http://ollama:11434
+      - PICOBOT_BRAIN_OLLAMA_URL=${PICOBOT_BRAIN_OLLAMA_URL:-http://ollama:11434}
+      # --- Remote embedding fallback ---
+      - PICOBOT_BRAIN_REMOTE_API_BASE=${PICOBOT_BRAIN_REMOTE_API_BASE:-}
+      - PICOBOT_BRAIN_REMOTE_API_KEY=${PICOBOT_BRAIN_REMOTE_API_KEY:-}
+      - PICOBOT_BRAIN_REMOTE_MODEL=${PICOBOT_BRAIN_REMOTE_MODEL:-}
     volumes:
-      # Persist config, workspace, memory, skills, and brain database
       - ./picobot-data:/home/picobot/.picobot
+    # Uncomment if using the ollama service below
+    # depends_on:
+    #   ollama:
 
-  ollama:
-    image: ollama/ollama
-    container_name: ollama
-    restart: unless-stopped
-    volumes:
-      - ollama-data:/root/.ollama
-    # Uncomment for GPU acceleration (NVIDIA)
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: 1
-    #           capabilities: [gpu]
+  # Ollama for local embeddings — works on x86 servers.
+  # For Raspberry Pi, install Ollama natively instead (see comments above).
+  # To build the slim image:
+  #   cd docker/ollama-lite && docker build -t ollama-lite .
+  #
+  # ollama:
+  #   image: ollama-lite
+  #   container_name: ollama
+  #   restart: unless-stopped
+  #   volumes:
+  #     - ollama-data:/root/.ollama
+  #   ports:
+  #     - "11434:11434"
 
-volumes:
-  ollama-data:
+# volumes:
+#   ollama-data:
