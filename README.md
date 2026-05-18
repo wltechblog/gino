@@ -1,213 +1,172 @@
 <p align="center">
   <img src="docs/logo.png" alt="Picobot" width="250" height="150">
   <h1 align="center">Picobot</h1>
-  <p align="center"><strong>The AI agent that runs anywhere — even on a $5 VPS.</strong></p>
+  <p align="center"><strong>Your AI agent. On your hardware. Under your control.</strong></p>
   <p align="center">
-    <img src="https://img.shields.io/badge/binary-~9MB-brightgreen" alt="Binary Size">
+    <img src="https://img.shields.io/badge/binary-~12MB-brightgreen" alt="Binary Size">
     <img src="https://img.shields.io/badge/RAM-~10MB-orange" alt="Memory Usage">
     <img src="https://img.shields.io/badge/built_with-Go-00ADD8?logo=go" alt="Go">
     <img src="https://img.shields.io/badge/license-MIT-yellow" alt="License">
-    <img src="https://img.shields.io/docker/pulls/louisho5/picobot?logo=docker" alt="Docker Pulls">
-    <img src="https://github.com/louisho5/picobot/actions/workflows/docker-publish.yml/badge.svg" alt="Workflow">
   </p>
 </p>
 
+Picobot is a self-hosted AI agent written in Go. One binary, zero dependencies, runs on a Raspberry Pi or a $5 VPS. It talks to any OpenAI-compatible LLM (OpenRouter, Ollama, OpenAI, etc.) and connects to Telegram, Discord, Slack, or WhatsApp.
+
+This is the [WLTechBlog](https://youtube.com/@wltechblog) fork with a built-in knowledge brain, single-channel builds, and a focus on privacy-first operation.
+
 ---
 
-Love the idea of open-source AI agents like [OpenClaw](https://github.com/openclaw/openclaw) but tired of the bloat? **Picobot** gives you the same power — persistent memory, tool calling, skills, Telegram and Discord integration — in a single ~9MB binary that boots in milliseconds.
+## Why Picobot over OpenClaw?
 
-No Python. No Node. No 500MB container. Just one Go binary and a config file.
+Picobot takes direct inspiration from [OpenClaw](https://github.com/openclaw/openclaw) — same concepts (tools, skills, memory, heartbeats, cron) — but built for people who want to own their infrastructure instead of renting it.
 
-## Why Picobot?
-
-| | Picobot | Typical Agent Frameworks |
+| | Picobot | OpenClaw |
 |---|---|---|
-| **Binary size** | ~9MB | 200MB+ (Python + deps) |
-| **Docker image** | ~29MB (Alpine) | 500MB–1GB+ |
+| **Runtime** | Single Go binary (~12MB) | Node.js (~200MB+) |
+| **RAM** | ~10MB idle | ~200MB–1GB |
 | **Cold start** | Instant | 5–30 seconds |
-| **RAM usage** | ~10MB idle | 200MB–1GB |
-| **Dependencies** | Zero (single binary) | Python, pip, venv, Node… |
+| **Raspberry Pi** | First-class citizen | Painful on ARM |
+| **Language** | Go (static, cross-compiles) | JavaScript/TypeScript |
+| **License** | MIT | MIT |
+| **Memory system** | File-based + optional SQLite brain | File-based |
+| **Semantic search** | Built-in (FTS5 + vector + RRF) | External tooling |
+| **Knowledge graph** | Built-in (auto-extracted entities) | Not included |
 
-Picobot runs happily on a **$5/mo VPS**, a Raspberry Pi, or even an old Android phone via Termux.
+If you're running a Pi, a small VPS, or just want an agent that starts instantly and sips RAM — Picobot is it.
 
-## Quick Start — 30 seconds
+---
 
-### Docker Run
+## Quick Start
+
+### From Source
+
+```sh
+git clone https://github.com/WLTBAgent/picobot.git
+cd picobot
+make build                    # full build with all channels (~22MB)
+./picobot onboard             # creates ~/.picobot with config + workspace
+```
+
+Edit `~/.picobot/config.json` with your API key and channel tokens, then:
+
+```sh
+./picobot gateway             # starts the agent with all enabled channels
+```
+
+### Docker
 
 ```sh
 docker run -d --name picobot \
   -e OPENAI_API_KEY="your-key" \
   -e OPENAI_API_BASE="https://openrouter.ai/api/v1" \
-  -e PICOBOT_MODEL="openrouter/free" \
-  -e PICOBOT_MAX_TOKENS=8192 \
-  -e PICOBOT_MAX_TOOL_ITERATIONS=100 \
-  -e TELEGRAM_BOT_TOKEN="your-telegram-token" \
   -v ./picobot-data:/home/picobot/.picobot \
-  --restart unless-stopped \
   louisho5/picobot:latest
 ```
 
-All config, memory, and skills are persisted in `./picobot-data` on your host.
-
-### Docker Compose
-
-Create a `docker-compose.yml`:
-
-```yaml
-services:
-  picobot:
-    image: louisho5/picobot:latest
-    container_name: picobot
-    restart: unless-stopped
-    environment:
-      - OPENAI_API_KEY=your-key
-      - OPENAI_API_BASE=https://openrouter.ai/api/v1
-      - PICOBOT_MODEL=openrouter/free
-      - PICOBOT_MAX_TOKENS=8192
-      - PICOBOT_MAX_TOOL_ITERATIONS=100
-      - TELEGRAM_BOT_TOKEN=your-telegram-token
-      - TELEGRAM_ALLOW_FROM=your-user-id
-    volumes:
-      - ./picobot-data:/home/picobot/.picobot
-```
-
-Then run:
+### Single-Command Build Variants
 
 ```sh
-docker compose up -d
+make build              # all channels (~22MB)
+make build-telegram     # Telegram only (~12MB)
+make build-discord      # Discord only (~13MB)
+make build-slack        # Slack only (~13MB)
+make build-lite         # no WhatsApp (~14MB)
 ```
 
-### From Source
+### Cross-Compile
 
 ```sh
-go build -o picobot ./cmd/picobot
-./picobot onboard                     # creates ~/.picobot config + workspace
-./picobot agent -m "Hello!"           # single-shot query
-./picobot channels login              # login to channels (Telegram, Discord, Slack, WhatsApp)
-./picobot gateway                     # long-running mode with Telegram
+# For a Raspberry Pi
+GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -ldflags="-s -w" -o picobot ./cmd/picobot
+
+# For a Linux VPS
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="-s -w" -o picobot ./cmd/picobot
 ```
 
-### Running Multiple Instances
+Works on any Linux with 256MB RAM. Copy the binary and run.
 
-Use `--home` to run separate picobot instances with independent configs and workspaces:
+---
+
+## The Knowledge Brain
+
+Picobot includes an optional SQLite-backed knowledge system ([picobot-brain](https://github.com/WLTBAgent/picobot-brain)) that gives your agent real memory — not just flat files.
+
+**What it adds:**
+- **Hybrid search** — FTS5 keyword + vector semantic similarity, merged via Reciprocal Rank Fusion
+- **Knowledge graph** — auto-extracted entities and relationships from `[[wikilinks]]`, `@mentions`, and text patterns
+- **Automatic context** — before every LLM call, the brain searches for relevant context and injects it into the system prompt
+- **Content dedup** — SHA-256 hashing prevents importing the same content twice
+
+**It's optional and backward-compatible.** If you don't enable it, Picobot works exactly as before with its file-based memory system.
+
+### Enabling the Brain
+
+Add to `~/.picobot/config.json`:
+
+```json
+{
+  "brain": {
+    "enabled": true,
+    "embeddingModel": "nomic-embed-text"
+  }
+}
+```
+
+On first run, the brain auto-imports everything in `~/.picobot/workspace/memory/` — your existing daily notes and MEMORY.md become searchable instantly.
+
+### Setting Up Embeddings
+
+For semantic search you need an embedding model. The easiest path is [Ollama](https://ollama.com):
 
 ```sh
-./picobot --home /opt/bot1 onboard
-./picobot --home /opt/bot1 gateway &
+# Install Ollama (one line)
+curl -fsSL https://ollama.com/install.sh | sh
 
-./picobot --home /opt/bot2 onboard
-./picobot --home /opt/bot2 gateway &
+# Pull the embedding model (~274MB, runs on Pi 5)
+ollama pull nomic-embed-text
 ```
 
-All subcommands respect the `--home` flag. Default is `~/.picobot`.
+Or use Docker:
 
-## Architecture
+```sh
+docker run -d --name ollama -p 11434:11434 ollama/ollama
+docker exec ollama ollama pull nomic-embed-text
+```
 
-Actually the logic is simple and straightforward. Messages flow through a **Chat Hub** (inbound/outbound channels) into the **Agent Loop**, which builds context from memory/sessions/skills, calls the LLM via OpenAI-compatible API, and executes tools (filesystem, exec, web, etc.) before sending replies back through the hub.
+Picobot auto-detects Ollama at `localhost:11434`. No additional config needed.
 
-<p>
-  <img src="docs/how-it-works.png" alt="How Picobot Works" width="600">
-</p>
+See [picobot-brain docs](https://github.com/WLTBAgent/picobot-brain/blob/main/docs/OLLAMA_SETUP.md) for cloud API fallback, Pi Zero setup, and troubleshooting.
 
-Notes: Channel refers to communication channels (e.g., Telegram, Discord, Slack, WhatsApp, etc.).
+### Brain Tools
 
-## Features
-
-### 16 Built-in Tools + MCP Extensions
-
-The agent can take real actions — not just chat:
+When enabled, the agent gets five new tools:
 
 | Tool | What it does |
 |------|-------------|
-| `filesystem` | Read, write, list files |
-| `exec` | Run shell commands |
-| `web` | Fetch web pages and APIs |
-| `web_search` | Search the web via DuckDuckGo |
-| `message` | Send messages to channels |
-| `spawn` | Launch background subagents |
-| `cron` | Schedule recurring tasks |
-| `write_memory` | Persist information across sessions |
-| `list_memory` | List all memory files |
-| `read_memory` | Read a specific memory file |
-| `edit_memory` | Find and replace text in a memory file |
-| `delete_memory` | Delete a daily memory file |
-| `create_skill` | Create reusable skill packages |
-| `list_skills` | List available skills |
-| `read_skill` | Read a skill's content |
-| `delete_skill` | Remove a skill |
+| `brain_search` | Hybrid search across all ingested content |
+| `brain_ingest` | Import a file or directory into the brain |
+| `brain_entity` | Look up an entity and its relationships |
+| `brain_status` | Show brain statistics (pages, entities, embeddings) |
+| `brain_maintain` | Backfill embeddings, extract entities, prune orphans |
 
-**MCP Servers:** extend the agent with any [MCP-compliant](https://modelcontextprotocol.io) server — `npx`, `uvx`, a plain binary, `docker run`, or an HTTP endpoint. Tools are registered automatically as `mcp_{server}_{tool}` at startup. See [CONFIG.md](docs/CONFIG.md#mcpservers).
+### No Ollama? No Problem
 
-### Persistent Memory
+The brain runs in **FTS5-only mode** without any embedding provider. You still get keyword search with BM25 ranking — better than the default memory system. Just enable the brain without configuring any embedding provider:
 
-Picobot remembers things between conversations:
-
-- **Daily notes** — auto-organized by date
-- **Long-term memory** — survives restarts
-- **Ranked recall** — retrieves the most relevant memories for each query
-
-```sh
-picobot memory recent --days 7     # what happened this week?
-picobot memory rank -q "meeting"   # find relevant memories
+```json
+{
+  "brain": {
+    "enabled": true,
+    "embeddingDims": 0
+  }
+}
 ```
 
-### Skills System
-
-Teach your agent new tricks. Skills are modular knowledge packages that extend the agent:
-
-```sh
-You: "Create a skill for checking weather using curl wttr.in"
-Agent: Created skill "weather" — I'll use it from now on.
-```
-
-Skills are just markdown files in `~/.picobot/workspace/skills/`. Create them via the agent or manually.
-
-### Telegram Integration
-
-Chat with your agent from your phone. Set up in 2 minutes:
-
-1. Message [@BotFather](https://t.me/BotFather) — `/newbot` — copy the token
-2. Add the token to config or pass as `TELEGRAM_BOT_TOKEN` env var
-3. Start the communication gateway
-
-Telegram supports **file transfer** — send documents and photos to the agent (they're downloaded and made available in the workspace), and the agent can send files back. Received files are saved to `/tmp/picobot-media/<chatID>/` and the agent is told their location. To send files back, the agent includes file paths in outbound messages.
-
-See [HOW_TO_START.md](docs/HOW_TO_START.md) for a detailed BotFather walkthrough.
-
-### Discord Integration
-
-Connect your agent to Discord servers:
-
-1. Go to [Discord Developer Portal](https://discord.com/developers/applications)
-2. Create a new application and bot
-3. Enable **Message Content Intent** in Bot settings
-4. Copy the bot token
-5. Add to config under `channels.discord` in your `config.json`
-
-The bot will respond when mentioned in servers, or to all messages in DMs.
-
-See [HOW_TO_START.md](docs/HOW_TO_START.md) for a detailed Discord Bot walkthrough.
-
-### Slack Integration
-
-Connect your agent to Slack via Socket Mode:
-
-1. Go to [Slack API Apps](https://api.slack.com/apps) and create an app
-2. Enable **Socket Mode** and generate an App-Level Token (`xapp-...`)
-3. Add Bot Token scopes: `app_mentions:read`, `chat:write`, `channels:history`, `groups:history`, `im:history`, `mpim:history`, `files:read`
-4. Enable Event Subscriptions and subscribe to: `app_mention`, `message.im`
-5. Install the app to your workspace and copy the Bot Token (`xoxb-...`)
-6. Add to config under `channels.slack` in your `config.json`
-
-The bot responds when mentioned in channels, and responds to all DMs from allowed users (DMs ignore the channel allowlist).
-
-### Heartbeat
-
-A configurable periodic check (default: 60s) that reads `HEARTBEAT.md` for scheduled tasks — like a personal cron with natural language.
+---
 
 ## Configuration
 
-Picobot uses a single JSON config at `~/.picobot/config.json` (or `<home>/config.json` when `--home` is set):
+Picobot uses a single JSON config at `~/.picobot/config.json`:
 
 ```json
 {
@@ -217,6 +176,8 @@ Picobot uses a single JSON config at `~/.picobot/config.json` (or `<home>/config
       "maxTokens": 8192,
       "temperature": 0.7,
       "maxToolIterations": 200,
+      "heartbeatIntervalS": 60,
+      "workspace": "",
       "allowedDirs": ["/home/user/projects", "/tmp"]
     }
   },
@@ -226,6 +187,11 @@ Picobot uses a single JSON config at `~/.picobot/config.json` (or `<home>/config
       "apiBase": "https://openrouter.ai/api/v1"
     }
   },
+  "brain": {
+    "enabled": true,
+    "embeddingModel": "nomic-embed-text",
+    "ollamaUrl": "http://localhost:11434"
+  },
   "channels": {
     "telegram": {
       "enabled": true,
@@ -233,29 +199,99 @@ Picobot uses a single JSON config at `~/.picobot/config.json` (or `<home>/config
       "allowFrom": ["YOUR_TELEGRAM_USER_ID"]
     },
     "discord": {
-      "enabled": true,
-      "token": "YOUR_DISCORD_BOT_TOKEN",
-      "allowFrom": ["YOUR_DISCORD_USER_ID"]
+      "enabled": false,
+      "token": "",
+      "allowFrom": []
+    },
+    "slack": {
+      "enabled": false,
+      "appToken": "",
+      "botToken": "",
+      "allowUsers": [],
+      "allowChannels": []
+    },
+    "whatsapp": {
+      "enabled": false,
+      "allowFrom": []
     }
-  }
+  },
+  "mcpServers": {}
 }
 ```
 
-**`allowedDirs`** — a list of directories the `exec` tool is permitted to access with absolute paths. The workspace directory is always allowed implicitly. Paths containing `..` or `~` are always rejected.
+### Key Config Fields
 
-Supports any **OpenAI-compatible API** (OpenAI, OpenRouter, Ollama, etc.). See [CONFIG.md](docs/CONFIG.md) for more details.
+| Field | Description |
+|-------|-------------|
+| `agents.defaults.model` | LLM model identifier (provider-specific) |
+| `agents.defaults.maxTokens` | Max response tokens |
+| `agents.defaults.maxToolIterations` | Max tool call loops per message |
+| `agents.defaults.heartbeatIntervalS` | Heartbeat check interval in seconds |
+| `agents.defaults.allowedDirs` | Directories the exec tool can access |
+| `providers.openai.apiKey` | API key for the LLM provider |
+| `providers.openai.apiBase` | API base URL (OpenRouter, Ollama, etc.) |
+| `brain.enabled` | Enable the knowledge brain |
+| `brain.embeddingModel` | Ollama model name for embeddings |
+| `brain.ollamaUrl` | Ollama server URL (default: `http://localhost:11434`) |
+| `brain.remoteApiBase` | Fallback remote API URL for embeddings |
+| `brain.remoteApiKey` | Fallback remote API key |
+| `brain.remoteModel` | Fallback remote embedding model name |
+| `mcpServers` | Map of MCP server configs (see [CONFIG.md](docs/CONFIG.md)) |
+
+Supports any **OpenAI-compatible API**: OpenAI, OpenRouter, Ollama, Groq, Together, etc.
+
+---
+
+## Built-in Tools
+
+| Tool | What it does |
+|------|-------------|
+| `filesystem` | Read, write, list files in workspace |
+| `exec` | Run shell commands (sandboxed to allowedDirs) |
+| `web` | Fetch web pages and APIs |
+| `web_search` | Search the web via DuckDuckGo |
+| `message` | Send messages to channels |
+| `spawn` | Launch background subagents |
+| `cron` | Schedule recurring tasks |
+| `write_memory` | Write to daily or long-term memory |
+| `read_memory` | Read a memory file |
+| `edit_memory` | Find and replace in a memory file |
+| `list_memory` | List all memory files |
+| `delete_memory` | Delete a daily memory file |
+| `create_skill` | Create a skill from markdown |
+| `read_skill` | Read a skill's content |
+| `list_skills` | List available skills |
+| `delete_skill` | Remove a skill |
+
+Plus 5 brain tools when the knowledge brain is enabled (see above).
+
+**MCP Servers:** extend with any [Model Context Protocol](https://modelcontextprotocol.io) server — a binary, `npx`, `uvx`, `docker run`, or HTTP endpoint. Tools register automatically as `mcp_{server}_{tool}`. See [CONFIG.md](docs/CONFIG.md#mcpservers).
+
+---
+
+## Skills System
+
+Teach your agent new tricks. Skills are markdown files in `~/.picobot/workspace/skills/`:
+
+```
+You: "Create a skill for checking weather using curl wttr.in"
+Agent: Created skill "weather" — I'll use it from now on.
+```
+
+The agent creates them via the `create_skill` tool or you can write them manually. They're loaded into the system prompt automatically.
+
+---
 
 ## CLI Reference
 
 ```
 picobot version                        # print version
 picobot onboard                        # create config + workspace
-picobot --home /path/to/home onboard   # create config + workspace at custom location
+picobot --home /path onboard           # use custom home directory
 picobot agent -m "..."                 # one-shot query
 picobot agent -M model -m "..."        # query with specific model
-picobot channels login                 # login to channels (Telegram, Discord, Slack, WhatsApp)
+picobot channels login                 # interactive channel setup
 picobot gateway                        # start long-running agent
-picobot --home /opt/bot2 gateway       # start gateway for a specific instance
 picobot memory read today|long         # read memory
 picobot memory append today|long -c "" # append to memory
 picobot memory write long -c ""        # overwrite long-term memory
@@ -263,66 +299,59 @@ picobot memory recent --days N         # recent N days
 picobot memory rank -q "query"         # semantic memory search
 ```
 
-## Run on Minimal Hardware
-
-Picobot was designed for constrained environments:
+Multiple instances with `--home`:
 
 ```sh
-# Raspberry Pi / ARM device
-GOARCH=arm64 CGO_ENABLED=0 go build -ldflags="-s -w" -o picobot ./cmd/picobot
+picobot --home /opt/bot1 onboard
+picobot --home /opt/bot1 gateway &
 
-# Old x86 VPS
-GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="-s -w" -o picobot ./cmd/picobot
+picobot --home /opt/bot2 onboard
+picobot --home /opt/bot2 gateway &
 ```
 
-Works on any Linux with 256MB RAM. No runtime dependencies. Just copy the binary and run.
-
-## Tech Stack
-
-| Layer | Technology |
-|-------|------------|
-| Language | [Go](https://go.dev/) 1.26+ |
-| CLI framework | [Cobra](https://github.com/spf13/cobra) |
-| LLM providers | OpenAI-compatible API (OpenAI, OpenRouter, Ollama, etc.) |
-| Telegram | Raw Bot API |
-| Discord | [discordgo](https://github.com/bwmarrin/discordgo) library |
-| WhatsApp | [whatsmeow](https://github.com/tulir/whatsmeow) and [modernc.org/sqlite](https://gitlab.com/cznic/sqlite) |
-| Container | Alpine Linux 3.20 (multi-stage Docker build) |
-
-Picobot is written **100%** in pure Go, without any CGO dependencies. All required libraries and assets are statically embedded into the final binary. This design ensures zero external runtime dependencies, fast cold start times, and full portability across all platforms supported by Go.
+---
 
 ## Project Structure
 
 ```
 cmd/picobot/          CLI entry point
-embeds/               Embedded assets (sample skills)
 internal/
-  agent/              Agent loop, context, tools, skills
-  chat/               Chat message hub
+  agent/              Agent loop, context builder, tools, skills
+    memory/           File-based memory store + ranking
+    tools/            All tool implementations (including brain)
   channels/           Telegram, Discord, Slack, WhatsApp
+  chat/               Chat message hub
   config/             Config schema, loader, onboarding
   cron/               Cron scheduler
   heartbeat/          Periodic task checker
-  memory/             Memory read/write/rank
-  providers/          OpenAI-compatible provider
+  mcp/                MCP client (stdio + HTTP)
+  providers/          OpenAI-compatible LLM provider
   session/            Session manager
 docker/               Dockerfile, compose, entrypoint
 ```
 
-## Roadmap
+---
 
-| Task                                   | Status       |
-|----------------------------------------|--------------|
-| Add Telegram support                   | ✔️ Completed |
-| Add Discord support                    | ✔️ Completed |
-| Add Slack support                      | ✔️ Completed |
-| Add WhatsApp support                   | ✔️ Completed |
-| AI agent with skill creation capability | ✔️ Completed |
-| Integrate with MCP Servers             | ✔️ Completed |
-| Integrate useful default skills        | 🔄 In Progress|
-| Add more tools (file processing, etc.) | 🔄 In Progress|
+## Running on a Raspberry Pi
 
-Want to contribute? **Open an issue** or **PR** with your ideas!
+Picobot is designed for constrained hardware. Build for ARM:
+
+```sh
+GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -ldflags="-s -w" -tags only_telegram -o picobot ./cmd/picobot
+```
+
+The `only_telegram` build tag strips Discord, Slack, and WhatsApp — drops the binary from ~22MB to ~12MB.
+
+For the knowledge brain, run Ollama locally:
+
+```sh
+curl -fsSL https://ollama.com/install.sh | sh
+ollama pull nomic-embed-text
+```
+
+nomic-embed-text uses ~300MB RAM on a Pi 5. If that's too much, enable the brain without embeddings (FTS5-only) — it still works great.
+
+---
 
 ## Docs
 
@@ -330,6 +359,8 @@ Want to contribute? **Open an issue** or **PR** with your ideas!
 - [CONFIG.md](docs/CONFIG.md) — full configuration reference
 - [DEVELOPMENT.md](docs/DEVELOPMENT.md) — development, testing, and Docker publishing
 - [docker/README.md](docker/README.md) — Docker deployment guide
+
+---
 
 ## License
 
