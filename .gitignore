@@ -36,4 +36,5 @@ Thumbs.db
 
 # Misc
 *.log
-*.psdollama-bin/
+*.psd
+ollama-bin/
