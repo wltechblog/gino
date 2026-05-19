@@ -38,3 +38,4 @@ Thumbs.db
 *.log
 *.psd
 ollama-bin/
+!ollama-bin/.gitkeep

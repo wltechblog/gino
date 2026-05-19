@@ -10,6 +10,8 @@ if command -v ollama &>/dev/null; then
     if [ "$BRAIN_ENABLED" = "true" ] || [ "$BRAIN_ENABLED" = "1" ]; then
         echo "Starting Ollama server..."
         export LD_LIBRARY_PATH="/lib/ollama${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+        # Ensure the models directory exists and is writable
+        mkdir -p "${PICOBOT_HOME}/.ollama/models"
         OLLAMA_MODELS="${PICOBOT_HOME}/.ollama/models" ollama serve &>/tmp/ollama.log &
         OLLAMA_PID=$!
 
