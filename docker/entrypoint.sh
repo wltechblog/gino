@@ -9,15 +9,32 @@ if command -v ollama &>/dev/null; then
     BRAIN_ENABLED="${PICOBOT_BRAIN_ENABLED:-false}"
     if [ "$BRAIN_ENABLED" = "true" ] || [ "$BRAIN_ENABLED" = "1" ]; then
         echo "Starting Ollama server..."
+        export LD_LIBRARY_PATH="/lib/ollama${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
         OLLAMA_MODELS="${PICOBOT_HOME}/.ollama/models" ollama serve &>/tmp/ollama.log &
+        OLLAMA_PID=$!
+
         # Wait for Ollama to be ready
+        READY=false
         for i in $(seq 1 30); do
             if curl -s http://localhost:11434/api/tags >/dev/null 2>&1; then
-                echo "Ollama ready."
+                echo "Ollama ready (pid $OLLAMA_PID)."
+                READY=true
                 break
+            fi
+            # Check if ollama died
+            if ! kill -0 $OLLAMA_PID 2>/dev/null; then
+                echo "ERROR: Ollama crashed. Last log lines:"
+                cat /tmp/ollama.log 2>/dev/null
+                exit 1
             fi
             sleep 1
         done
+
+        if [ "$READY" = "false" ]; then
+            echo "ERROR: Ollama did not start within 30s. Log:"
+            cat /tmp/ollama.log 2>/dev/null
+            exit 1
+        fi
 
         # Auto-pull embedding model if not present
         MODEL="${PICOBOT_BRAIN_EMBEDDING_MODEL:-nomic-embed-text}"
