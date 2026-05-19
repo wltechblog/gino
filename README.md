@@ -267,7 +267,7 @@ Picobot uses a single JSON config at `~/.picobot/config.json`:
       "maxTokens": 8192,
       "temperature": 0.7,
       "maxToolIterations": 200,
-      "heartbeatIntervalS": 60,
+      "heartbeatIntervalS": 900,
       "workspace": "",
       "allowedDirs": ["/home/user/projects", "/tmp"]
     }

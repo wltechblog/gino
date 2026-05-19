@@ -20,7 +20,7 @@ func DefaultConfig(homeDir string) Config {
 			MaxTokens:                   8192,
 			Temperature:                 0.7,
 			MaxToolIterations:           100,
-			HeartbeatIntervalS:          60,
+			HeartbeatIntervalS:          900,
 			RequestTimeoutS:             60,
 			EnableToolActivityIndicator: boolPtr(true),
 			EnableToolCallMessages:      boolPtr(false),
