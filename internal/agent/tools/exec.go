@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -254,6 +255,8 @@ func (t *ExecTool) isDirAllowed(dir string) bool {
 
 func (t *ExecTool) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
 	cmdRaw, ok := args["cmd"]
+	log.Printf("[DEBUG-EXEC] cmdRaw type: %T, value: %v", cmdRaw, cmdRaw)
+
 	if !ok {
 		return "", fmt.Errorf("exec: 'cmd' argument required")
 	}
@@ -367,8 +370,10 @@ func (t *ExecTool) runCmd(ctx context.Context, prog string, args []string, dir s
 	if dir != "" {
 		cmd.Dir = dir
 	}
+	log.Printf("[DEBUG-EXEC] runCmd: prog=%s args=%v dir=%s", prog, args, dir)
 	b, err := cmd.CombinedOutput()
 	if err != nil {
+		log.Printf("[DEBUG-EXEC] error: %v, output: %s", err, string(b))
 		return string(b), fmt.Errorf("exec error: %w", err)
 	}
 	out := string(b)
