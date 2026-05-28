@@ -1,6 +1,6 @@
 module github.com/local/picobot
 
-go 1.26
+go 1.26.3
 
 require (
 	github.com/WLTBAgent/picobot-brain v0.0.0-20260518212548-e28c9aba243b
