@@ -27,7 +27,7 @@ import (
 	picosignal "github.com/local/picobot/internal/signal"
 )
 
-const version = "0.3.0"
+const version = "0.4.0"
 
 func NewRootCmd() *cobra.Command {
 	rootCmd := &cobra.Command{
@@ -148,7 +148,7 @@ func NewRootCmd() *cobra.Command {
 				fmt.Fprintf(os.Stderr, "failed to chdir to workspace %q: %v\n", ws, err)
 				return
 			}
-			ag := agent.NewAgentLoop(hub, provider, model, maxIter, ws, nil, cfg.MCPServers, cfg.Agents.Defaults.AllowedDirs, cfg.Agents.Defaults.DisableTools, cfg.Brain, homeDir, cfg.Agents.Defaults.Sandbox)
+			ag := agent.NewAgentLoop(hub, provider, model, maxIter, ws, nil, cfg.MCPServers, cfg.Agents.Defaults.AllowedDirs, cfg.Agents.Defaults.DisableTools, cfg.Brain, homeDir, cfg.Agents.Defaults.Sandbox, "")
 			defer ag.Close()
 			if cfg.Agents.Defaults.EnableToolActivityIndicator != nil {
 				ag.SetToolActivityIndicator(*cfg.Agents.Defaults.EnableToolActivityIndicator)
@@ -206,7 +206,12 @@ func NewRootCmd() *cobra.Command {
 				fmt.Fprintf(os.Stderr, "failed to chdir to workspace %q: %v\n", ws, err)
 				return
 			}
-			ag := agent.NewAgentLoop(hub, provider, model, maxIter, ws, scheduler, cfg.MCPServers, cfg.Agents.Defaults.AllowedDirs, cfg.Agents.Defaults.DisableTools, cfg.Brain, homeDir, cfg.Agents.Defaults.Sandbox)
+			// Compute signal socket path for MCP env injection
+			signalSocketPath := ""
+			if cfg.Signal.Enabled {
+				signalSocketPath = cfg.Signal.GetSocketPath(homeDir, ws)
+			}
+			ag := agent.NewAgentLoop(hub, provider, model, maxIter, ws, scheduler, cfg.MCPServers, cfg.Agents.Defaults.AllowedDirs, cfg.Agents.Defaults.DisableTools, cfg.Brain, homeDir, cfg.Agents.Defaults.Sandbox, signalSocketPath)
 			defer ag.Close()
 			if cfg.Agents.Defaults.EnableToolActivityIndicator != nil {
 				ag.SetToolActivityIndicator(*cfg.Agents.Defaults.EnableToolActivityIndicator)
@@ -228,11 +233,9 @@ func NewRootCmd() *cobra.Command {
 
 			// Start external signal listener (Unix domain socket)
 			if cfg.Signal.Enabled {
-				socketPath := cfg.Signal.SocketPath
-				if socketPath == "" {
-					socketPath = picosignal.DefaultSocketPath(homeDir)
-				}
-				sigListener := picosignal.NewListener(socketPath, hub)
+				socketPath := cfg.Signal.GetSocketPath(homeDir, ws)
+				sigRegistry := picosignal.NewRegistry(cfg.Signal.Actions)
+				sigListener := picosignal.NewListener(socketPath, hub, sigRegistry)
 				go func() {
 					if err := sigListener.Start(ctx); err != nil {
 						log.Printf("Signal: listener error: %v", err)

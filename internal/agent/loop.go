@@ -72,10 +72,11 @@ type AgentLoop struct {
 	mcpConfigs             map[string]config.MCPServerConfig
 	enableToolActivity     bool
 	enableToolCallMessages bool
+	signalSocketPath       string // PICOBOT_SIGNAL_SOCKET injected into MCP child processes
 }
 
 // NewAgentLoop creates a new AgentLoop with the given provider.
-func NewAgentLoop(b *chat.Hub, provider providers.LLMProvider, model string, maxIterations int, workspace string, scheduler *cron.Scheduler, mcpServers map[string]config.MCPServerConfig, allowedDirs []string, disableTools []string, brainCfg *config.BrainConfig, homeDir string, sandbox config.SandboxConfig) *AgentLoop {
+func NewAgentLoop(b *chat.Hub, provider providers.LLMProvider, model string, maxIterations int, workspace string, scheduler *cron.Scheduler, mcpServers map[string]config.MCPServerConfig, allowedDirs []string, disableTools []string, brainCfg *config.BrainConfig, homeDir string, sandbox config.SandboxConfig, signalSocketPath string) *AgentLoop {
 	if model == "" {
 		model = provider.GetDefaultModel()
 	}
@@ -147,7 +148,12 @@ func NewAgentLoop(b *chat.Hub, provider providers.LLMProvider, model string, max
 		var err error
 		switch {
 		case cfg.Command != "":
-			client, err = mcp.NewStdioClient(name, cfg.Command, cfg.Args)
+			mcpEnv := map[string]string{}
+			if signalSocketPath != "" {
+				mcpEnv["PICOBOT_SIGNAL_SOCKET"] = signalSocketPath
+				mcpEnv["PICOBOT_MCP_ID"] = name
+			}
+			client, err = mcp.NewStdioClientWithEnv(name, cfg.Command, cfg.Args, mcpEnv)
 		case cfg.URL != "":
 			client, err = mcp.NewHTTPClient(name, cfg.URL, cfg.Headers)
 		default:
@@ -207,6 +213,12 @@ func (a *AgentLoop) SetToolCallMessages(enabled bool) {
 	a.enableToolCallMessages = enabled
 }
 
+// SetSignalSocketPath sets the path to the signal Unix socket. When set, this
+// path is injected as PICOBOT_SIGNAL_SOCKET into MCP child process environments.
+func (a *AgentLoop) SetSignalSocketPath(path string) {
+	a.signalSocketPath = path
+}
+
 // Close shuts down all MCP server connections and the brain.
 func (a *AgentLoop) Close() {
 	for _, c := range a.mcpClients {
@@ -253,7 +265,12 @@ func (a *AgentLoop) restartMCPServer(serverName string) (string, error) {
 	var err error
 	switch {
 	case cfg.Command != "":
-		newClient, err = mcp.NewStdioClient(serverName, cfg.Command, cfg.Args)
+		mcpEnv := map[string]string{}
+		if a.signalSocketPath != "" {
+			mcpEnv["PICOBOT_SIGNAL_SOCKET"] = a.signalSocketPath
+			mcpEnv["PICOBOT_MCP_ID"] = serverName
+		}
+		newClient, err = mcp.NewStdioClientWithEnv(serverName, cfg.Command, cfg.Args, mcpEnv)
 	case cfg.URL != "":
 		newClient, err = mcp.NewHTTPClient(serverName, cfg.URL, cfg.Headers)
 	default:

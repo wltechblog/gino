@@ -39,8 +39,33 @@ type SignalConfig struct {
 	Enabled bool `json:"enabled"`
 
 	// SocketPath is the Unix domain socket path. If empty, defaults to
-	// ~/.picobot/signals.sock
+	// {workspace}/.picobot/signals.sock
 	SocketPath string `json:"socketPath,omitempty"`
+
+	// Actions defines user-defined signal actions that external sources can send.
+	// The key is the action name (e.g., "motion_detected"), the value describes
+	// what response to inject when that action is received.
+	// MCP servers self-declare their own actions at startup.
+	Actions map[string]SignalActionConfig `json:"actions,omitempty"`
+}
+
+// SignalActionConfig defines a single signal action and its safe response template.
+type SignalActionConfig struct {
+	// Description is a human-readable description of what this signal means.
+	Description string `json:"description"`
+
+	// Response is the message text injected into the agent when this signal fires.
+	// This is the ONLY text the agent sees — the raw signal payload is never exposed.
+	// Supports Go template variables: {{.Source}}, {{.Timestamp}}
+	Response string `json:"response"`
+}
+
+func (sc SignalConfig) GetSocketPath(homeDir, workspace string) string {
+	if sc.SocketPath != "" {
+		return sc.SocketPath
+	}
+	// Default: {workspace}/.picobot/signals.sock
+	return workspace + "/.picobot/signals.sock"
 }
 
 type AgentsConfig struct {

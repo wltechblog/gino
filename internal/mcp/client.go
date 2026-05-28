@@ -34,7 +34,12 @@ type Client struct {
 
 // NewStdioClient creates a client that spawns a child process and communicates via stdin/stdout.
 func NewStdioClient(name, command string, args []string) (*Client, error) {
-	t, err := newStdioTransport(command, args)
+	return NewStdioClientWithEnv(name, command, args, nil)
+}
+
+// NewStdioClientWithEnv creates a client that spawns a child process with additional environment variables.
+func NewStdioClientWithEnv(name, command string, args []string, extraEnv map[string]string) (*Client, error) {
+	t, err := newStdioTransport(command, args, extraEnv)
 	if err != nil {
 		return nil, fmt.Errorf("mcp %s: %w", name, err)
 	}
@@ -208,7 +213,7 @@ type stdioTransport struct {
 	mu    sync.Mutex
 }
 
-func newStdioTransport(command string, args []string) (*stdioTransport, error) {
+func newStdioTransport(command string, args []string, extraEnv map[string]string) (*stdioTransport, error) {
 	cmd := exec.Command(command, args...)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -219,6 +224,14 @@ func newStdioTransport(command string, args []string) (*stdioTransport, error) {
 		return nil, fmt.Errorf("stdout pipe: %w", err)
 	}
 	cmd.Stderr = os.Stderr
+
+	// Inject extra environment variables for the child process
+	if len(extraEnv) > 0 {
+		cmd.Env = os.Environ()
+		for k, v := range extraEnv {
+			cmd.Env = append(cmd.Env, k+"="+v)
+		}
+	}
 
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start %s: %w", command, err)
