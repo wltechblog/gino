@@ -61,6 +61,7 @@ type AgentLoop struct {
 	provider           providers.LLMProvider
 	tools              *tools.Registry
 	sessions           *session.SessionManager
+	checkpoints        *CheckpointManager
 	context            *ContextBuilder
 	memory             *memory.MemoryStore
 	brain              *brain.Brain
@@ -115,6 +116,14 @@ func NewAgentLoop(b *chat.Hub, provider providers.LLMProvider, model string, max
 	}
 
 	sm := session.NewSessionManager(workspace)
+
+	// Restore sessions from disk on startup so conversation history survives restarts.
+	if err := sm.LoadAll(); err != nil {
+		log.Printf("warning: failed to load sessions from disk: %v", err)
+	} else {
+		log.Println("Sessions: restored from disk")
+	}
+
 	ctx := NewContextBuilder(workspace, memory.NewLLMRanker(provider, model), 5)
 	mem := memory.NewMemoryStoreWithWorkspace(workspace, 100)
 	// register memory tools (all share the same store instance)
@@ -177,7 +186,9 @@ func NewAgentLoop(b *chat.Hub, provider providers.LLMProvider, model string, max
 		log.Println("Brain: initialized and tools registered")
 	}
 
-	al := &AgentLoop{hub: b, provider: provider, tools: reg, sessions: sm, context: ctx, memory: mem, brain: brainInst, model: model, maxIterations: maxIterations, mcpClients: mcpClients, mcpConfigs: mcpServers, enableToolActivity: true, enableToolCallMessages: false}
+	checkpoints := NewCheckpointManager(workspace)
+
+	al := &AgentLoop{hub: b, provider: provider, tools: reg, sessions: sm, checkpoints: checkpoints, context: ctx, memory: mem, brain: brainInst, model: model, maxIterations: maxIterations, mcpClients: mcpClients, mcpConfigs: mcpServers, enableToolActivity: true, enableToolCallMessages: false}
 
 	// Wire the MCP management tool callbacks so they can call back into the loop
 	restartTool.SetCallback(al.restartMCPServer)
@@ -299,6 +310,9 @@ func (a *AgentLoop) Run(ctx context.Context) {
 	a.running = true
 	log.Println("Agent loop started")
 
+	// Recover any interrupted turns from a previous run.
+	a.recoverTurns(ctx)
+
 	for a.running {
 		select {
 		case <-ctx.Done():
@@ -374,12 +388,27 @@ func (a *AgentLoop) Run(ctx context.Context) {
 			}
 			messages := a.context.BuildMessages(sess.GetHistory(), userContent, msg.Channel, msg.ChatID, memCtx, memories)
 
+			sessionKey := msg.Channel + ":" + msg.ChatID
+
 			iteration := 0
 			finalContent := ""
 			lastToolResult := ""
 			toolDefs := a.tools.Definitions()
 			for iteration < a.maxIterations {
 				iteration++
+
+				// Checkpoint the current turn state before each LLM invocation.
+				// This ensures we can recover if the process is restarted mid-turn.
+				a.checkpoints.Save(sessionKey, &ActiveTurn{
+					Channel:        msg.Channel,
+					ChatID:         msg.ChatID,
+					SenderID:       msg.SenderID,
+					Content:        msg.Content,
+					Messages:       messages,
+					Iteration:      iteration,
+					LastToolResult: lastToolResult,
+				})
+
 				resp, err := a.provider.Chat(ctx, messages, toolDefs, a.model)
 				if err != nil {
 					log.Printf("provider error: %v", err)
@@ -425,6 +454,9 @@ func (a *AgentLoop) Run(ctx context.Context) {
 				}
 			}
 
+			// Turn completed — clear the checkpoint so it won't be recovered.
+			a.checkpoints.MarkCompleted(sessionKey)
+
 			if finalContent == "" && lastToolResult != "" {
 				finalContent = lastToolResult
 			} else if finalContent == "" {
@@ -451,6 +483,41 @@ func (a *AgentLoop) Run(ctx context.Context) {
 		default:
 			// idle tick
 			time.Sleep(100 * time.Millisecond)
+		}
+	}
+}
+
+// recoverTurns scans for any interrupted turns from a previous run and
+// re-injects them into the hub for reprocessing. This is called once at
+// startup before the main agent loop begins processing new messages.
+func (a *AgentLoop) recoverTurns(ctx context.Context) {
+	recoveries := a.checkpoints.RecoverAll()
+	if len(recoveries) == 0 {
+		return
+	}
+
+	log.Printf("Agent: recovering %d interrupted turn(s)", len(recoveries))
+	for _, r := range recoveries {
+		log.Printf("Agent: recovering turn for %s (iteration %d, %d messages, last saved with %d messages in chain)",
+			r.Key, r.Turn.Iteration, len(r.Turn.Messages), len(r.Turn.Messages))
+
+		// Re-inject the original user message so it gets full reprocessing.
+		// The session history already has context from before the crash,
+		// so the agent will effectively "pick up where it left off" with
+		// the full conversation history available.
+		inbound := r.ToInbound()
+
+		// Notify the user that we're recovering from a crash.
+		if !isSystemChannel(inbound.Channel) {
+			sendChannelNotification(a.hub, inbound.Channel, inbound.ChatID,
+				"🔄 Recovering from restart — reprocessing your last message...")
+		}
+
+		select {
+		case a.hub.In <- inbound:
+			log.Printf("Agent: re-injected recovered message for %s", r.Key)
+		default:
+			log.Printf("Agent: inbound channel full, could not recover %s", r.Key)
 		}
 	}
 }
