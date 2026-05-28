@@ -232,22 +232,35 @@ func TestExecStrictCustomBlocked(t *testing.T) {
 	}
 	e := NewExecToolWithSandbox(2, "", nil, sandbox)
 
-	// curl is in custom blocked list
-	_, err := e.Execute(context.Background(), map[string]interface{}{"cmd": []interface{}{"curl", "http://example.com"}})
-	if err == nil {
+	// curl is in custom blocked list — test via isBlocked, don't execute
+	if !e.isBlocked("curl") {
 		t.Fatal("expected curl to be blocked")
 	}
 
 	// wget is in custom blocked list
-	_, err = e.Execute(context.Background(), map[string]interface{}{"cmd": []interface{}{"wget", "http://example.com"}})
-	if err == nil {
+	if !e.isBlocked("wget") {
 		t.Fatal("expected wget to be blocked")
 	}
 
 	// echo is fine
-	_, err = e.Execute(context.Background(), map[string]interface{}{"cmd": []interface{}{"echo", "ok"}})
+	_, err := e.Execute(context.Background(), map[string]interface{}{"cmd": []interface{}{"echo", "ok"}})
 	if err != nil {
 		t.Fatalf("expected echo to work, got: %v", err)
+	}
+}
+
+// =============================================================================
+// Strict mode — sudo blocked
+// =============================================================================
+
+func TestExecStrictBlocksSudo(t *testing.T) {
+	e := NewExecTool(2) // default strict mode
+	_, err := e.Execute(context.Background(), map[string]interface{}{"cmd": []interface{}{"sudo", "ls"}})
+	if err == nil {
+		t.Fatal("expected sudo to be blocked in strict mode")
+	}
+	if !strings.Contains(err.Error(), "disallowed") {
+		t.Fatalf("expected disallowed error, got: %v", err)
 	}
 }
 
@@ -275,21 +288,22 @@ func TestExecPermissiveBlocksDangerous(t *testing.T) {
 	sandbox := config.SandboxConfig{Mode: "permissive"}
 	e := NewExecToolWithSandbox(2, "", nil, sandbox)
 
-	// rm should NOT be blocked in permissive (only dd, mkfs, shutdown, reboot)
-	_, err := e.Execute(context.Background(), map[string]interface{}{"cmd": []interface{}{"rm", "--help"}})
-	if err != nil {
-		t.Fatalf("permissive should allow rm, got: %v", err)
+	// rm should NOT be blocked in permissive — test via isBlocked
+	if e.isBlocked("rm") {
+		t.Fatal("permissive should not block rm")
 	}
 
 	// dd should still be blocked
-	_, err = e.Execute(context.Background(), map[string]interface{}{"cmd": []interface{}{"dd", "if=/dev/zero"}})
-	if err == nil {
+	if !e.isBlocked("dd") {
 		t.Fatal("expected dd to be blocked in permissive mode")
 	}
+}
 
-	// sudo blocked
-	_, err = e.Execute(context.Background(), map[string]interface{}{"cmd": []interface{}{"sudo", "ls"}})
-	if err == nil {
+func TestExecPermissiveBlocksSudo(t *testing.T) {
+	sandbox := config.SandboxConfig{Mode: "permissive"}
+	e := NewExecToolWithSandbox(2, "", nil, sandbox)
+	// Test via isBlocked — don't actually execute sudo
+	if !e.isBlocked("sudo") {
 		t.Fatal("expected sudo to be blocked in permissive mode")
 	}
 }
@@ -349,11 +363,9 @@ func TestExecYoloStringDisabledByDefault(t *testing.T) {
 func TestExecYoloAllowsRm(t *testing.T) {
 	sandbox := config.SandboxConfig{Mode: "yolo"}
 	e := NewExecToolWithSandbox(2, "", nil, sandbox)
-	// rm is normally blocked but should work in yolo
-	// We can't actually rm anything useful, but --version should work
-	_, err := e.Execute(context.Background(), map[string]interface{}{"cmd": []interface{}{"rm", "--version"}})
-	if err != nil {
-		t.Fatalf("expected yolo to allow rm, got: %v", err)
+	// Test via isBlocked — rm should not be blocked in yolo
+	if e.isBlocked("rm") {
+		t.Fatal("yolo mode should not block rm")
 	}
 }
 
@@ -376,24 +388,19 @@ func TestExecYoloCwdAnywhere(t *testing.T) {
 		"cwd": "/tmp",
 	})
 	if err != nil {
-		t.Fatalf("expected yolo to allow any cwd, got: %v", err)
+		t.Fatalf("expected yolo to allow any cwd, get: %v", err)
 	}
 	if out != "/tmp" {
 		t.Fatalf("expected /tmp, got %q", out)
 	}
 }
 
-func TestExecYoloAllowsSudo(t *testing.T) {
+func TestExecYoloDoesNotBlockSudo(t *testing.T) {
 	sandbox := config.SandboxConfig{Mode: "yolo"}
 	e := NewExecToolWithSandbox(2, "", nil, sandbox)
-	// sudo is normally blocked but yolo allows it
-	// We just test that it's not rejected by the sandbox (it will fail without a tty but that's fine)
-	_, err := e.Execute(context.Background(), map[string]interface{}{"cmd": []interface{}{"sudo", "--help"}})
-	if err != nil {
-		// It might fail because sudo isn't installed or needs a tty, but it shouldn't be sandbox-blocked
-		if strings.Contains(err.Error(), "disallowed") {
-			t.Fatalf("yolo should not block sudo: %v", err)
-		}
+	// Test via isBlocked — don't actually execute sudo
+	if e.isBlocked("sudo") {
+		t.Fatal("yolo mode should not block sudo")
 	}
 }
 

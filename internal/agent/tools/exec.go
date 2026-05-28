@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -95,7 +96,7 @@ func (t *ExecTool) Parameters() map[string]interface{} {
 	return map[string]interface{}{
 		"type":       "object",
 		"properties": props,
-		"required":   []string{"cmd"},
+		"required":   []string{"cmd"],
 	}
 }
 
@@ -261,8 +262,36 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]interface{}) (st
 		return "", fmt.Errorf("exec: 'cmd' argument required")
 	}
 
-	// Handle string commands (only in yolo mode)
+	// Handle string commands
 	if cmdStr, ok := cmdRaw.(string); ok {
+		// Check if the string is actually a JSON-encoded array that the MCP framework
+		// delivered as a string instead of a proper []interface{}
+		trimmed := strings.TrimSpace(cmdStr)
+		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+			var parsed []interface{}
+			if err := json.Unmarshal([]byte(cmdStr), &parsed); err == nil && len(parsed) > 0 {
+				// All elements must be strings
+				allStrings := true
+				for _, v := range parsed {
+					if _, ok := v.(string); !ok {
+						allStrings = false
+						break
+					}
+				}
+				if allStrings {
+					log.Printf("[DEBUG-EXEC] detected JSON array string, parsing as array with %d elements", len(parsed))
+					// Re-inject as proper []interface{} and recurse
+					newArgs := make(map[string]interface{})
+					for k, v := range args {
+						newArgs[k] = v
+					}
+					newArgs["cmd"] = parsed
+					return t.Execute(ctx, newArgs)
+				}
+			}
+		}
+
+		// Genuine string command — only allowed in yolo mode
 		if !t.sandbox.AllowsStringCommands() {
 			return "", errors.New("exec: string commands are disallowed; use array form (or enable yolo mode)")
 		}
