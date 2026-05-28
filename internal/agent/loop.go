@@ -149,6 +149,9 @@ func NewAgentLoop(b *chat.Hub, provider providers.LLMProvider, model string, max
 		switch {
 		case cfg.Command != "":
 			mcpEnv := map[string]string{}
+			for k, v := range cfg.Env {
+				mcpEnv[k] = v
+			}
 			if signalSocketPath != "" {
 				mcpEnv["PICOBOT_SIGNAL_SOCKET"] = signalSocketPath
 				mcpEnv["PICOBOT_MCP_ID"] = name
@@ -266,6 +269,9 @@ func (a *AgentLoop) restartMCPServer(serverName string) (string, error) {
 	switch {
 	case cfg.Command != "":
 		mcpEnv := map[string]string{}
+		for k, v := range cfg.Env {
+			mcpEnv[k] = v
+		}
 		if a.signalSocketPath != "" {
 			mcpEnv["PICOBOT_SIGNAL_SOCKET"] = a.signalSocketPath
 			mcpEnv["PICOBOT_MCP_ID"] = serverName

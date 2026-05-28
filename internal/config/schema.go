@@ -29,6 +29,9 @@ type MCPServerConfig struct {
 	Args    []string          `json:"args,omitempty"`
 	URL     string            `json:"url,omitempty"`
 	Headers map[string]string `json:"headers,omitempty"`
+	// Env is additional environment variables to inject into the child process (stdio transport only).
+	// Picobot also injects PICOBOT_SIGNAL_SOCKET and PICOBOT_MCP_ID automatically.
+	Env map[string]string `json:"env,omitempty"`
 }
 
 // SignalConfig configures the external trigger listener.
