@@ -17,10 +17,11 @@ import (
 // - blacklist dangerous program names (rm, sudo, dd, mkfs, shutdown, reboot)
 // - arguments containing absolute paths, ~ or .. are rejected
 // - optional allowedDir enforces a working directory
+// - optional cwd parameter overrides working directory per-command (must be within allowedDirs)
 
 type ExecTool struct {
-	timeout    time.Duration
-	allowedDir string
+	timeout     time.Duration
+	allowedDir  string
 	allowedDirs []string
 }
 
@@ -59,6 +60,10 @@ func (t *ExecTool) Parameters() map[string]interface{} {
 				},
 				"minItems": 1,
 			},
+			"cwd": map[string]interface{}{
+				"type":        "string",
+				"description": "Working directory for the command. Must be within an allowed directory. Defaults to the workspace root.",
+			},
 		},
 		"required": []string{"cmd"},
 	}
@@ -74,7 +79,7 @@ var dangerous = map[string]struct{}{
 }
 
 var shellBuiltins = map[string]string{
-	"cd":      "cd does not persist across calls — the working directory is already set to the workspace; use relative paths instead",
+	"cd":      "use the cwd parameter instead to set the working directory for a command",
 	"source":  "",
 	"export":  "",
 	"alias":   "",
@@ -135,6 +140,27 @@ func hasUnsafeArg(s string, allowedDirs []string) bool {
 	return true
 }
 
+// isDirAllowed checks if a directory path is within one of the allowed directories.
+func (t *ExecTool) isDirAllowed(dir string) bool {
+	cleaned := filepath.Clean(dir)
+	for _, d := range t.allowedDirs {
+		if cleaned == d || cleaned == filepath.Clean(d) {
+			return true
+		}
+		if strings.HasPrefix(cleaned, filepath.Clean(d)+string(filepath.Separator)) {
+			return true
+		}
+	}
+	// Also check the default allowedDir
+	if t.allowedDir != "" {
+		ad := filepath.Clean(t.allowedDir)
+		if cleaned == ad || strings.HasPrefix(cleaned, ad+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
+}
+
 func (t *ExecTool) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
 	cmdRaw, ok := args["cmd"]
 	if !ok {
@@ -163,6 +189,20 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]interface{}) (st
 		return "", fmt.Errorf("exec: unsupported cmd type")
 	}
 
+	// Resolve working directory
+	workDir := t.allowedDir
+	if cwdRaw, ok := args["cwd"]; ok {
+		cwd, ok := cwdRaw.(string)
+		if !ok {
+			return "", fmt.Errorf("exec: cwd must be a string")
+		}
+		cleaned := filepath.Clean(cwd)
+		if !t.isDirAllowed(cleaned) {
+			return "", fmt.Errorf("exec: cwd '%s' is not within an allowed directory", cwd)
+		}
+		workDir = cleaned
+	}
+
 	prog := argv[0]
 	if isDangerousProg(prog) {
 		return "", fmt.Errorf("exec: program '%s' is disallowed", prog)
@@ -178,7 +218,7 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]interface{}) (st
 				return "", fmt.Errorf("exec: argument '%s' looks unsafe", a)
 			}
 		}
-		return t.runCmd(ctx, "sh", []string{"-c", shellArg})
+		return t.runCmd(ctx, "sh", []string{"-c", shellArg}, workDir)
 	}
 
 	for _, a := range argv[1:] {
@@ -187,10 +227,10 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]interface{}) (st
 		}
 	}
 
-	return t.runCmd(ctx, prog, argv[1:])
+	return t.runCmd(ctx, prog, argv[1:], workDir)
 }
 
-func (t *ExecTool) runCmd(ctx context.Context, prog string, args []string) (string, error) {
+func (t *ExecTool) runCmd(ctx context.Context, prog string, args []string, dir string) (string, error) {
 	cctx := ctx
 	if t.timeout > 0 {
 		var cancel context.CancelFunc
@@ -199,8 +239,8 @@ func (t *ExecTool) runCmd(ctx context.Context, prog string, args []string) (stri
 	}
 
 	cmd := exec.CommandContext(cctx, prog, args...)
-	if t.allowedDir != "" {
-		cmd.Dir = t.allowedDir
+	if dir != "" {
+		cmd.Dir = dir
 	}
 	b, err := cmd.CombinedOutput()
 	if err != nil {

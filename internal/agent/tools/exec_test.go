@@ -97,8 +97,8 @@ func TestExecCdBuiltin(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for cd builtin")
 	}
-	if !strings.Contains(err.Error(), "does not persist") {
-		t.Fatalf("expected cd hint, got: %v", err)
+	if !strings.Contains(err.Error(), "cwd parameter") {
+		t.Fatalf("expected cwd hint, got: %v", err)
 	}
 }
 
@@ -119,5 +119,74 @@ func TestExecEchoNotBuiltin(t *testing.T) {
 	}
 	if out != "hello" {
 		t.Fatalf("expected 'hello', got %q", out)
+	}
+}
+
+func TestExecCwdParameter(t *testing.T) {
+	tmp := t.TempDir()
+	sub := filepath.Join(tmp, "subdir")
+	os.MkdirAll(sub, 0o755)
+	f := filepath.Join(sub, "hello.txt")
+	os.WriteFile(f, []byte("from subdir"), 0644)
+
+	e := NewExecToolWithAllowedDirs(2, tmp, []string{tmp})
+
+	// With cwd set to subdir, pwd should return that dir
+	out, err := e.Execute(context.Background(), map[string]interface{}{
+		"cmd": []interface{}{"pwd"},
+		"cwd": sub,
+	})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if out != sub {
+		t.Fatalf("expected cwd %q, got %q", sub, out)
+	}
+
+	// With cwd set, should be able to read relative file
+	out, err = e.Execute(context.Background(), map[string]interface{}{
+		"cmd": []interface{}{"cat", "hello.txt"},
+		"cwd": sub,
+	})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if out != "from subdir" {
+		t.Fatalf("expected 'from subdir', got %q", out)
+	}
+}
+
+func TestExecCwdNotAllowed(t *testing.T) {
+	tmp := t.TempDir()
+	outside := t.TempDir() // different temp dir, not in allowedDirs
+
+	e := NewExecToolWithAllowedDirs(2, tmp, []string{tmp})
+	_, err := e.Execute(context.Background(), map[string]interface{}{
+		"cmd": []interface{}{"ls"},
+		"cwd": outside,
+	})
+	if err == nil {
+		t.Fatal("expected error for cwd outside allowed dirs")
+	}
+	if !strings.Contains(err.Error(), "not within an allowed directory") {
+		t.Fatalf("expected allowed dir error, got: %v", err)
+	}
+}
+
+func TestExecCwdDefaultsToAllowedDir(t *testing.T) {
+	d := t.TempDir()
+	f := filepath.Join(d, "test.txt")
+	os.WriteFile(f, []byte("default dir"), 0644)
+
+	e := NewExecToolWithWorkspace(2, d)
+	// No cwd specified — should default to allowedDir (d)
+	out, err := e.Execute(context.Background(), map[string]interface{}{
+		"cmd": []interface{}{"cat", "test.txt"},
+	})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if out != "default dir" {
+		t.Fatalf("expected 'default dir', got %q", out)
 	}
 }
