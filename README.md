@@ -306,6 +306,12 @@ Picobot uses a single JSON config at `~/.picobot/config.json`:
       "allowFrom": []
     }
   },
+  "signal": {
+    "enabled": true,
+    "defaultChannel": "telegram",
+    "defaultChatID": "YOUR_CHAT_ID",
+    "actions": {}
+  },
   "mcpServers": {}
 }
 ```
@@ -327,6 +333,8 @@ Picobot uses a single JSON config at `~/.picobot/config.json`:
 | `brain.remoteApiBase` | Fallback remote API URL for embeddings |
 | `brain.remoteApiKey` | Fallback remote API key |
 | `brain.remoteModel` | Fallback remote embedding model name |
+| `signal.enabled` | Enable the signal listener |
+| `signal.actions` | Map of signal action names to configs |
 | `mcpServers` | Map of MCP server configs (see [CONFIG.md](docs/CONFIG.md)) |
 
 Supports any **OpenAI-compatible API**: OpenAI, OpenRouter, Ollama, Groq, Together, etc.
@@ -421,6 +429,68 @@ LLM: recovered to primary provider
 ```
 
 ---
+
+
+### Signal Actions
+
+Picobot can be woken by external triggers via a Unix domain socket. Define actions in your config to let external systems (cron jobs, MQTT messages, motion detectors, etc.) inject messages into the agent:
+
+```json
+{
+  "signal": {
+    "enabled": true,
+    "socketPath": "",
+    "defaultChannel": "telegram",
+    "defaultChatID": "YOUR_CHAT_ID",
+    "actions": {
+      "check_messages": {
+        "description": "Check agentchat for new messages",
+        "response": "Check for new messages and act on any pending tasks.",
+        "silent": true
+      },
+      "motion_detected": {
+        "description": "Motion sensor triggered",
+        "response": "Motion was detected by the security camera. Check if any action is needed."
+      }
+    }
+  }
+}
+```
+
+#### How it works
+
+1. An external process sends a JSON payload to the Unix socket (e.g., `{"action": "check_messages"}`)
+2. Picobot validates the action name against the configured `actions` map
+3. The agent receives the `response` text as if the user typed it
+4. The agent processes it normally — runs tools, updates state, etc.
+
+#### Silent mode
+
+Set `"silent": true` on an action to suppress unnecessary replies:
+
+- **If the agent has something useful to report** (tool calls were made, results returned) → reply is sent to the channel
+- **If the agent just says "nothing to do"** (1 iteration, no tool results) → reply is suppressed
+
+This prevents background triggers like `check_messages` from spamming your Telegram with "no new messages" every few minutes.
+
+#### Triggering a signal from the command line
+
+```sh
+echo '{"action":"check_messages"}' | socat - UNIX-CONNECT:/path/to/.picobot/signals.sock
+```
+
+#### Signal config fields
+
+| Field | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `signal.enabled` | Yes | `false` | Enable the signal listener |
+| `signal.socketPath` | No | `{workspace}/.picobot/signals.sock` | Unix domain socket path |
+| `signal.defaultChannel` | No | — | Fallback channel when none specified |
+| `signal.defaultChatID` | No | — | Fallback chat ID when none specified |
+| `signal.actions` | No | `{}` | Map of action names to their config |
+| `actions.<name>.description` | Yes | — | Human-readable description |
+| `actions.<name>.response` | Yes | — | Message text injected into the agent (supports `{{.Source}}`, `{{.Timestamp}}` templates) |
+| `actions.<name>.silent` | No | `false` | Suppress non-useful replies |
 
 ## Built-in Tools
 
