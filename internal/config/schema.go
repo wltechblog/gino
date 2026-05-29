@@ -190,10 +190,36 @@ type WhatsAppConfig struct {
 }
 
 type ProvidersConfig struct {
-	OpenAI *ProviderConfig `json:"openai,omitempty"`
+	OpenAI    *ProviderConfig  `json:"openai,omitempty"`
+	Fallbacks []FallbackConfig `json:"fallbacks,omitempty"`
 }
 
 type ProviderConfig struct {
 	APIKey  string `json:"apiKey"`
 	APIBase string `json:"apiBase"`
+}
+
+// FallbackConfig defines a fallback LLM provider to use when the primary fails.
+// Fallbacks are tried in order. Each has its own RecoverAfter timer that controls
+// when to retry the primary provider.
+type FallbackConfig struct {
+	// Name is a human-readable label for logging (e.g., "cheap-fast", "backup").
+	Name string `json:"name"`
+
+	// APIKey for this fallback provider.
+	APIKey string `json:"apiKey"`
+
+	// APIBase is the OpenAI-compatible API base URL.
+	APIBase string `json:"apiBase"`
+
+	// Model is the model identifier to use for this fallback.
+	Model string `json:"model"`
+
+	// MaxTokens overrides the default max tokens for this fallback (0 = use default).
+	MaxTokens int `json:"maxTokens,omitempty"`
+
+	// RecoverAfter controls how long to stay on this fallback before retrying
+	// the primary provider. Defaults to 5m. Set to "0s" to retry primary on
+	// every request (aggressive recovery).
+	RecoverAfter string `json:"recoverAfter,omitempty"`
 }

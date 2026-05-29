@@ -331,6 +331,95 @@ Picobot uses a single JSON config at `~/.picobot/config.json`:
 
 Supports any **OpenAI-compatible API**: OpenAI, OpenRouter, Ollama, Groq, Together, etc.
 
+### Model Fallbacks
+
+When your primary LLM provider goes down or times out, Picobot can automatically fall back to cheaper/faster models and recover to primary as soon as it's available again.
+
+Add a `fallbacks` array to your `providers` config:
+
+```json
+{
+  "providers": {
+    "openai": {
+      "apiKey": "sk-or-v1-PRIMARY_KEY",
+      "apiBase": "https://openrouter.ai/api/v1"
+    },
+    "fallbacks": [
+      {
+        "name": "cheap-fast",
+        "apiKey": "sk-or-v1-PRIMARY_KEY",
+        "apiBase": "https://openrouter.ai/api/v1",
+        "model": "openai/gpt-4o-mini",
+        "recoverAfter": "5m"
+      }
+    ]
+  }
+}
+```
+
+#### How it works
+
+1. **Normal operation** — all requests go to the primary provider using `agents.defaults.model`
+2. **Primary fails** (timeout, 5xx, network error) — after the primary's own retries are exhausted, the first fallback is tried
+3. **On a fallback** — requests go to the fallback model until `recoverAfter` elapses
+4. **Recovery** — after `recoverAfter`, the next request tries the primary first. If it succeeds, Picobot switches back immediately. If it fails, it stays on the fallback and resets the recovery timer
+
+#### Multiple fallbacks
+
+You can chain multiple fallbacks — they're tried in order:
+
+```json
+{
+  "providers": {
+    "openai": {
+      "apiKey": "sk-or-v1-KEY",
+      "apiBase": "https://openrouter.ai/api/v1"
+    },
+    "fallbacks": [
+      {
+        "name": "fast",
+        "apiKey": "sk-or-v1-KEY",
+        "apiBase": "https://openrouter.ai/api/v1",
+        "model": "openai/gpt-4o-mini",
+        "recoverAfter": "2m"
+      },
+      {
+        "name": "emergency",
+        "apiKey": "sk-or-v1-KEY",
+        "apiBase": "https://openrouter.ai/api/v1",
+        "model": "google/gemini-2.5-flash",
+        "recoverAfter": "1m"
+      }
+    ]
+  }
+}
+```
+
+If the primary fails → tries "fast". If "fast" also fails → tries "emergency". Each fallback has its own `recoverAfter` timer.
+
+#### Fallback config fields
+
+| Field | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `name` | No | model name | Human-readable label for logging |
+| `apiKey` | Yes* | — | API key for this fallback |
+| `apiBase` | Yes* | — | OpenAI-compatible API base URL |
+| `model` | Yes | — | Model identifier to use |
+| `maxTokens` | No | from defaults | Override max response tokens |
+| `recoverAfter` | No | `5m` | How long before retrying primary. Set to `0s` to retry on every request |
+
+\* At least one of `apiKey` or `apiBase` must be set.
+
+#### Log messages
+
+```
+LLM: primary failed: timeout, trying fallbacks
+LLM: trying fallback "cheap-fast" (openai/gpt-4o-mini)
+LLM: switched to fallback "cheap-fast" (will retry primary after 5m0s)
+...
+LLM: recovered to primary provider
+```
+
 ---
 
 ## Built-in Tools
@@ -416,7 +505,7 @@ internal/
   cron/               Cron scheduler
   heartbeat/          Periodic task checker
   mcp/                MCP client (stdio + HTTP)
-  providers/          OpenAI-compatible LLM provider
+  providers/          OpenAI-compatible LLM provider + fallbacks
   session/            Session manager
 docker/               Dockerfile, compose, entrypoint
 ```
