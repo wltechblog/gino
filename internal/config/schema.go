@@ -170,7 +170,7 @@ type DiscordConfig struct {
 }
 
 type TelegramConfig struct {
-	Enabled   bool     `json:"token"`
+	Enabled   bool     `json:"enabled"`
 	Token     string   `json:"token"`
 	AllowFrom []string `json:"allowFrom"`
 }
