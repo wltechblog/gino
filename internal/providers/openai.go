@@ -14,23 +14,37 @@ import (
 
 // OpenAIProvider calls an OpenAI-compatible API (OpenAI, OpenRouter, or similar).
 type OpenAIProvider struct {
-	APIKey    string
-	APIBase   string // e.g. https://api.openai.com/v1 or https://openrouter.ai/api/v1
-	MaxTokens int    // 0 means "let the API decide"
-	Client    *http.Client
+	APIKey        string
+	APIBase       string // e.g. https://api.openai.com/v1 or https://openrouter.ai/api/v1
+	MaxTokens     int    // 0 means "let the API decide"
+	MaxRetries    int    // number of retries on transient errors (default 2)
+	RetryBaseWait time.Duration
+	Client        *http.Client
 }
 
 func NewOpenAIProvider(apiKey, apiBase string, timeoutSecs, maxTokens int) *OpenAIProvider {
+	return NewOpenAIProviderWithRetry(apiKey, apiBase, timeoutSecs, maxTokens, 2, 2*time.Second)
+}
+
+func NewOpenAIProviderWithRetry(apiKey, apiBase string, timeoutSecs, maxTokens, maxRetries int, retryBaseWait time.Duration) *OpenAIProvider {
 	if apiBase == "" {
 		apiBase = "https://api.openai.com/v1" // sensible default; can be overridden
 	}
 	if timeoutSecs <= 1 {
 		timeoutSecs = 60 // default 60 seconds
 	}
+	if maxRetries < 0 {
+		maxRetries = 0
+	}
+	if retryBaseWait <= 0 {
+		retryBaseWait = 2 * time.Second
+	}
 	return &OpenAIProvider{
-		APIKey:    apiKey,
-		APIBase:   strings.TrimRight(apiBase, "/"),
-		MaxTokens: maxTokens,
+		APIKey:        apiKey,
+		APIBase:       strings.TrimRight(apiBase, "/"),
+		MaxTokens:     maxTokens,
+		MaxRetries:    maxRetries,
+		RetryBaseWait: retryBaseWait,
 		Client: &http.Client{
 			Timeout: time.Duration(timeoutSecs) * time.Second,
 		},
@@ -38,6 +52,23 @@ func NewOpenAIProvider(apiKey, apiBase string, timeoutSecs, maxTokens int) *Open
 }
 
 func (p *OpenAIProvider) GetDefaultModel() string { return "gpt-4o-mini" }
+
+// isRetryable reports whether an error or HTTP status code is transient and worth retrying.
+func isRetryable(err error, statusCode int) bool {
+	// Network errors (timeouts, connection refused, TLS handshake failure, etc.)
+	if err != nil {
+		return true
+	}
+	// Rate limit
+	if statusCode == 429 {
+		return true
+	}
+	// Server errors
+	if statusCode >= 500 && statusCode < 600 {
+		return true
+	}
+	return false
+}
 
 // Request/response shapes using the modern OpenAI "tools" format.
 type chatRequest struct {
@@ -90,6 +121,7 @@ type chatResponse struct {
 }
 
 // Chat calls an OpenAI-compatible chat completion endpoint and returns a simplified response.
+// On transient errors (timeouts, 429, 5xx) it retries with exponential backoff up to MaxRetries times.
 func (p *OpenAIProvider) Chat(ctx context.Context, messages []Message, tools []ToolDefinition, model string) (LLMResponse, error) {
 	if model == "" {
 		model = p.GetDefaultModel()
@@ -144,58 +176,88 @@ func (p *OpenAIProvider) Chat(ctx context.Context, messages []Message, tools []T
 	}
 
 	url := fmt.Sprintf("%s/chat/completions", p.APIBase)
-	req, err := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(string(b)))
-	if err != nil {
-		return LLMResponse{}, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if p.APIKey != "" {
-		req.Header.Set("Authorization", "Bearer "+p.APIKey)
-	}
 
-	resp, err := p.Client.Do(req)
-	if err != nil {
-		return LLMResponse{}, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		// attempt to read response body for more details (do not expose API key)
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		body := strings.TrimSpace(string(bodyBytes))
-		log.Printf("OpenAI API non-2xx: %s body=%q", resp.Status, body)
-		if body == "" {
-			return LLMResponse{}, fmt.Errorf("OpenAI API error: %s", resp.Status)
+	var lastErr error
+	for attempt := 0; attempt <= p.MaxRetries; attempt++ {
+		if attempt > 0 {
+			backoff := p.RetryBaseWait * time.Duration(1<<(attempt-1))
+			log.Printf("LLM retry %d/%d after %v (last error: %v)", attempt, p.MaxRetries, backoff, lastErr)
+			select {
+			case <-time.After(backoff):
+			case <-ctx.Done():
+				return LLMResponse{}, ctx.Err()
+			}
 		}
-		return LLMResponse{}, fmt.Errorf("OpenAI API error: %s - %s", resp.Status, body)
-	}
 
-	var out chatResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return LLMResponse{}, err
-	}
+		// Re-create the request for each attempt (body is a reader, can't reuse)
+		req, err := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(string(b)))
+		if err != nil {
+			return LLMResponse{}, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		if p.APIKey != "" {
+			req.Header.Set("Authorization", "Bearer "+p.APIKey)
+		}
 
-	if len(out.Choices) == 0 {
-		return LLMResponse{}, errors.New("OpenAI API returned no choices")
-	}
-
-	msg := out.Choices[0].Message
-	// If the model requested tool calls, parse them
-	if len(msg.ToolCalls) > 0 {
-		var tcs []ToolCall
-		for _, tc := range msg.ToolCalls {
-			var parsed map[string]interface{}
-			if err := json.Unmarshal([]byte(tc.Function.Arguments), &parsed); err != nil {
-				// skip unparseable tool calls
+		log.Println("LLM request started")
+		resp, err := p.Client.Do(req)
+		if err != nil {
+			lastErr = err
+			if isRetryable(err, 0) && attempt < p.MaxRetries {
 				continue
 			}
-			tcs = append(tcs, ToolCall{ID: tc.ID, Name: tc.Function.Name, Arguments: parsed})
+			return LLMResponse{}, err
 		}
-		if len(tcs) > 0 {
-			return LLMResponse{Content: strings.TrimSpace(msg.Content), HasToolCalls: true, ToolCalls: tcs}, nil
+
+		log.Println("LLM request complete")
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			bodyBytes, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			body := strings.TrimSpace(string(bodyBytes))
+			apiErr := fmt.Errorf("OpenAI API error: %s - %s", resp.Status, body)
+			if body == "" {
+				apiErr = fmt.Errorf("OpenAI API error: %s", resp.Status)
+			}
+			lastErr = apiErr
+			if isRetryable(nil, resp.StatusCode) && attempt < p.MaxRetries {
+				continue
+			}
+			return LLMResponse{}, apiErr
 		}
+
+		var out chatResponse
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			resp.Body.Close()
+			return LLMResponse{}, err
+		}
+		resp.Body.Close()
+
+		if len(out.Choices) == 0 {
+			return LLMResponse{}, errors.New("OpenAI API returned no choices")
+		}
+
+		msg := out.Choices[0].Message
+		// If the model requested tool calls, parse them
+		if len(msg.ToolCalls) > 0 {
+			var tcs []ToolCall
+			for _, tc := range msg.ToolCalls {
+				var parsed map[string]interface{}
+				if err := json.Unmarshal([]byte(tc.Function.Arguments), &parsed); err != nil {
+					// skip unparseable tool calls
+					continue
+				}
+				tcs = append(tcs, ToolCall{ID: tc.ID, Name: tc.Function.Name, Arguments: parsed})
+			}
+			if len(tcs) > 0 {
+				return LLMResponse{Content: strings.TrimSpace(msg.Content), HasToolCalls: true, ToolCalls: tcs}, nil
+			}
+		}
+
+		// No tool calls
+		return LLMResponse{Content: strings.TrimSpace(msg.Content), HasToolCalls: false}, nil
 	}
 
-	// No tool calls
-	return LLMResponse{Content: strings.TrimSpace(msg.Content), HasToolCalls: false}, nil
+	// All retries exhausted
+	return LLMResponse{}, fmt.Errorf("LLM request failed after %d retries: %w", p.MaxRetries, lastErr)
 }
