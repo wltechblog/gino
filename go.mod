@@ -3,7 +3,7 @@ module github.com/local/picobot
 go 1.26.3
 
 require (
-	github.com/WLTBAgent/picobot-brain v0.4.0
+	github.com/WLTBAgent/picobot-brain v0.5.0
 	github.com/bwmarrin/discordgo v0.28.1
 	github.com/mdp/qrterminal/v3 v3.2.1
 	github.com/slack-go/slack v0.14.0
