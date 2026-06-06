@@ -16,7 +16,7 @@ type BrainConfig struct {
 	Enabled        bool   `json:"enabled"`
 	EmbeddingModel string `json:"embeddingModel,omitempty"` // default: "nomic-embed-text"
 	EmbeddingDims  int    `json:"embeddingDims,omitempty"`  // default: 768
-	OllamaURL      string `json:"ollamaUrl,omitempty"`      // default: "http://localhost:11434"
+	OllamaURL      string `json:"ollamaBaseURL,omitempty"`  // default: "http://localhost:11434"
 	RemoteAPIBase  string `json:"remoteApiBase,omitempty"`  // fallback remote API base URL
 	RemoteAPIKey   string `json:"remoteApiKey,omitempty"`   // fallback remote API key
 	RemoteModel    string `json:"remoteModel,omitempty"`    // fallback remote model name
