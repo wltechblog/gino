@@ -147,14 +147,21 @@ func (c *discordClient) handleMessage(_ *discordgo.Session, m *discordgo.Message
 	// Guild channel handling.
 
 	// If the message is already inside a thread, treat it as a continuation
-	// of that conversation — no mention required. Only the thread owner may
-	// continue the conversation; other users are silently ignored.
+	// of that conversation — no mention required. If the sender is not the
+	// thread owner, create a brand-new thread for them in the parent channel.
 	if c.isThread(m.ChannelID) {
 		c.ownerMu.RLock()
 		ownerID, hasOwner := c.threadOwner[m.ChannelID]
 		c.ownerMu.RUnlock()
 		if hasOwner && ownerID != m.Author.ID {
-			log.Printf("discord: dropped message from %s (%s) in thread %s — not thread owner", m.Author.Username, m.Author.ID, m.ChannelID)
+			log.Printf("discord: non-owner %s (%s) in thread %s — creating new thread", m.Author.Username, m.Author.ID, m.ChannelID)
+			// Look up the parent channel to create the thread from.
+			ch, err := c.sender.Channel(m.ChannelID)
+			if err != nil {
+				log.Printf("discord: failed to look up thread parent: %v", err)
+				return
+			}
+			c.createThreadAndForward(m, ch.ParentID)
 			return
 		}
 		c.forwardMessage(m, m.ChannelID, false)
@@ -174,16 +181,23 @@ func (c *discordClient) handleMessage(_ *discordgo.Session, m *discordgo.Message
 	}
 
 	// Create a thread from the user's message and reply in it.
+	c.createThreadAndForward(m, m.ChannelID)
+}
+
+// forwardMessage strips mentions, builds the inbound message, and sends it to the hub.
+// createThreadAndForward creates a new Discord thread from the user's message
+// in the given parent channel, records ownership, and forwards the message.
+func (c *discordClient) createThreadAndForward(m *discordgo.MessageCreate, parentChannelID string) {
 	threadName := fmt.Sprintf("%s — %s", senderDisplayName(m.Author), truncate(m.Content, 40))
-	thread, err := c.sender.MessageThreadStartComplex(m.ChannelID, m.Message.ID, &discordgo.ThreadStart{
+	thread, err := c.sender.MessageThreadStartComplex(parentChannelID, m.Message.ID, &discordgo.ThreadStart{
 		Name:                threadName,
 		AutoArchiveDuration: 10080, // 1 week (max)
 		Type:                discordgo.ChannelTypeGuildPublicThread,
 	})
 	if err != nil {
 		log.Printf("discord: failed to create thread: %v", err)
-		// Fallback: reply directly in the channel.
-		c.forwardMessage(m, m.ChannelID, false)
+		// Fallback: reply directly in the parent channel.
+		c.forwardMessage(m, parentChannelID, false)
 		return
 	}
 
@@ -199,7 +213,6 @@ func (c *discordClient) handleMessage(_ *discordgo.Session, m *discordgo.Message
 	c.forwardMessage(m, thread.ID, false)
 }
 
-// forwardMessage strips mentions, builds the inbound message, and sends it to the hub.
 func (c *discordClient) forwardMessage(m *discordgo.MessageCreate, chatID string, isDM bool) {
 	// Strip bot @-mentions from the message text.
 	content := m.Content
