@@ -19,14 +19,23 @@ func TestMemoryCLI_ReadAppendWriteRecent(t *testing.T) {
 		t.Fatalf("onboard failed: %v", err)
 	}
 
-	cmd := NewRootCmd()
-	buf := &bytes.Buffer{}
-	cmd.SetOut(buf)
-	cmd.SetArgs([]string{"--home", homeDir, "memory", "append", "today", "-c", "hello"})
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("append today failed: %v", err)
+	// Test append today
+	var buf bytes.Buffer
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	runMemoryAppend(homeDir, []string{"today", "-c", "hello"})
+
+	w.Close()
+	os.Stdout = oldStdout
+	buf.ReadFrom(r)
+	output := buf.String()
+	if !strings.Contains(output, "appended to today") {
+		t.Fatalf("expected 'appended to today' in output, got %q", output)
 	}
 
+	// Verify memory files exist
 	cfg, _ := config.LoadConfig(homeDir)
 	ws := cfg.Agents.Defaults.Workspace
 	if strings.HasPrefix(ws, "~") {
@@ -46,33 +55,37 @@ func TestMemoryCLI_ReadAppendWriteRecent(t *testing.T) {
 		t.Fatalf("expected memory files, none found in %s", memFile)
 	}
 
-	cmd = NewRootCmd()
-	cmd.SetOut(buf)
-	cmd.SetArgs([]string{"--home", homeDir, "memory", "write", "long", "-c", "LONGCONTENT"})
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("write long failed: %v", err)
-	}
+	// Test write long
+	buf.Reset()
+	r, w, _ = os.Pipe()
+	os.Stdout = w
+	runMemoryWrite(homeDir, []string{"long", "-c", "LONGCONTENT"})
+	w.Close()
+	os.Stdout = oldStdout
+	buf.ReadFrom(r)
 
-	cmd = NewRootCmd()
-	readBuf := &bytes.Buffer{}
-	cmd.SetOut(readBuf)
-	cmd.SetArgs([]string{"--home", homeDir, "memory", "read", "long"})
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("read long failed: %v", err)
-	}
-	out := readBuf.String()
+	// Test read long
+	buf.Reset()
+	r, w, _ = os.Pipe()
+	os.Stdout = w
+	runMemoryRead(homeDir, []string{"long"})
+	w.Close()
+	os.Stdout = oldStdout
+	buf.ReadFrom(r)
+	out := buf.String()
 	if !strings.Contains(out, "LONGCONTENT") {
 		t.Fatalf("expected LONGCONTENT in output, got %q", out)
 	}
 
-	cmd = NewRootCmd()
-	recentBuf := &bytes.Buffer{}
-	cmd.SetOut(recentBuf)
-	cmd.SetArgs([]string{"--home", homeDir, "memory", "recent", "--days", "1"})
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("recent failed: %v", err)
-	}
-	if recentBuf.String() == "" {
+	// Test recent
+	buf.Reset()
+	r, w, _ = os.Pipe()
+	os.Stdout = w
+	runMemoryRecent(homeDir, []string{"-d", "1"})
+	w.Close()
+	os.Stdout = oldStdout
+	buf.ReadFrom(r)
+	if buf.String() == "" {
 		t.Fatalf("expected recent output, got empty")
 	}
 }
@@ -96,13 +109,14 @@ func TestMemoryCLI_Rank(t *testing.T) {
 	_ = mem.AppendToday("call mom tomorrow")
 	_ = mem.AppendToday("milkshake recipe")
 
-	cmd := NewRootCmd()
-	buf := &bytes.Buffer{}
-	cmd.SetOut(buf)
-	cmd.SetArgs([]string{"--home", homeDir, "memory", "rank", "-q", "milk", "-k", "2"})
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("rank failed: %v", err)
-	}
+	var buf bytes.Buffer
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	runMemoryRank(homeDir, []string{"-q", "milk", "-k", "2"})
+	w.Close()
+	os.Stdout = oldStdout
+	buf.ReadFrom(r)
 	out := buf.String()
 	if !strings.Contains(out, "buy milk") {
 		t.Fatalf("expected 'buy milk' in output, got: %q", out)
@@ -125,13 +139,14 @@ func TestAgentCLI_ModelFlag(t *testing.T) {
 	cfg2.Providers.OpenAI = nil
 	_ = config.SaveConfig(cfg2, cfgPath)
 
-	cmd := NewRootCmd()
-	buf := &bytes.Buffer{}
-	cmd.SetOut(buf)
-	cmd.SetArgs([]string{"--home", homeDir, "agent", "--model", "stub-model", "-m", "hello"})
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("agent failed: %v", err)
-	}
+	var buf bytes.Buffer
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	runAgent(homeDir, []string{"-M", "stub-model", "-m", "hello"})
+	w.Close()
+	os.Stdout = oldStdout
+	buf.ReadFrom(r)
 	out := buf.String()
 	if !strings.Contains(out, "(stub) Echo") {
 		t.Fatalf("expected stub echo output, got: %q", out)

@@ -1,4 +1,4 @@
-//go:build only_discord || only_slack || only_whatsapp
+//go:build only_discord
 
 package channels
 

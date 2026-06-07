@@ -3,18 +3,15 @@ package main
 import (
 	"bufio"
 	"context"
+	"flag"
 	"fmt"
+	"log"
 	"os"
 	"os/signal"
-	"syscall"
-	"time"
-
-	"github.com/spf13/cobra"
-
 	"path/filepath"
 	"strings"
-
-	"log"
+	"syscall"
+	"time"
 
 	"github.com/local/picobot/internal/agent"
 	"github.com/local/picobot/internal/agent/memory"
@@ -29,468 +26,17 @@ import (
 
 const version = "0.4.0"
 
-func NewRootCmd() *cobra.Command {
-	rootCmd := &cobra.Command{
-		Use:   "picobot",
-		Short: "picobot — lightweight clawbot in Go",
-	}
-
-	rootCmd.PersistentFlags().String("home", "", "picobot home directory (default: ~/.picobot)")
-
-	rootCmd.AddCommand(&cobra.Command{
-		Use:   "version",
-		Short: "Print version",
-		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Printf("🤖 picobot v%s\n", version)
-		},
-	})
-
-	onboardCmd := &cobra.Command{
-		Use:   "onboard",
-		Short: "Create default config and workspace",
-		Run: func(cmd *cobra.Command, args []string) {
-			homeDir := resolveHomeDir(cmd)
-			cfgPath, workspacePath, err := config.Onboard(homeDir)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "onboard failed: %v\n", err)
-				return
-			}
-			fmt.Printf("Wrote config to %s\nInitialized workspace at %s\n", cfgPath, workspacePath)
-		},
-	}
-
-	rootCmd.AddCommand(onboardCmd)
-
-	// channels command — connect and configure messaging channels interactively.
-	channelsCmd := &cobra.Command{
-		Use:   "channels",
-		Short: "Manage channel connections (Telegram, Discord, Slack, WhatsApp)",
-	}
-
-	loginCmd := &cobra.Command{
-		Use:   "login",
-		Short: "Interactively connect a channel (Telegram, Discord, Slack, or WhatsApp)",
-		Run: func(cmd *cobra.Command, args []string) {
-			reader := bufio.NewReader(os.Stdin)
-
-			fmt.Println("Which channel would you like to connect?")
-			fmt.Println()
-			fmt.Println("  1) Telegram")
-			fmt.Println("  2) Discord")
-			fmt.Println("  3) Slack")
-			fmt.Println("  4) WhatsApp")
-			fmt.Println()
-			fmt.Print("Enter 1, 2, 3 or 4: ")
-
-			choice, _ := reader.ReadString('\n')
-			choice = strings.TrimSpace(strings.ToLower(choice))
-
-			homeDir := resolveHomeDir(cmd)
-			cfg, err := config.LoadConfig(homeDir)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "failed to load config: %v\n", err)
-				return
-			}
-			cfgPath, _, err := config.ResolvePaths(homeDir)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "failed to resolve config path: %v\n", err)
-				return
-			}
-
-			switch choice {
-			case "1", "telegram":
-				setupTelegramInteractive(reader, cfg, cfgPath)
-			case "2", "discord":
-				setupDiscordInteractive(reader, cfg, cfgPath)
-			case "3", "slack":
-				setupSlackInteractive(reader, cfg, cfgPath)
-			case "4", "whatsapp":
-				setupWhatsAppInteractive(cfg, cfgPath, homeDir)
-			default:
-				fmt.Fprintf(os.Stderr, "invalid choice %q — please enter 1, 2, 3 or 4\n", choice)
-			}
-		},
-	}
-
-	channelsCmd.AddCommand(loginCmd)
-	rootCmd.AddCommand(channelsCmd)
-
-	agentCmd := &cobra.Command{
-		Use:   "agent",
-		Short: "Run a single-shot agent query (use -m)",
-		Run: func(cmd *cobra.Command, args []string) {
-			msg, _ := cmd.Flags().GetString("message")
-			modelFlag, _ := cmd.Flags().GetString("model")
-			if msg == "" {
-				fmt.Println("Specify a message with -m \"your message\"")
-				return
-			}
-
-			homeDir := resolveHomeDir(cmd)
-			hub := chat.NewHub(100)
-			cfg, _ := config.LoadConfig(homeDir)
-			provider := providers.NewProviderFromConfig(cfg)
-
-			model := modelFlag
-			if model == "" && cfg.Agents.Defaults.Model != "" {
-				model = cfg.Agents.Defaults.Model
-			}
-			if model == "" {
-				model = provider.GetDefaultModel()
-			}
-
-			maxIter := cfg.Agents.Defaults.MaxToolIterations
-			if maxIter <= 0 {
-				maxIter = 100
-			}
-			ws := expandWorkspace(cfg.Agents.Defaults.Workspace, homeDir)
-			if err := os.Chdir(ws); err != nil {
-				fmt.Fprintf(os.Stderr, "failed to chdir to workspace %q: %v\n", ws, err)
-				return
-			}
-			ag := agent.NewAgentLoop(hub, provider, model, maxIter, ws, nil, cfg.MCPServers, cfg.Agents.Defaults.AllowedDirs, cfg.Agents.Defaults.DisableTools, cfg.Brain, homeDir, cfg.Agents.Defaults.Sandbox, "", cfg.Agents.Defaults.MaxTurnMessages, cfg.Agents.Defaults.MaxToolResultChars, cfg.Agents.Defaults.Compaction)
-			defer ag.Close()
-			if cfg.Agents.Defaults.EnableToolActivityIndicator != nil {
-				ag.SetToolActivityIndicator(*cfg.Agents.Defaults.EnableToolActivityIndicator)
-			}
-			if cfg.Agents.Defaults.EnableToolCallMessages != nil {
-				ag.SetToolCallMessages(*cfg.Agents.Defaults.EnableToolCallMessages)
-			}
-
-			resp, err := ag.ProcessDirect(msg, 60*time.Second)
-			if err != nil {
-				fmt.Fprintln(cmd.ErrOrStderr(), "error:", err)
-				return
-			}
-			fmt.Fprintln(cmd.OutOrStdout(), resp)
-		},
-	}
-	agentCmd.Flags().StringP("message", "m", "", "Message to send to the agent")
-	agentCmd.Flags().StringP("model", "M", "", "Model to use (overrides config/provider default)")
-	rootCmd.AddCommand(agentCmd)
-
-	gatewayCmd := &cobra.Command{
-		Use:   "gateway",
-		Short: "Start long-running gateway (agent, channels, heartbeat, signals)",
-		Run: func(cmd *cobra.Command, args []string) {
-			homeDir := resolveHomeDir(cmd)
-			hub := chat.NewHub(200)
-			cfg, _ := config.LoadConfig(homeDir)
-			provider := providers.NewProviderFromConfig(cfg)
-
-			modelFlag, _ := cmd.Flags().GetString("model")
-			model := modelFlag
-			if model == "" && cfg.Agents.Defaults.Model != "" {
-				model = cfg.Agents.Defaults.Model
-			}
-			if model == "" {
-				model = provider.GetDefaultModel()
-			}
-
-			scheduler := cron.NewScheduler(func(job cron.Job) {
-				log.Printf("cron fired: %s — %s", job.Name, job.Message)
-				hub.In <- chat.Inbound{
-					Channel:  job.Channel,
-					SenderID: "cron",
-					ChatID:   job.ChatID,
-					Content:  fmt.Sprintf("[Scheduled reminder fired] %s — Please relay this to the user in a friendly way.", job.Message),
-				}
-			})
-
-			maxIter := cfg.Agents.Defaults.MaxToolIterations
-			if maxIter <= 0 {
-				maxIter = 100
-			}
-			ws := expandWorkspace(cfg.Agents.Defaults.Workspace, homeDir)
-			if err := os.Chdir(ws); err != nil {
-				fmt.Fprintf(os.Stderr, "failed to chdir to workspace %q: %v\n", ws, err)
-				return
-			}
-			// Compute signal socket path for MCP env injection
-			signalSocketPath := ""
-			if cfg.Signal.Enabled {
-				signalSocketPath = cfg.Signal.GetSocketPath(homeDir, ws)
-			}
-			ag := agent.NewAgentLoop(hub, provider, model, maxIter, ws, scheduler, cfg.MCPServers, cfg.Agents.Defaults.AllowedDirs, cfg.Agents.Defaults.DisableTools, cfg.Brain, homeDir, cfg.Agents.Defaults.Sandbox, signalSocketPath, cfg.Agents.Defaults.MaxTurnMessages, cfg.Agents.Defaults.MaxToolResultChars, cfg.Agents.Defaults.Compaction)
-			defer ag.Close()
-			if cfg.Agents.Defaults.EnableToolActivityIndicator != nil {
-				ag.SetToolActivityIndicator(*cfg.Agents.Defaults.EnableToolActivityIndicator)
-			}
-			if cfg.Agents.Defaults.EnableToolCallMessages != nil {
-				ag.SetToolCallMessages(*cfg.Agents.Defaults.EnableToolCallMessages)
-			}
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-
-			go ag.Run(ctx)
-			go scheduler.Start(ctx.Done())
-
-			hbInterval := time.Duration(cfg.Agents.Defaults.HeartbeatIntervalS) * time.Second
-			if hbInterval <= 0 {
-				hbInterval = 60 * time.Second
-			}
-			heartbeat.StartHeartbeat(ctx, ws, hbInterval, hub)
-
-			// Start external signal listener (Unix domain socket)
-			if cfg.Signal.Enabled {
-				socketPath := cfg.Signal.GetSocketPath(homeDir, ws)
-				sigRegistry := picosignal.NewRegistry(cfg.Signal.Actions)
-				sigListener := picosignal.NewListener(socketPath, hub, sigRegistry, cfg.Signal.DefaultChannel, cfg.Signal.DefaultChatID)
-				go func() {
-					if err := sigListener.Start(ctx); err != nil {
-						log.Printf("Signal: listener error: %v", err)
-					}
-				}()
-				log.Printf("Signal: external trigger system enabled on %s", socketPath)
-				ag.SetSignalListener(sigListener)
-			}
-
-			if cfg.Channels.Telegram.Enabled {
-				showTyping := cfg.Agents.Defaults.EnableToolActivityIndicator == nil || *cfg.Agents.Defaults.EnableToolActivityIndicator
-				if err := channels.StartTelegram(ctx, hub, cfg.Channels.Telegram.Token, cfg.Channels.Telegram.AllowFrom, showTyping); err != nil {
-					fmt.Fprintf(os.Stderr, "failed to start telegram: %v\n", err)
-				}
-			}
-
-			if cfg.Channels.Discord.Enabled {
-				if err := channels.StartDiscord(ctx, hub, cfg.Channels.Discord.Token, cfg.Channels.Discord.AllowFrom); err != nil {
-					fmt.Fprintf(os.Stderr, "failed to start discord: %v\n", err)
-				}
-			}
-
-			if cfg.Channels.Slack.Enabled {
-				if err := channels.StartSlack(ctx, hub, cfg.Channels.Slack.AppToken, cfg.Channels.Slack.BotToken, cfg.Channels.Slack.AllowUsers, cfg.Channels.Slack.AllowChannels); err != nil {
-					fmt.Fprintf(os.Stderr, "failed to start slack: %v\n", err)
-				}
-			}
-
-			if cfg.Channels.WhatsApp.Enabled {
-				dbPath := cfg.Channels.WhatsApp.DBPath
-				if dbPath == "" {
-					dbPath = filepath.Join(homeDir, "whatsapp.db")
-				}
-				if strings.HasPrefix(dbPath, "~/") {
-					userHome, _ := os.UserHomeDir()
-					dbPath = filepath.Join(userHome, dbPath[2:])
-				}
-				if err := channels.StartWhatsApp(ctx, hub, dbPath, cfg.Channels.WhatsApp.AllowFrom); err != nil {
-					fmt.Fprintf(os.Stderr, "failed to start whatsapp: %v\n", err)
-				}
-			}
-
-			hub.StartRouter(ctx)
-
-			sigCh := make(chan os.Signal, 1)
-			signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-			<-sigCh
-			fmt.Println("shutting down gateway")
-			cancel()
-		},
-	}
-	gatewayCmd.Flags().StringP("model", "M", "", "Model to use (overrides model in config)")
-	rootCmd.AddCommand(gatewayCmd)
-
-	// signal subcommand — send external signals to a running gateway
-	signalCmd := &cobra.Command{
-		Use:   "signal",
-		Short: "Send external signals to a running picobot gateway",
-	}
-	signalCmd.AddCommand(picosignal.NewSendCmd())
-	rootCmd.AddCommand(signalCmd)
-
-	// memory subcommands
-	memoryCmd := &cobra.Command{
-		Use:   "memory",
-		Short: "Inspect or modify workspace memory files",
-	}
-
-	readCmd := &cobra.Command{
-		Use:   "read [today|long]",
-		Short: "Read memory (today or long-term)",
-		Args:  cobra.ExactArgs(1),
-		Run: func(cmd *cobra.Command, args []string) {
-			target := args[0]
-			homeDir := resolveHomeDir(cmd)
-			cfg, _ := config.LoadConfig(homeDir)
-			ws := expandWorkspace(cfg.Agents.Defaults.Workspace, homeDir)
-			mem := memory.NewMemoryStoreWithWorkspace(ws, 100)
-			switch target {
-			case "today":
-				out, _ := mem.ReadToday()
-				fmt.Fprintln(cmd.OutOrStdout(), out)
-			case "long":
-				out, _ := mem.ReadLongTerm()
-				fmt.Fprintln(cmd.OutOrStdout(), out)
-			default:
-				fmt.Fprintln(cmd.ErrOrStderr(), "unknown target: "+target)
-			}
-		},
-	}
-
-	appendCmd := &cobra.Command{
-		Use:   "append [today|long] -c <content>",
-		Short: "Append content to today's note or long-term memory",
-		Args:  cobra.ExactArgs(1),
-		Run: func(cmd *cobra.Command, args []string) {
-			target := args[0]
-			content, _ := cmd.Flags().GetString("content")
-			if content == "" {
-				fmt.Fprintln(cmd.ErrOrStderr(), "-c content required")
-				return
-			}
-			homeDir := resolveHomeDir(cmd)
-			cfg, _ := config.LoadConfig(homeDir)
-			ws := expandWorkspace(cfg.Agents.Defaults.Workspace, homeDir)
-			mem := memory.NewMemoryStoreWithWorkspace(ws, 100)
-			switch target {
-			case "today":
-				if err := mem.AppendToday(content); err != nil {
-					fmt.Fprintln(cmd.ErrOrStderr(), "append failed:", err)
-					return
-				}
-				fmt.Fprintln(cmd.OutOrStdout(), "appended to today")
-			case "long":
-				lt, err := mem.ReadLongTerm()
-				if err != nil {
-					fmt.Fprintln(cmd.ErrOrStderr(), "append long failed:", err)
-					return
-				}
-				if err := mem.WriteLongTerm(lt + "\n" + content); err != nil {
-					fmt.Fprintln(cmd.ErrOrStderr(), "append long failed:", err)
-					return
-				}
-				fmt.Fprintln(cmd.OutOrStdout(), "appended to long-term memory")
-			default:
-				fmt.Fprintln(cmd.ErrOrStderr(), "unknown target:", target)
-			}
-		},
-	}
-	appendCmd.Flags().StringP("content", "c", "", "Content to append")
-
-	writeCmd := &cobra.Command{
-		Use:   "write long -c <content>",
-		Short: "Write (overwrite) long-term MEMORY.md",
-		Args:  cobra.ExactArgs(1),
-		Run: func(cmd *cobra.Command, args []string) {
-			if args[0] != "long" {
-				fmt.Fprintln(os.Stderr, "write currently only supports 'long'")
-				return
-			}
-			content, _ := cmd.Flags().GetString("content")
-			if content == "" {
-				fmt.Fprintln(cmd.ErrOrStderr(), "-c content required")
-				return
-			}
-			homeDir := resolveHomeDir(cmd)
-			cfg, _ := config.LoadConfig(homeDir)
-			ws := expandWorkspace(cfg.Agents.Defaults.Workspace, homeDir)
-			mem := memory.NewMemoryStoreWithWorkspace(ws, 100)
-			if err := mem.WriteLongTerm(content); err != nil {
-				fmt.Fprintln(cmd.ErrOrStderr(), "write failed:", err)
-				return
-			}
-			fmt.Fprintln(cmd.OutOrStdout(), "wrote long-term memory")
-		},
-	}
-	writeCmd.Flags().StringP("content", "c", "", "Content to write")
-
-	recentCmd := &cobra.Command{
-		Use:   "recent -days N",
-		Short: "Show recent N days' notes",
-		Run: func(cmd *cobra.Command, args []string) {
-			days, _ := cmd.Flags().GetInt("days")
-			homeDir := resolveHomeDir(cmd)
-			cfg, _ := config.LoadConfig(homeDir)
-			ws := expandWorkspace(cfg.Agents.Defaults.Workspace, homeDir)
-			mem := memory.NewMemoryStoreWithWorkspace(ws, 100)
-			out, _ := mem.GetRecentMemories(days)
-			fmt.Fprintln(cmd.OutOrStdout(), out)
-		},
-	}
-	recentCmd.Flags().IntP("days", "d", 1, "Number of days to include")
-
-	memoryCmd.AddCommand(readCmd)
-	memoryCmd.AddCommand(appendCmd)
-	memoryCmd.AddCommand(writeCmd)
-	memoryCmd.AddCommand(recentCmd)
-
-	rankCmd := &cobra.Command{
-		Use:   "rank -q <query>",
-		Short: "Rank recent memories by relevance to a query",
-		Run: func(cmd *cobra.Command, args []string) {
-			q, _ := cmd.Flags().GetString("query")
-			if q == "" {
-				fmt.Fprintln(cmd.ErrOrStderr(), "-q query required")
-				return
-			}
-			top, _ := cmd.Flags().GetInt("top")
-			verbose, _ := cmd.Flags().GetBool("verbose")
-			homeDir := resolveHomeDir(cmd)
-			cfg, _ := config.LoadConfig(homeDir)
-			ws := expandWorkspace(cfg.Agents.Defaults.Workspace, homeDir)
-			mem := memory.NewMemoryStoreWithWorkspace(ws, 100)
-			items := make([]memory.MemoryItem, 0)
-			if td, err := mem.ReadToday(); err == nil && td != "" {
-				for _, line := range strings.Split(td, "\n") {
-					line = strings.TrimSpace(line)
-					if line == "" {
-						continue
-					}
-					if idx := strings.Index(line, "] "); idx != -1 && strings.HasPrefix(line, "[") {
-						line = strings.TrimSpace(line[idx+2:])
-					}
-					items = append(items, memory.MemoryItem{Kind: "today", Text: line})
-				}
-			}
-			if lt, err := mem.ReadLongTerm(); err == nil && lt != "" {
-				for _, line := range strings.Split(lt, "\n") {
-					line = strings.TrimSpace(line)
-					if line == "" {
-						continue
-					}
-					items = append(items, memory.MemoryItem{Kind: "long", Text: line})
-				}
-			}
-			provider := providers.NewProviderFromConfig(cfg)
-			var logger *log.Logger
-			if verbose {
-				logger = log.New(cmd.OutOrStdout(), "ranker: ", 0)
-			}
-			ranker := memory.NewLLMRankerWithLogger(provider, provider.GetDefaultModel(), logger)
-			res := ranker.Rank(q, items, top)
-			for i, m := range res {
-				fmt.Fprintf(cmd.OutOrStdout(), "%d: %s (%s)\n", i+1, m.Text, m.Kind)
-			}
-		},
-	}
-	rankCmd.Flags().StringP("query", "q", "", "Query to rank memories against")
-	rankCmd.Flags().IntP("top", "k", 5, "Number of top memories to show")
-	rankCmd.Flags().BoolP("verbose", "v", false, "Enable verbose diagnostic logging")
-	memoryCmd.AddCommand(rankCmd)
-
-	rootCmd.AddCommand(memoryCmd)
-	return rootCmd
-}
-
-func main() {
-	rootCmd := NewRootCmd()
-	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-}
-
-func resolveHomeDir(cmd *cobra.Command) string {
-	home, _ := cmd.Flags().GetString("home")
-	if home == "" {
+// resolveHomeDir resolves the picobot home directory.
+func resolveHomeDir(homeFlag string) string {
+	if homeFlag == "" {
 		userHome, _ := os.UserHomeDir()
 		return filepath.Join(userHome, ".picobot")
 	}
-	if strings.HasPrefix(home, "~/") {
+	if strings.HasPrefix(homeFlag, "~/") {
 		userHome, _ := os.UserHomeDir()
-		home = filepath.Join(userHome, home[2:])
+		return filepath.Join(userHome, homeFlag[2:])
 	}
-	return home
+	return homeFlag
 }
 
 func expandWorkspace(ws, homeDir string) string {
@@ -502,6 +48,532 @@ func expandWorkspace(ws, homeDir string) string {
 		return filepath.Join(userHome, ws[2:])
 	}
 	return ws
+}
+
+func usage() {
+	fmt.Fprintf(os.Stderr, "picobot v%s — lightweight agent runtime\n\n", version)
+	fmt.Fprintf(os.Stderr, "Usage:\n")
+	fmt.Fprintf(os.Stderr, "  picobot <command> [flags]\n\n")
+	fmt.Fprintf(os.Stderr, "Commands:\n")
+	fmt.Fprintf(os.Stderr, "  version          Print version\n")
+	fmt.Fprintf(os.Stderr, "  onboard          Create default config and workspace\n")
+	fmt.Fprintf(os.Stderr, "  channels login   Interactively connect a channel\n")
+	fmt.Fprintf(os.Stderr, "  agent            Run a single-shot agent query\n")
+	fmt.Fprintf(os.Stderr, "  gateway          Start long-running gateway\n")
+	fmt.Fprintf(os.Stderr, "  signal send      Send an external signal to a running gateway\n")
+	fmt.Fprintf(os.Stderr, "  memory read      Read memory (today or long)\n")
+	fmt.Fprintf(os.Stderr, "  memory append    Append content to memory\n")
+	fmt.Fprintf(os.Stderr, "  memory write     Overwrite long-term memory\n")
+	fmt.Fprintf(os.Stderr, "  memory recent    Show recent days' notes\n")
+	fmt.Fprintf(os.Stderr, "  memory rank      Rank memories by relevance\n\n")
+	fmt.Fprintf(os.Stderr, "Global flags:\n")
+	fmt.Fprintf(os.Stderr, "  -home string     picobot home directory (default: ~/.picobot)\n")
+}
+
+func main() {
+	if len(os.Args) < 2 {
+		usage()
+		os.Exit(2)
+	}
+
+	command := os.Args[1]
+	globalFlags := flag.NewFlagSet("picobot", flag.ExitOnError)
+	homeFlag := globalFlags.String("home", "", "picobot home directory (default: ~/.picobot)")
+
+	// Parse global flags from the remaining args (after the command)
+	args := os.Args[2:]
+	_ = globalFlags.Parse(args)
+	rest := globalFlags.Args()
+
+	switch command {
+	case "version":
+		fmt.Printf("🤖 picobot v%s\n", version)
+
+	case "onboard":
+		runOnboard(*homeFlag)
+
+	case "channels":
+		if len(rest) == 0 {
+			fmt.Fprintln(os.Stderr, "Usage: picobot channels login")
+			os.Exit(2)
+		}
+		switch rest[0] {
+		case "login":
+			runChannelsLogin(*homeFlag)
+		default:
+			fmt.Fprintf(os.Stderr, "unknown channels subcommand: %s\n", rest[0])
+			os.Exit(2)
+		}
+
+	case "agent":
+		runAgent(*homeFlag, rest)
+
+	case "gateway":
+		runGateway(*homeFlag, rest)
+
+	case "signal":
+		if len(rest) == 0 {
+			fmt.Fprintln(os.Stderr, "Usage: picobot signal send [flags]")
+			os.Exit(2)
+		}
+		switch rest[0] {
+		case "send":
+			runSignalSend(rest[1:])
+		default:
+			fmt.Fprintf(os.Stderr, "unknown signal subcommand: %s\n", rest[0])
+			os.Exit(2)
+		}
+
+	case "memory":
+		if len(rest) == 0 {
+			fmt.Fprintln(os.Stderr, "Usage: picobot memory <read|append|write|recent|rank> [flags]")
+			os.Exit(2)
+		}
+		switch rest[0] {
+		case "read":
+			runMemoryRead(*homeFlag, rest[1:])
+		case "append":
+			runMemoryAppend(*homeFlag, rest[1:])
+		case "write":
+			runMemoryWrite(*homeFlag, rest[1:])
+		case "recent":
+			runMemoryRecent(*homeFlag, rest[1:])
+		case "rank":
+			runMemoryRank(*homeFlag, rest[1:])
+		default:
+			fmt.Fprintf(os.Stderr, "unknown memory subcommand: %s\n", rest[0])
+			os.Exit(2)
+		}
+
+	default:
+		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", command)
+		usage()
+		os.Exit(2)
+	}
+}
+
+// ─── onboard ────────────────────────────────────────────────────────────────
+
+func runOnboard(homeFlag string) {
+	homeDir := resolveHomeDir(homeFlag)
+	cfgPath, workspacePath, err := config.Onboard(homeDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "onboard failed: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("Wrote config to %s\nInitialized workspace at %s\n", cfgPath, workspacePath)
+}
+
+// ─── channels login ─────────────────────────────────────────────────────────
+
+func runChannelsLogin(homeFlag string) {
+	reader := bufio.NewReader(os.Stdin)
+
+	fmt.Println("Which channel would you like to connect?")
+	fmt.Println()
+	fmt.Println("  1) Telegram")
+	fmt.Println("  2) Discord")
+	fmt.Println()
+	fmt.Print("Enter 1 or 2: ")
+
+	choice, _ := reader.ReadString('\n')
+	choice = strings.TrimSpace(strings.ToLower(choice))
+
+	homeDir := resolveHomeDir(homeFlag)
+	cfg, err := config.LoadConfig(homeDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to load config: %v\n", err)
+		os.Exit(1)
+	}
+	cfgPath, _, err := config.ResolvePaths(homeDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to resolve config path: %v\n", err)
+		os.Exit(1)
+	}
+
+	switch choice {
+	case "1", "telegram":
+		setupTelegramInteractive(reader, cfg, cfgPath)
+	case "2", "discord":
+		setupDiscordInteractive(reader, cfg, cfgPath)
+	default:
+		fmt.Fprintf(os.Stderr, "invalid choice %q — please enter 1 or 2\n", choice)
+		os.Exit(2)
+	}
+}
+
+// ─── agent ──────────────────────────────────────────────────────────────────
+
+func runAgent(homeFlag string, args []string) {
+	fs := flag.NewFlagSet("agent", flag.ExitOnError)
+	msg := fs.String("m", "", "Message to send to the agent")
+	modelFlag := fs.String("M", "", "Model to use (overrides config/provider default)")
+	_ = fs.Parse(args)
+
+	if *msg == "" {
+		fmt.Fprintln(os.Stderr, "Specify a message with -m \"your message\"")
+		os.Exit(2)
+	}
+
+	homeDir := resolveHomeDir(homeFlag)
+	hub := chat.NewHub(100)
+	cfg, _ := config.LoadConfig(homeDir)
+	provider := providers.NewProviderFromConfig(cfg)
+
+	model := *modelFlag
+	if model == "" && cfg.Agents.Defaults.Model != "" {
+		model = cfg.Agents.Defaults.Model
+	}
+	if model == "" {
+		model = provider.GetDefaultModel()
+	}
+
+	maxIter := cfg.Agents.Defaults.MaxToolIterations
+	if maxIter <= 0 {
+		maxIter = 100
+	}
+	ws := expandWorkspace(cfg.Agents.Defaults.Workspace, homeDir)
+	if err := os.Chdir(ws); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to chdir to workspace %q: %v\n", ws, err)
+		os.Exit(1)
+	}
+	ag := agent.NewAgentLoop(hub, provider, model, maxIter, ws, nil, cfg.MCPServers, cfg.Agents.Defaults.AllowedDirs, cfg.Agents.Defaults.DisableTools, cfg.Brain, homeDir, cfg.Agents.Defaults.Sandbox, "", cfg.Agents.Defaults.MaxTurnMessages, cfg.Agents.Defaults.MaxToolResultChars, cfg.Agents.Defaults.Compaction)
+	defer ag.Close()
+	if cfg.Agents.Defaults.EnableToolActivityIndicator != nil {
+		ag.SetToolActivityIndicator(*cfg.Agents.Defaults.EnableToolActivityIndicator)
+	}
+	if cfg.Agents.Defaults.EnableToolCallMessages != nil {
+		ag.SetToolCallMessages(*cfg.Agents.Defaults.EnableToolCallMessages)
+	}
+
+	resp, err := ag.ProcessDirect(*msg, 60*time.Second)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+	fmt.Println(resp)
+}
+
+// ─── gateway ────────────────────────────────────────────────────────────────
+
+func runGateway(homeFlag string, args []string) {
+	fs := flag.NewFlagSet("gateway", flag.ExitOnError)
+	modelFlag := fs.String("M", "", "Model to use (overrides config/provider default)")
+	_ = fs.Parse(args)
+
+	homeDir := resolveHomeDir(homeFlag)
+	hub := chat.NewHub(200)
+	cfg, _ := config.LoadConfig(homeDir)
+	provider := providers.NewProviderFromConfig(cfg)
+
+	model := *modelFlag
+	if model == "" && cfg.Agents.Defaults.Model != "" {
+		model = cfg.Agents.Defaults.Model
+	}
+	if model == "" {
+		model = provider.GetDefaultModel()
+	}
+
+	scheduler := cron.NewScheduler(func(job cron.Job) {
+		log.Printf("cron fired: %s — %s", job.Name, job.Message)
+		hub.In <- chat.Inbound{
+			Channel:  job.Channel,
+			SenderID: "cron",
+			ChatID:   job.ChatID,
+			Content:  fmt.Sprintf("[Scheduled reminder fired] %s — Please relay this to the user in a friendly way.", job.Message),
+		}
+	})
+
+	maxIter := cfg.Agents.Defaults.MaxToolIterations
+	if maxIter <= 0 {
+		maxIter = 100
+	}
+	ws := expandWorkspace(cfg.Agents.Defaults.Workspace, homeDir)
+	if err := os.Chdir(ws); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to chdir to workspace %q: %v\n", ws, err)
+		os.Exit(1)
+	}
+	// Compute signal socket path for MCP env injection
+	signalSocketPath := ""
+	if cfg.Signal.Enabled {
+		signalSocketPath = cfg.Signal.GetSocketPath(homeDir, ws)
+	}
+	ag := agent.NewAgentLoop(hub, provider, model, maxIter, ws, scheduler, cfg.MCPServers, cfg.Agents.Defaults.AllowedDirs, cfg.Agents.Defaults.DisableTools, cfg.Brain, homeDir, cfg.Agents.Defaults.Sandbox, signalSocketPath, cfg.Agents.Defaults.MaxTurnMessages, cfg.Agents.Defaults.MaxToolResultChars, cfg.Agents.Defaults.Compaction)
+	defer ag.Close()
+	if cfg.Agents.Defaults.EnableToolActivityIndicator != nil {
+		ag.SetToolActivityIndicator(*cfg.Agents.Defaults.EnableToolActivityIndicator)
+	}
+	if cfg.Agents.Defaults.EnableToolCallMessages != nil {
+		ag.SetToolCallMessages(*cfg.Agents.Defaults.EnableToolCallMessages)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go ag.Run(ctx)
+	go scheduler.Start(ctx.Done())
+
+	hbInterval := time.Duration(cfg.Agents.Defaults.HeartbeatIntervalS) * time.Second
+	if hbInterval <= 0 {
+		hbInterval = 60 * time.Second
+	}
+	heartbeat.StartHeartbeat(ctx, ws, hbInterval, hub)
+
+	// Start external signal listener (Unix domain socket)
+	if cfg.Signal.Enabled {
+		socketPath := cfg.Signal.GetSocketPath(homeDir, ws)
+		sigRegistry := picosignal.NewRegistry(cfg.Signal.Actions)
+		sigListener := picosignal.NewListener(socketPath, hub, sigRegistry, cfg.Signal.DefaultChannel, cfg.Signal.DefaultChatID)
+		go func() {
+			if err := sigListener.Start(ctx); err != nil {
+				log.Printf("Signal: listener error: %v", err)
+			}
+		}()
+		log.Printf("Signal: external trigger system enabled on %s", socketPath)
+		ag.SetSignalListener(sigListener)
+	}
+
+	if cfg.Channels.Telegram.Enabled {
+		showTyping := cfg.Agents.Defaults.EnableToolActivityIndicator == nil || *cfg.Agents.Defaults.EnableToolActivityIndicator
+		if err := channels.StartTelegram(ctx, hub, cfg.Channels.Telegram.Token, cfg.Channels.Telegram.AllowFrom, showTyping); err != nil {
+			log.Fatalf("Telegram: %v", err)
+		}
+	}
+
+	if cfg.Channels.Discord.Enabled {
+		if err := channels.StartDiscord(ctx, hub, cfg.Channels.Discord.Token, cfg.Channels.Discord.AllowFrom); err != nil {
+			log.Fatalf("Discord: %v", err)
+		}
+	}
+
+	go func() {
+		for out := range hub.Out {
+			log.Printf("outbound [%s/%s]: %s", out.Channel, out.ChatID, truncate(out.Content, 80))
+		}
+	}()
+
+	log.Println("gateway started — waiting for messages")
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	<-sigCh
+	log.Println("shutting down...")
+}
+
+// ─── signal send ────────────────────────────────────────────────────────────
+
+func runSignalSend(args []string) {
+	fs := flag.NewFlagSet("signal send", flag.ExitOnError)
+	sigSource := fs.String("s", "", "Source identifier (e.g., my-script, camera-1) (required)")
+	sigAction := fs.String("a", "", "Registered action name (required)")
+	sigChannel := fs.String("c", "", "Target channel (e.g., telegram, discord)")
+	sigChatID := fs.String("chat-id", "", "Target chat ID")
+	socketPath := fs.String("socket", "", "Unix socket path (default: {workspace}/.picobot/signals.sock)")
+	// Also accept --source and --action long forms
+	fs.StringVar(sigSource, "source", "", "Source identifier")
+	fs.StringVar(sigAction, "action", "", "Registered action name")
+	_ = fs.Parse(args)
+
+	if *sigAction == "" {
+		fmt.Fprintln(os.Stderr, "action is required (--action or -a)")
+		os.Exit(2)
+	}
+	if *sigSource == "" {
+		fmt.Fprintln(os.Stderr, "source is required (--source or -s)")
+		os.Exit(2)
+	}
+
+	sig := picosignal.Signal{
+		Source:  *sigSource,
+		Action:  *sigAction,
+		Channel: *sigChannel,
+		ChatID:  *sigChatID,
+	}
+
+	if err := picosignal.SendSignal(*socketPath, sig); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to send signal: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("Signal sent: source=%s action=%s\n", *sigSource, *sigAction)
+}
+
+// ─── memory read ────────────────────────────────────────────────────────────
+
+func runMemoryRead(homeFlag string, args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "Usage: picobot memory read <today|long>")
+		os.Exit(2)
+	}
+	target := args[0]
+	homeDir := resolveHomeDir(homeFlag)
+	cfg, _ := config.LoadConfig(homeDir)
+	ws := expandWorkspace(cfg.Agents.Defaults.Workspace, homeDir)
+	mem := memory.NewMemoryStoreWithWorkspace(ws, 100)
+
+	switch target {
+	case "today":
+		out, _ := mem.ReadToday()
+		fmt.Println(out)
+	case "long":
+		out, _ := mem.ReadLongTerm()
+		fmt.Println(out)
+	default:
+		fmt.Fprintln(os.Stderr, "unknown target: "+target)
+		os.Exit(2)
+	}
+}
+
+// ─── memory append ──────────────────────────────────────────────────────────
+
+func runMemoryAppend(homeFlag string, args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "Usage: picobot memory append <today|long> -c <content>")
+		os.Exit(2)
+	}
+	target := args[0]
+
+	fs := flag.NewFlagSet("memory append", flag.ExitOnError)
+	content := fs.String("c", "", "Content to append")
+	_ = fs.Parse(args[1:])
+
+	if *content == "" {
+		fmt.Fprintln(os.Stderr, "-c content required")
+		os.Exit(2)
+	}
+
+	homeDir := resolveHomeDir(homeFlag)
+	cfg, _ := config.LoadConfig(homeDir)
+	ws := expandWorkspace(cfg.Agents.Defaults.Workspace, homeDir)
+	mem := memory.NewMemoryStoreWithWorkspace(ws, 100)
+
+	switch target {
+	case "today":
+		if err := mem.AppendToday(*content); err != nil {
+			fmt.Fprintln(os.Stderr, "append failed:", err)
+			os.Exit(1)
+		}
+		fmt.Println("appended to today")
+	case "long":
+		lt, err := mem.ReadLongTerm()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "append long failed:", err)
+			os.Exit(1)
+		}
+		if err := mem.WriteLongTerm(lt + "\n" + *content); err != nil {
+			fmt.Fprintln(os.Stderr, "append long failed:", err)
+			os.Exit(1)
+		}
+		fmt.Println("appended to long-term memory")
+	default:
+		fmt.Fprintln(os.Stderr, "unknown target:", target)
+		os.Exit(2)
+	}
+}
+
+// ─── memory write ───────────────────────────────────────────────────────────
+
+func runMemoryWrite(homeFlag string, args []string) {
+	if len(args) < 1 || args[0] != "long" {
+		fmt.Fprintln(os.Stderr, "Usage: picobot memory write long -c <content>")
+		os.Exit(2)
+	}
+
+	fs := flag.NewFlagSet("memory write", flag.ExitOnError)
+	content := fs.String("c", "", "Content to write")
+	_ = fs.Parse(args[1:])
+
+	if *content == "" {
+		fmt.Fprintln(os.Stderr, "-c content required")
+		os.Exit(2)
+	}
+
+	homeDir := resolveHomeDir(homeFlag)
+	cfg, _ := config.LoadConfig(homeDir)
+	ws := expandWorkspace(cfg.Agents.Defaults.Workspace, homeDir)
+	mem := memory.NewMemoryStoreWithWorkspace(ws, 100)
+
+	if err := mem.WriteLongTerm(*content); err != nil {
+		fmt.Fprintln(os.Stderr, "write failed:", err)
+		os.Exit(1)
+	}
+	fmt.Println("wrote long-term memory")
+}
+
+// ─── memory recent ──────────────────────────────────────────────────────────
+
+func runMemoryRecent(homeFlag string, args []string) {
+	fs := flag.NewFlagSet("memory recent", flag.ExitOnError)
+	days := fs.Int("d", 1, "Number of days to include")
+	_ = fs.Parse(args)
+
+	homeDir := resolveHomeDir(homeFlag)
+	cfg, _ := config.LoadConfig(homeDir)
+	ws := expandWorkspace(cfg.Agents.Defaults.Workspace, homeDir)
+	mem := memory.NewMemoryStoreWithWorkspace(ws, 100)
+
+	out, _ := mem.GetRecentMemories(*days)
+	fmt.Println(out)
+}
+
+// ─── memory rank ────────────────────────────────────────────────────────────
+
+func runMemoryRank(homeFlag string, args []string) {
+	fs := flag.NewFlagSet("memory rank", flag.ExitOnError)
+	q := fs.String("q", "", "Query to rank memories against")
+	top := fs.Int("k", 5, "Number of top memories to show")
+	verbose := fs.Bool("v", false, "Enable verbose diagnostic logging")
+	_ = fs.Parse(args)
+
+	if *q == "" {
+		fmt.Fprintln(os.Stderr, "-q query required")
+		os.Exit(2)
+	}
+
+	homeDir := resolveHomeDir(homeFlag)
+	cfg, _ := config.LoadConfig(homeDir)
+	ws := expandWorkspace(cfg.Agents.Defaults.Workspace, homeDir)
+	mem := memory.NewMemoryStoreWithWorkspace(ws, 100)
+
+	items := make([]memory.MemoryItem, 0)
+	if td, err := mem.ReadToday(); err == nil && td != "" {
+		for _, line := range strings.Split(td, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			if idx := strings.Index(line, "] "); idx != -1 && strings.HasPrefix(line, "[") {
+				line = strings.TrimSpace(line[idx+2:])
+			}
+			items = append(items, memory.MemoryItem{Kind: "today", Text: line})
+		}
+	}
+	if lt, err := mem.ReadLongTerm(); err == nil && lt != "" {
+		for _, line := range strings.Split(lt, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			items = append(items, memory.MemoryItem{Kind: "long", Text: line})
+		}
+	}
+
+	provider := providers.NewProviderFromConfig(cfg)
+	var logger *log.Logger
+	if *verbose {
+		logger = log.New(os.Stdout, "ranker: ", 0)
+	}
+	ranker := memory.NewLLMRankerWithLogger(provider, provider.GetDefaultModel(), logger)
+	res := ranker.Rank(*q, items, *top)
+	for i, m := range res {
+		fmt.Printf("%d: %s (%s)\n", i+1, m.Text, m.Kind)
+	}
+}
+
+// ─── helpers ────────────────────────────────────────────────────────────────
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
 }
 
 func promptLine(reader *bufio.Reader, prompt string) string {
@@ -600,100 +672,4 @@ func setupDiscordInteractive(reader *bufio.Reader, cfg config.Config, cfgPath st
 
 	fmt.Println()
 	fmt.Println("Discord configured! Run 'picobot gateway' to start.")
-}
-
-func setupSlackInteractive(reader *bufio.Reader, cfg config.Config, cfgPath string) {
-	fmt.Println()
-	fmt.Println("=== Slack Setup ===")
-	fmt.Println()
-	fmt.Println("You need a Slack App with Socket Mode enabled:")
-	fmt.Println("  1. Create or select an app in https://api.slack.com/apps")
-	fmt.Println("  2. Go to Settings → Socket Mode and enable it")
-	fmt.Println("  3. Go to Settings → Socket Mode → App Level Token")
-	fmt.Println("  4. Generate an App-Level Token (xapp-...) with connections:write scope and save it down first")
-	fmt.Println("  5. Go to Features → OAuth & Permissions → Bot Token Scopes and add:")
-	fmt.Println("     - app_mentions:read")
-	fmt.Println("     - chat:write")
-	fmt.Println("     - channels:history")
-	fmt.Println("     - groups:history")
-	fmt.Println("     - im:history")
-	fmt.Println("     - mpim:history")
-	fmt.Println("     - files:read")
-	fmt.Println("  6. Go to Features → Event Subscriptions → enable Events")
-	fmt.Println("  7. Go to Subscribe to bot events and add:")
-	fmt.Println("     - app_mention")
-	fmt.Println("     - message.im")
-	fmt.Println("  8. Click Install to Workspace and save the Bot User OAuth Token (xoxb-...) first")
-	fmt.Println()
-
-	appToken := promptLine(reader, "App token (xapp-...): ")
-	if appToken == "" {
-		fmt.Fprintln(os.Stderr, "error: app token cannot be empty")
-		return
-	}
-	botToken := promptLine(reader, "Bot token (xoxb-...): ")
-	if botToken == "" {
-		fmt.Fprintln(os.Stderr, "error: bot token cannot be empty")
-		return
-	}
-
-	fmt.Println()
-	fmt.Println("To restrict who can message your bot, enter Slack user IDs (U...).")
-	fmt.Println("Leave blank to allow everyone.")
-	fmt.Println()
-
-	allowUsersStr := promptLine(reader, "Allowed user IDs (comma-separated, blank = everyone): ")
-	allowUsers := parseAllowFrom(allowUsersStr)
-
-	fmt.Println()
-	fmt.Println("To restrict which channels the bot listens to, enter Slack channel IDs (C..., G..., D...).")
-	fmt.Println("Leave blank to allow all channels.")
-	fmt.Println()
-
-	allowChannelsStr := promptLine(reader, "Allowed channel IDs (comma-separated, blank = all): ")
-	allowChannels := parseAllowFrom(allowChannelsStr)
-
-	cfg.Channels.Slack.Enabled = true
-	cfg.Channels.Slack.AppToken = appToken
-	cfg.Channels.Slack.BotToken = botToken
-	cfg.Channels.Slack.AllowUsers = allowUsers
-	cfg.Channels.Slack.AllowChannels = allowChannels
-
-	if err := config.SaveConfig(cfg, cfgPath); err != nil {
-		fmt.Fprintf(os.Stderr, "failed to save config: %v\n", err)
-		return
-	}
-
-	fmt.Println()
-	fmt.Println("Slack configured! Run 'picobot gateway' to start.")
-}
-
-func setupWhatsAppInteractive(cfg config.Config, cfgPath string, homeDir string) {
-	fmt.Println()
-	fmt.Println("=== WhatsApp Setup ===")
-	fmt.Println()
-
-	dbPath := cfg.Channels.WhatsApp.DBPath
-	if dbPath == "" {
-		dbPath = filepath.Join(homeDir, "whatsapp.db")
-	}
-	if strings.HasPrefix(dbPath, "~/") {
-		home, _ := os.UserHomeDir()
-		dbPath = filepath.Join(home, dbPath[2:])
-	}
-
-	if err := channels.SetupWhatsApp(dbPath); err != nil {
-		fmt.Fprintf(os.Stderr, "WhatsApp setup failed: %v\n", err)
-		return
-	}
-
-	cfg.Channels.WhatsApp.Enabled = true
-	cfg.Channels.WhatsApp.DBPath = dbPath
-	if saveErr := config.SaveConfig(cfg, cfgPath); saveErr != nil {
-		fmt.Fprintf(os.Stderr, "warning: could not save config: %v\n", saveErr)
-	} else {
-		fmt.Printf("Config updated: whatsapp enabled, dbPath set to %s\n", dbPath)
-	}
-
-	fmt.Println("\nWhatsApp setup complete! Run 'picobot gateway' to start.")
 }

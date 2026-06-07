@@ -1,4 +1,4 @@
-//go:build only_telegram || only_slack || only_whatsapp
+//go:build only_telegram
 
 package channels
 

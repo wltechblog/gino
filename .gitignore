@@ -34,6 +34,10 @@ Thumbs.db
 *.swo
 *~
 
+# Dependencies
+# vendor/ - uncomment to track vendor tree in git
+# vendor/
+
 # Misc
 *.log
 *.psd
