@@ -318,6 +318,9 @@ func (c *discordClient) stopAllTyping() {
 // senderDisplayName returns "Username" for new-style accounts or
 // "Username#Discriminator" for legacy accounts.
 func senderDisplayName(u *discordgo.User) string {
+	if u.GlobalName != "" {
+		return u.GlobalName
+	}
 	if u.Discriminator != "" && u.Discriminator != "0" {
 		return u.Username + "#" + u.Discriminator
 	}
