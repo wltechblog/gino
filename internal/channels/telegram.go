@@ -65,15 +65,15 @@ func retryPost(client *http.Client, url, contentType string, body *bytes.Buffer)
 	return nil, fmt.Errorf("telegram: %d retries exhausted: %w", tgMaxRetries, lastErr)
 }
 
-func StartTelegram(ctx context.Context, hub *chat.Hub, token string, allowFrom []string, showTyping bool) error {
+func StartTelegram(ctx context.Context, hub *chat.Hub, token string, allowFrom []string, showTyping bool, workspace string) error {
 	if token == "" {
 		return fmt.Errorf("telegram token not provided")
 	}
 	base := "https://api.telegram.org/bot" + token
-	return StartTelegramWithBase(ctx, hub, token, base, allowFrom, showTyping)
+	return StartTelegramWithBase(ctx, hub, token, base, allowFrom, showTyping, workspace)
 }
 
-func StartTelegramWithBase(ctx context.Context, hub *chat.Hub, token, base string, allowFrom []string, showTyping bool) error {
+func StartTelegramWithBase(ctx context.Context, hub *chat.Hub, token, base string, allowFrom []string, showTyping bool, workspace string) error {
 	if base == "" {
 		return fmt.Errorf("base URL is required")
 	}
@@ -216,7 +216,7 @@ func StartTelegramWithBase(ctx context.Context, hub *chat.Hub, token, base strin
 				var media []string
 
 				if m.Document != nil {
-					saved, err := tgDownloadFile(client, base, fileBase, m.Document.FileID, m.Document.FileName, chatID)
+					saved, err := tgDownloadFile(client, base, fileBase, m.Document.FileID, m.Document.FileName, chatID, workspace)
 					if err != nil {
 						log.Printf("telegram: failed to download document: %v", err)
 						content += "\n[Failed to download attached file: " + m.Document.FileName + "]"
@@ -233,7 +233,7 @@ func StartTelegramWithBase(ctx context.Context, hub *chat.Hub, token, base strin
 				if len(m.Photo) > 0 {
 					photo := m.Photo[len(m.Photo)-1]
 					filename := "photo_" + strconv.FormatInt(time.Now().UnixMilli(), 10) + ".jpg"
-					saved, err := tgDownloadFile(client, base, fileBase, photo.FileID, filename, chatID)
+					saved, err := tgDownloadFile(client, base, fileBase, photo.FileID, filename, chatID, workspace)
 					if err != nil {
 						log.Printf("telegram: failed to download photo: %v", err)
 						content += "\n[Failed to download attached photo]"
@@ -311,12 +311,12 @@ func StartTelegramWithBase(ctx context.Context, hub *chat.Hub, token, base strin
 	return nil
 }
 
-func tgDownloadFile(client *http.Client, base, fileBase, fileID, filename, chatID string) (string, error) {
+func tgDownloadFile(client *http.Client, base, fileBase, fileID, filename, chatID, workspace string) (string, error) {
 	filePath, err := tgGetFilePath(client, base, fileID)
 	if err != nil {
 		return "", err
 	}
-	dir := filepath.Join(os.TempDir(), "picobot-media", chatID)
+	dir := filepath.Join(workspace, "uploads", chatID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}

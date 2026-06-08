@@ -9,7 +9,7 @@ import (
 	"github.com/local/picobot/internal/chat"
 )
 
-func StartTelegram(ctx context.Context, hub *chat.Hub, token string, allowFrom []string, showTyping bool) error {
+func StartTelegram(ctx context.Context, hub *chat.Hub, token string, allowFrom []string, showTyping bool, workspace string) error {
 	log.Println("telegram: channel not compiled into this binary (built with single-channel tag).")
 	return nil
 }
