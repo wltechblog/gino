@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 )
 
@@ -37,6 +38,31 @@ func (sm *SessionManager) GetOrCreate(key string) *Session {
 	s := &Session{Key: key, History: make([]string, 0)}
 	sm.sessions[key] = s
 	return s
+}
+
+// DeleteSession removes a session from memory and deletes its file from disk.
+func (sm *SessionManager) DeleteSession(key string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	delete(sm.sessions, key)
+	path := filepath.Join(sm.workspace, "sessions", key+".json")
+	os.Remove(path)
+}
+
+// DeleteByPrefix removes all sessions whose key starts with the given prefix.
+// Returns the number of sessions deleted.
+func (sm *SessionManager) DeleteByPrefix(prefix string) int {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	var deleted int
+	for key := range sm.sessions {
+		if strings.HasPrefix(key, prefix) {
+			delete(sm.sessions, key)
+			os.Remove(filepath.Join(sm.workspace, "sessions", key+".json"))
+			deleted++
+		}
+	}
+	return deleted
 }
 
 func (sm *SessionManager) Save(s *Session) error {

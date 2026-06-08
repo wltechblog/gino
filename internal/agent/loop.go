@@ -30,6 +30,20 @@ var rememberRE = regexp.MustCompile(`(?i)^remember(?:\s+to)?\s+(.+)$`)
 // of the current turn for a session.
 var stopCommands = []string{"/stop", "/cancel", "/abort"}
 
+// isResetCommand reports whether the message is a /reset command.
+// "/reset" clears the current session; "/reset all" clears all sessions for
+// the current channel.
+func isResetCommand(content string) (reset bool, all bool) {
+	content = strings.TrimSpace(content)
+	if content == "/reset" {
+		return true, false
+	}
+	if content == "/reset all" {
+		return true, true
+	}
+	return false, false
+}
+
 // trimTurnMessages trims the message chain to keep it within maxMsgs.
 // It preserves: system prompt, the last assistant text response (so the LLM
 // remembers what it just told the user), a small window of recent session
@@ -810,6 +824,31 @@ func (a *AgentLoop) dispatchMessage(ctx context.Context, msg chat.Inbound) {
 			sendChannelNotification(a.hub, msg.Channel, msg.ChatID, "⛔ Stopped.")
 		} else {
 			sendChannelNotification(a.hub, msg.Channel, msg.ChatID, "Nothing to stop.")
+		}
+		return
+	}
+
+	// Handle /reset — clear conversation history
+	if reset, resetAll := isResetCommand(msg.Content); reset {
+		if resetAll {
+			// Cancel all active turns and delete all sessions for this channel
+			prefix := msg.Channel + ":"
+			a.mu.Lock()
+			for key, at := range a.active {
+				if strings.HasPrefix(key, prefix) && !strings.HasPrefix(key, "signal:") {
+					at.stopped = true
+					at.cancel()
+					delete(a.active, key)
+				}
+			}
+			a.mu.Unlock()
+			deleted := a.sessions.DeleteByPrefix(prefix)
+			sendChannelNotification(a.hub, msg.Channel, msg.ChatID, fmt.Sprintf("🗑️ Cleared all %d conversations for this channel.", deleted))
+		} else {
+			// Cancel active turn and delete this specific session
+			a.cancelActiveTurn(sessionKey)
+			a.sessions.DeleteSession(sessionKey)
+			sendChannelNotification(a.hub, msg.Channel, msg.ChatID, "🗑️ Conversation reset. Starting fresh.")
 		}
 		return
 	}
