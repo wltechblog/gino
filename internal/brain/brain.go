@@ -2,6 +2,7 @@ package brain
 
 import (
 	"context"
+	"sync"
 	"time"
 )
 
@@ -12,6 +13,7 @@ type Brain struct {
 	db       DB
 	embedder EmbeddingProvider
 	opts     Options
+	embedWG  sync.WaitGroup // tracks background embedding goroutines
 }
 
 // Options configures brain behavior.
@@ -178,6 +180,8 @@ func Init(dbPath string, embedder EmbeddingProvider, opts Options) (*Brain, erro
 }
 
 // Close closes the underlying database connection.
+// It waits for any in-flight background embedding goroutines to finish.
 func (b *Brain) Close() error {
+	b.embedWG.Wait()
 	return b.db.Close()
 }

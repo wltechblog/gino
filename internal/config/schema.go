@@ -107,9 +107,27 @@ type AgentDefaults struct {
 	MaxTurnMessages             int           `json:"maxTurnMessages,omitempty"`
 	MaxToolResultChars          int           `json:"maxToolResultChars,omitempty"`
 
+	// Web controls the built-in web fetch tool.
+	Web WebConfig `json:"web"`
+
 	// Compaction controls LLM-based context summarization.
 	// When enabled, old messages are summarized by the LLM instead of dropped.
 	Compaction *CompactionConfig `json:"compaction,omitempty"`
+}
+
+// WebConfig configures the web fetch tool.
+type WebConfig struct {
+	// TimeoutS is the maximum time in seconds for an HTTP request.
+	// Default: 30
+	TimeoutS int `json:"timeoutS,omitempty"`
+
+	// MaxResponseBytes limits the size of the response body read.
+	// Default: 1048576 (1 MB)
+	MaxResponseBytes int `json:"maxResponseBytes,omitempty"`
+
+	// UserAgent is the User-Agent header sent with requests.
+	// Default: "GinoAI https://github.com/wltechblog/gino"
+	UserAgent string `json:"userAgent,omitempty"`
 }
 
 // CompactionConfig configures LLM-based context compaction.

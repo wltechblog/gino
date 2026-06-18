@@ -138,12 +138,16 @@ func (c *Client) request(method string, params interface{}) (json.RawMessage, er
 	return rr.Result, nil
 }
 
+// Version is the MCP client version reported during initialization.
+// Override this from main.go via mcp.Version = version.
+var Version = "0.4.0"
+
 func (c *Client) initialize() error {
 	params := map[string]interface{}{
 		"protocolVersion": "2025-03-26",
 		"clientInfo": map[string]interface{}{
 			"name":    "gino",
-			"version": "0.1.10",
+			"version": Version,
 		},
 		"capabilities": map[string]interface{}{},
 	}

@@ -23,7 +23,7 @@ func (f *FailingProvider) GetDefaultModel() string { return "fail" }
 func TestAgentRemembersToday(t *testing.T) {
 	b := chat.NewHub(10)
 	p := &FailingProvider{}
-	ag := NewAgentLoop(b, p, p.GetDefaultModel(), 5, "", nil, nil, nil, nil, nil, "", config.SandboxConfig{}, "", 0, 0, nil)
+	ag := NewAgentLoop(b, p, p.GetDefaultModel(), 5, "", nil, nil, nil, nil, nil, "", config.SandboxConfig{}, "", 0, 0, nil, config.WebConfig{})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()

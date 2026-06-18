@@ -29,9 +29,18 @@ func NewSessionManager(workspace string) *SessionManager {
 	return &SessionManager{sessions: make(map[string]*Session), workspace: workspace}
 }
 
+// sanitizeKey replaces path-unsafe characters in a session key.
+// This prevents path traversal (e.g., "../../etc/passwd") when the key
+// is used to construct a file path.
+func sanitizeKey(key string) string {
+	replacer := strings.NewReplacer("/", "_", "\\", "_", "..", "_", string(os.PathSeparator), "_")
+	return replacer.Replace(key)
+}
+
 func (sm *SessionManager) GetOrCreate(key string) *Session {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
+	key = sanitizeKey(key)
 	if s, ok := sm.sessions[key]; ok {
 		return s
 	}
@@ -44,6 +53,7 @@ func (sm *SessionManager) GetOrCreate(key string) *Session {
 func (sm *SessionManager) DeleteSession(key string) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
+	key = sanitizeKey(key)
 	delete(sm.sessions, key)
 	path := filepath.Join(sm.workspace, "sessions", key+".json")
 	os.Remove(path)
@@ -54,6 +64,7 @@ func (sm *SessionManager) DeleteSession(key string) {
 func (sm *SessionManager) DeleteByPrefix(prefix string) int {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
+	prefix = sanitizeKey(prefix)
 	var deleted int
 	for key := range sm.sessions {
 		if strings.HasPrefix(key, prefix) {
@@ -65,15 +76,17 @@ func (sm *SessionManager) DeleteByPrefix(prefix string) int {
 	return deleted
 }
 
+// Save persists the session to disk.
 func (sm *SessionManager) Save(s *Session) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	s.trim()
-	path := filepath.Join(sm.workspace, "sessions")
-	if err := os.MkdirAll(path, 0755); err != nil {
+	dir := filepath.Join(sm.workspace, "sessions")
+	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}
-	fpath := filepath.Join(path, s.Key+".json")
+	safeKey := sanitizeKey(s.Key)
+	fpath := filepath.Join(dir, safeKey+".json")
 	b, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		return err

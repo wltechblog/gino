@@ -66,9 +66,15 @@ func estimateTokens(messages []providers.Message) int {
 	total := 0
 	for _, m := range messages {
 		total += len(m.Content) / 4
+		// Tool result messages have a ToolCallID that consumes tokens
+		if m.ToolCallID != "" {
+			total += len(m.ToolCallID) / 4
+		}
 		for _, tc := range m.ToolCalls {
 			b, _ := json.Marshal(tc.Arguments)
 			total += len(b) / 4
+			total += len(tc.ID) / 4
+			total += len(tc.Name) / 4
 		}
 	}
 	return total

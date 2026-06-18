@@ -25,18 +25,33 @@ import (
 const (
 	tgMaxRetries     = 3
 	tgRetryBaseDelay = 2 * time.Second
+	tgMaxMessageLen  = 4096 // Telegram sendMessage limit
+	tgMaxCaptionLen  = 1024 // Telegram sendDocument caption limit
 )
 
+// redactToken removes the bot token from a Telegram API URL for safe logging.
+// e.g. "https://api.telegram.org/bot123:ABC/sendMessage" → "https://api.telegram.org/bot***/sendMessage"
+func redactToken(s string) string {
+	const prefix = "https://api.telegram.org/bot"
+	if strings.HasPrefix(s, prefix) {
+		rest := s[len(prefix):]
+		if slash := strings.Index(rest, "/"); slash >= 0 {
+			return prefix + "***" + rest[slash:]
+		}
+	}
+	return s
+}
+
 // retryPostForm retries PostForm calls with exponential backoff.
-func retryPostForm(client *http.Client, url string, data url.Values) (*http.Response, error) {
+func retryPostForm(client *http.Client, apiURL string, data url.Values) (*http.Response, error) {
 	var lastErr error
 	for attempt := 0; attempt < tgMaxRetries; attempt++ {
 		if attempt > 0 {
 			delay := tgRetryBaseDelay * time.Duration(1<<(attempt-1))
-			log.Printf("telegram: retry %d/%d after %v for %s", attempt, tgMaxRetries, delay, url)
+			log.Printf("telegram: retry %d/%d after %v for %s", attempt, tgMaxRetries, delay, redactToken(apiURL))
 			time.Sleep(delay)
 		}
-		resp, err := client.PostForm(url, data)
+		resp, err := client.PostForm(apiURL, data)
 		if err != nil {
 			lastErr = err
 			continue
@@ -47,15 +62,15 @@ func retryPostForm(client *http.Client, url string, data url.Values) (*http.Resp
 }
 
 // retryPost retries Post calls with exponential backoff.
-func retryPost(client *http.Client, url, contentType string, body *bytes.Buffer) (*http.Response, error) {
+func retryPost(client *http.Client, apiURL, contentType string, body *bytes.Buffer) (*http.Response, error) {
 	var lastErr error
 	for attempt := 0; attempt < tgMaxRetries; attempt++ {
 		if attempt > 0 {
 			delay := tgRetryBaseDelay * time.Duration(1<<(attempt-1))
-			log.Printf("telegram: retry %d/%d after %v for %s", attempt, tgMaxRetries, delay, url)
+			log.Printf("telegram: retry %d/%d after %v for %s", attempt, tgMaxRetries, delay, redactToken(apiURL))
 			time.Sleep(delay)
 		}
-		resp, err := client.Post(url, contentType, bytes.NewReader(body.Bytes()))
+		resp, err := client.Post(apiURL, contentType, bytes.NewReader(body.Bytes()))
 		if err != nil {
 			lastErr = err
 			continue
@@ -158,6 +173,18 @@ func StartTelegramWithBase(ctx context.Context, hub *chat.Hub, token, base strin
 			}
 			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				log.Printf("telegram getUpdates: HTTP %d — backing off", resp.StatusCode)
+				if resp.StatusCode == 401 {
+					log.Printf("telegram getUpdates: 401 Unauthorized — token may be invalid")
+				}
+				backoff := 5 * time.Second
+				if resp.StatusCode == 429 {
+					backoff = 30 * time.Second
+				}
+				time.Sleep(backoff)
+				continue
+			}
 			var gu struct {
 				Ok     bool `json:"ok"`
 				Result []struct {
@@ -280,7 +307,7 @@ func StartTelegramWithBase(ctx context.Context, hub *chat.Hub, token, base strin
 					for i, p := range out.Media {
 						caption := ""
 						if i == 0 {
-							caption = out.Content
+							caption = truncateCaption(out.Content)
 						}
 						if err := tgSendDocument(outClient, base, out.ChatID, p, caption); err != nil {
 							log.Printf("telegram sendDocument error: %v", err)
@@ -288,21 +315,9 @@ func StartTelegramWithBase(ctx context.Context, hub *chat.Hub, token, base strin
 					}
 					continue
 				}
-				u := base + "/sendMessage"
-				v := url.Values{}
-				v.Set("chat_id", out.ChatID)
-				v.Set("text", out.Content)
-				resp, err := retryPostForm(outClient, u, v)
-				if err != nil {
+				if err := tgSendChunked(outClient, base, out.ChatID, out.Content); err != nil {
 					log.Printf("telegram sendMessage error: %v", err)
 					continue
-				}
-				body, _ := io.ReadAll(resp.Body)
-				resp.Body.Close()
-				if resp.StatusCode != 200 {
-					log.Printf("telegram sendMessage HTTP %d: %s", resp.StatusCode, string(body))
-				} else {
-					log.Printf("telegram: message sent successfully to %s", out.ChatID)
 				}
 			}
 		}
@@ -394,3 +409,50 @@ func tgSendDocument(client *http.Client, base, chatID, filePath, caption string)
 	resp.Body.Close()
 	return nil
 }
+
+// truncateCaption trims content to Telegram's caption limit.
+func truncateCaption(content string) string {
+	if len(content) <= tgMaxCaptionLen {
+		return content
+	}
+	return content[:tgMaxCaptionLen-3] + "…"
+}
+
+// tgSendChunked sends a message, splitting it into chunks if it exceeds the Telegram limit.
+// Splits on newlines where possible to avoid breaking sentences/mid-word.
+func tgSendChunked(client *http.Client, base, chatID, content string) error {
+	if len(content) <= tgMaxMessageLen {
+		return tgSendMessage(client, base, chatID, content)
+	}
+
+	chunks := splitMessage(content, tgMaxMessageLen)
+	for i, chunk := range chunks {
+		if err := tgSendMessage(client, base, chatID, chunk); err != nil {
+			return fmt.Errorf("chunk %d/%d: %w", i+1, len(chunks), err)
+		}
+		if i < len(chunks)-1 {
+			time.Sleep(300 * time.Millisecond) // small delay between chunks
+		}
+	}
+	log.Printf("telegram: sent %d chunks to %s", len(chunks), chatID)
+	return nil
+}
+
+// tgSendMessage sends a single message via the Telegram API.
+func tgSendMessage(client *http.Client, base, chatID, text string) error {
+	u := base + "/sendMessage"
+	v := url.Values{}
+	v.Set("chat_id", chatID)
+	v.Set("text", text)
+	resp, err := retryPostForm(client, u, v)
+	if err != nil {
+		return err
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+	}
+	return nil
+}
+

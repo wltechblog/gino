@@ -95,6 +95,9 @@ func (t *FilesystemTool) Close() error {
 // WorkspaceRoot returns the primary workspace os.Root for use by other tools
 // (e.g. SkillManager) that only operate within the workspace.
 func (t *FilesystemTool) WorkspaceRoot() *os.Root {
+	if len(t.roots) == 0 {
+		return nil
+	}
 	return t.roots[0]
 }
 

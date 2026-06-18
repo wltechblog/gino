@@ -81,6 +81,8 @@ func (h *Hub) StartRouter(ctx context.Context) {
 				if exists {
 					select {
 					case ch <- out:
+					case <-time.After(10 * time.Second):
+						log.Printf("hub: timeout sending to channel %q subscriber, dropping message", out.Channel)
 					case <-ctx.Done():
 						return
 					}

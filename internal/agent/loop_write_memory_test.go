@@ -33,7 +33,7 @@ func (p *toolCallingProvider) GetDefaultModel() string { return "fake-model" }
 func TestAgentExecutesWriteMemoryToolCall(t *testing.T) {
 	b := chat.NewHub(10)
 	p := &toolCallingProvider{}
-	ag := NewAgentLoop(b, p, p.GetDefaultModel(), 5, "", nil, nil, nil, nil, nil, "", config.SandboxConfig{}, "", 0, 0, nil)
+	ag := NewAgentLoop(b, p, p.GetDefaultModel(), 5, "", nil, nil, nil, nil, nil, "", config.SandboxConfig{}, "", 0, 0, nil, config.WebConfig{})
 
 	// replace memory with temp workspace and re-register write_memory tool
 	tmp := t.TempDir()

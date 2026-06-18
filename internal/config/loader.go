@@ -42,4 +42,17 @@ func applyEnvOverrides(cfg *Config) {
 		b := v != "false" && v != "0" && v != "False" && v != "FALSE"
 		cfg.Agents.Defaults.EnableToolActivityIndicator = &b
 	}
+	if v := os.Getenv("GINO_WEB_TIMEOUT_S"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.Agents.Defaults.Web.TimeoutS = n
+		}
+	}
+	if v := os.Getenv("GINO_WEB_MAX_RESPONSE_BYTES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.Agents.Defaults.Web.MaxResponseBytes = n
+		}
+	}
+	if v := os.Getenv("GINO_WEB_USER_AGENT"); v != "" {
+		cfg.Agents.Defaults.Web.UserAgent = v
+	}
 }

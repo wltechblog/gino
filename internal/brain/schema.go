@@ -54,6 +54,8 @@ func (s *sqliteDB) Query(query string, args ...any) (Rows, error) {
 }
 
 func (s *sqliteDB) QueryRow(query string, args ...any) Row {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return &sqliteRow{row: s.db.QueryRow(query, args...)}
 }
 

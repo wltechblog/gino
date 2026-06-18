@@ -58,7 +58,11 @@ func (b *Brain) IngestPage(ctx context.Context, page Page) (int64, error) {
 
 	// Async embedding: fire and forget if embedder is configured
 	if b.embedder != nil && b.opts.EmbeddingDims > 0 {
-		go b.backfillEmbedding(pageID, page.Content)
+		b.embedWG.Add(1)
+		go func() {
+			defer b.embedWG.Done()
+			b.backfillEmbedding(pageID, page.Content)
+		}()
 	}
 
 	return pageID, nil
@@ -75,7 +79,7 @@ func (b *Brain) GetPage(ctx context.Context, sourceID, slug string) (*Page, erro
 	if err != nil {
 		return nil, err
 	}
-	json.Unmarshal([]byte(metaJSON), &p.Metadata)
+	p.Metadata = unmarshalMetadata(metaJSON)
 	return &p, nil
 }
 
@@ -90,7 +94,7 @@ func (b *Brain) GetPageByID(ctx context.Context, id int64) (*Page, error) {
 	if err != nil {
 		return nil, err
 	}
-	json.Unmarshal([]byte(metaJSON), &p.Metadata)
+	p.Metadata = unmarshalMetadata(metaJSON)
 	return &p, nil
 }
 
@@ -132,7 +136,7 @@ func (b *Brain) ListPages(ctx context.Context, sourceID string, pageType string,
 		if err := rows.Scan(&p.ID, &p.SourceID, &p.Slug, &p.Type, &p.Title, &p.ContentHash, &metaJSON, &p.CreatedAt, &p.UpdatedAt); err != nil {
 			return nil, err
 		}
-		json.Unmarshal([]byte(metaJSON), &p.Metadata)
+		p.Metadata = unmarshalMetadata(metaJSON)
 		pages = append(pages, p)
 	}
 	return pages, rows.Err()
@@ -198,6 +202,20 @@ func (b *Brain) Stats(ctx context.Context) (*Stats, error) {
 func contentHash(content string) string {
 	h := sha256.Sum256([]byte(content))
 	return fmt.Sprintf("%x", h[:])
+}
+
+// unmarshalMetadata safely unmarshals a metadata JSON string.
+// On error, returns an empty map rather than propagating the error,
+// since corrupted metadata should not crash the application.
+func unmarshalMetadata(metaJSON string) map[string]string {
+	if metaJSON == "" || metaJSON == "{}" {
+		return nil
+	}
+	var m map[string]string
+	if err := json.Unmarshal([]byte(metaJSON), &m); err != nil {
+		return nil
+	}
+	return m
 }
 
 // slugify converts text to a URL-safe slug.

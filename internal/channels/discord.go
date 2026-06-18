@@ -192,7 +192,33 @@ func (c *discordClient) checkRateLimit(userID string) bool {
 		c.totalHour = append(c.totalHour, now)
 	}
 
+	// Periodically prune users with no recent activity to prevent unbounded growth.
+	if len(c.userMinute) > 1000 {
+		c.pruneStaleUsers(now)
+	}
+
 	return true
+}
+
+// pruneStaleUsers removes users with no recent activity from the rate limiter maps.
+func (c *discordClient) pruneStaleUsers(now time.Time) {
+	hourAgo := now.Add(-time.Hour)
+	for userID, timestamps := range c.userMinute {
+		pruned := pruneOld(timestamps, now.Add(-time.Minute))
+		if len(pruned) == 0 {
+			delete(c.userMinute, userID)
+		} else {
+			c.userMinute[userID] = pruned
+		}
+	}
+	for userID, timestamps := range c.userHour {
+		pruned := pruneOld(timestamps, hourAgo)
+		if len(pruned) == 0 {
+			delete(c.userHour, userID)
+		} else {
+			c.userHour[userID] = pruned
+		}
+	}
 }
 
 // pruneOld removes timestamps older than cutoff from the slice.

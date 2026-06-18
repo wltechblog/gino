@@ -438,7 +438,7 @@ type SignalTargetRecorder interface {
 	SetLastTarget(channel, chatID string)
 }
 
-func NewAgentLoop(b *chat.Hub, provider providers.LLMProvider, model string, maxIterations int, workspace string, scheduler *cron.Scheduler, mcpServers map[string]config.MCPServerConfig, allowedDirs []string, disableTools []string, brainCfg *config.BrainConfig, homeDir string, sandbox config.SandboxConfig, signalSocketPath string, maxTurnMessages int, maxToolResultChars int, compactionCfg *config.CompactionConfig) *AgentLoop {
+func NewAgentLoop(b *chat.Hub, provider providers.LLMProvider, model string, maxIterations int, workspace string, scheduler *cron.Scheduler, mcpServers map[string]config.MCPServerConfig, allowedDirs []string, disableTools []string, brainCfg *config.BrainConfig, homeDir string, sandbox config.SandboxConfig, signalSocketPath string, maxTurnMessages int, maxToolResultChars int, compactionCfg *config.CompactionConfig, webCfg config.WebConfig) *AgentLoop {
 	if model == "" {
 		model = provider.GetDefaultModel()
 	}
@@ -471,7 +471,7 @@ func NewAgentLoop(b *chat.Hub, provider providers.LLMProvider, model string, max
 	}
 	register(fsTool)
 	register(tools.NewExecToolWithSandbox(60, workspace, allDirs, sandbox))
-	register(tools.NewWebTool())
+	register(tools.NewWebToolWithConfig(webCfg.TimeoutS, webCfg.MaxResponseBytes, webCfg.UserAgent))
 	register(tools.NewWebSearchTool())
 	register(tools.NewSpawnTool())
 	if scheduler != nil {
