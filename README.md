@@ -12,6 +12,8 @@
 
 Gino is a self-hosted AI agent written in Go. One binary, minimal dependencies, runs on a Raspberry Pi or a $5 VPS. It connects to any OpenAI-compatible LLM (OpenRouter, OpenAI, z.ai, Ollama, etc.) and works with Telegram and Discord.
 
+The built-in knowledge brain uses **Ollama** for local embeddings — automatically bundled in the Docker image, so it works out of the box with zero configuration. Prefer to use your own infrastructure? Point Gino at any external Ollama instance, or disable the brain entirely. Your choice, your hardware.
+
 ---
 
 ## Why Gino?
