@@ -19,7 +19,7 @@ ARG TARGETARCH
 ARG OLLAMA_VERSION=latest
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates tzdata bash curl jq libstdc++6 gosu && \
+    ca-certificates tzdata bash curl jq libstdc++6 gosu zstd && \
     rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
@@ -29,7 +29,7 @@ RUN groupadd -r gino && useradd -r -g gino -m gino
 COPY --from=gino-builder /gino /usr/local/bin/gino
 RUN chmod +x /usr/local/bin/gino
 
-# Install Ollama (multi-arch, downloaded during build)
+# Install Ollama (multi-arch, downloaded from GitHub releases during build)
 RUN set -eux; \
     case "${TARGETARCH}" in \
         amd64) OLLAMA_ARCH="amd64";; \
@@ -37,8 +37,13 @@ RUN set -eux; \
         *) echo "Unsupported arch: ${TARGETARCH}"; exit 1;; \
     esac; \
     echo "Downloading Ollama for ${OLLAMA_ARCH}..."; \
-    curl -fsSL "https://ollama.com/download/ollama-linux-${OLLAMA_ARCH}" -o /usr/bin/ollama; \
+    OLLAMA_VER=$(curl -fsSL https://api.github.com/repos/ollama/ollama/releases/latest | jq -r '.tag_name'); \
+    curl -fsSL "https://github.com/ollama/ollama/releases/download/${OLLAMA_VER}/ollama-linux-${OLLAMA_ARCH}.tar.zst" -o /tmp/ollama.tar.zst; \
+    mkdir -p /tmp/ollama-extract; \
+    tar --use-compress-program=unzstd -xf /tmp/ollama.tar.zst -C /tmp/ollama-extract; \
+    cp /tmp/ollama-extract/ollama /usr/bin/ollama; \
     chmod +x /usr/bin/ollama; \
+    rm -rf /tmp/ollama.tar.zst /tmp/ollama-extract; \
     ollama --version || true
 
 # Gino home directory
