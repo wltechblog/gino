@@ -97,7 +97,7 @@ apply_env() {
         if [ "$vtype" = "json" ]; then
             jq "${filter} ${val}" "${CONFIG}" > "$tmp" || { rm -f "$tmp"; return 1; }
         else
-            jq "${filter} --arg v \"${val}\"" "${CONFIG}" > "$tmp" || { rm -f "$tmp"; return 1; }
+            jq --arg v "${val}" "${filter}" "${CONFIG}" > "$tmp" || { rm -f "$tmp"; return 1; }
         fi
         mv "$tmp" "${CONFIG}"
     }
