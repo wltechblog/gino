@@ -64,6 +64,21 @@ func (cb *ContextBuilder) BuildMessages(history []string, currentMessage string,
 		"You are operating on channel=%q chatID=%q with workspace=%q. You have full access to all registered tools regardless of the channel. Always use your tools when the user asks you to perform actions (file operations, shell commands, web fetches, etc.).",
 		channel, chatID, cb.workspace))
 
+	// Telegram-specific formatting instructions
+	if channel == "telegram" {
+		sysParts = append(sysParts, `Format your response using Telegram-compatible MarkdownV2. Supported formatting (and ONLY these):
+
+*bold text*   _italic text_   __underline__   ~strikethrough~   ||spoiler||   `+"`"+`inline code`+"`"+`
+
+`+"```"+`
+code block
+`+"```"+`
+
+[inline URL](https://www.example.com/)   > Block quotation
+
+Do NOT use: # headings, --- rulers, *-bullet-lists, --dash-lists, 1.-numbered-lists — Telegram does not support them. Avoid underscores inside words (like 'some_var') — Telegram interprets `+"`"+`_`+"`"+` as italic markers and will break. Keep responses clean and readable.`)
+	}
+
 	// User identity — include sender info for non-system channels so the LLM
 	// can personalize responses and distinguish between users.
 	if senderID != "" && channel != "cli" {

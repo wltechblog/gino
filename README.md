@@ -231,11 +231,11 @@ The agent automatically extracts important facts from conversations and saves th
 
 ## Channels
 
-| Channel | Type | Status |
-|---------|------|--------|
-| **Telegram** | Bot API | ✅ Stable |
-| **Discord** | Bot (discordgo) | ✅ Stable |
-| **CLI** | stdin/stdout | ✅ Built-in |
+| Channel | Type | Status | Notes |
+|---------|------|--------|-------|
+| **Telegram** | Bot API | ✅ Stable | MarkdownV2 formatting with automatic reserved-character escaping |
+| **Discord** | Bot (discordgo) | ✅ Stable | |
+| **CLI** | stdin/stdout | ✅ Built-in | |
 
 ---
 

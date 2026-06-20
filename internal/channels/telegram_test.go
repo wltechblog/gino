@@ -76,7 +76,7 @@ func TestStartTelegramWithBase(t *testing.T) {
 
 	select {
 	case v := <-sent:
-		if v.Get("chat_id") != "456" || v.Get("text") != "reply" {
+		if v.Get("chat_id") != "456" || v.Get("text") != "reply" || v.Get("parse_mode") != "MarkdownV2" {
 			t.Fatalf("unexpected sendMessage form: %v", v)
 		}
 	case <-time.After(2 * time.Second):
@@ -171,6 +171,9 @@ func TestTelegramOutboundWithMedia(t *testing.T) {
 		if strings.HasSuffix(path, "/sendDocument") {
 			_ = r.ParseMultipartForm(10 << 20)
 			sentDocs <- r.FormValue("chat_id")
+			if pm := r.FormValue("parse_mode"); pm != "MarkdownV2" {
+				t.Errorf("expected parse_mode=MarkdownV2, got %q", pm)
+			}
 			file, _, err := r.FormFile("document")
 			if err != nil {
 				t.Errorf("failed to read document from form: %v", err)

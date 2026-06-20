@@ -387,6 +387,43 @@ func tgSendDocument(client *http.Client, base, chatID, filePath, caption string)
 	_ = w.WriteField("chat_id", chatID)
 	if caption != "" {
 		_ = w.WriteField("caption", caption)
+		_ = w.WriteField("parse_mode", "MarkdownV2")
+	}
+	part, err := w.CreateFormFile("document", filepath.Base(filePath))
+	if err != nil {
+		return fmt.Errorf("form file: %w", err)
+	}
+	f, err := os.Open(filePath)
+	if err != nil {
+		return fmt.Errorf("open: %w", err)
+	}
+	defer f.Close()
+	if _, err := io.Copy(part, f); err != nil {
+		return fmt.Errorf("copy: %w", err)
+	}
+	w.Close()
+	resp, err := retryPost(client, base+"/sendDocument", w.FormDataContentType(), &buf)
+	if err != nil {
+		return fmt.Errorf("sendDocument: %w", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode == 200 {
+		return nil
+	}
+	if resp.StatusCode == 400 && bytes.Contains(body, []byte("can't parse entities")) {
+		log.Printf("telegram: markdown parse error in caption, retrying as plain text")
+		return tgSendDocumentPlain(client, base, chatID, filePath, caption)
+	}
+	return fmt.Errorf("sendDocument: HTTP %d: %s", resp.StatusCode, string(body))
+}
+
+func tgSendDocumentPlain(client *http.Client, base, chatID, filePath, caption string) error {
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	_ = w.WriteField("chat_id", chatID)
+	if caption != "" {
+		_ = w.WriteField("caption", caption)
 	}
 	part, err := w.CreateFormFile("document", filepath.Base(filePath))
 	if err != nil {
@@ -440,21 +477,216 @@ func tgSendChunked(client *http.Client, base, chatID, content string) error {
 	return nil
 }
 
-// tgSendMessage sends a single message via the Telegram API.
+// tgEscapeReserved escapes MarkdownV2 reserved characters that appear outside
+// of valid markdown formatting spans. Telegram requires \ before any of
+// _ * [ ] ( ) ~ ` > # + - = | { } . ! in text, otherwise it rejects the message.
+func tgEscapeReserved(s string) string {
+	var b strings.Builder
+	i := 0
+	n := len(s)
+
+	for i < n {
+		// Code block ```...``` — preserve verbatim
+		if i+2 < n && s[i] == '`' && s[i+1] == '`' && s[i+2] == '`' {
+			b.WriteString("```")
+			i += 3
+			for i+2 < n && !(s[i] == '`' && s[i+1] == '`' && s[i+2] == '`') {
+				b.WriteByte(s[i])
+				i++
+			}
+			if i+2 < n {
+				b.WriteString("```")
+				i += 3
+			}
+			continue
+		}
+
+		// Inline code `...` — preserve verbatim
+		if s[i] == '`' {
+			b.WriteByte('`')
+			i++
+			for i < n && s[i] != '`' {
+				b.WriteByte(s[i])
+				i++
+			}
+			if i < n {
+				b.WriteByte('`')
+				i++
+			}
+			continue
+		}
+
+		// Bold *...* — preserve delimiters
+		if s[i] == '*' && (i+1 >= n || s[i+1] != '*') {
+			b.WriteByte('*')
+			i++
+			for i < n && s[i] != '*' {
+				b.WriteByte(s[i])
+				i++
+			}
+			if i < n && s[i] == '*' {
+				b.WriteByte('*')
+				i++
+			}
+			continue
+		}
+
+		// Italic _..._ — preserve delimiters
+		if s[i] == '_' && (i+1 >= n || (s[i+1] != '_' && s[i+1] != ' ')) {
+			b.WriteByte('_')
+			i++
+			for i < n && s[i] != '_' {
+				b.WriteByte(s[i])
+				i++
+			}
+			if i < n && s[i] == '_' {
+				b.WriteByte('_')
+				i++
+			}
+			continue
+		}
+
+		// Underline __...__ — preserve delimiters
+		if i+1 < n && s[i] == '_' && s[i+1] == '_' {
+			b.WriteString("__")
+			i += 2
+			for i+1 < n && !(s[i] == '_' && s[i+1] == '_') {
+				b.WriteByte(s[i])
+				i++
+			}
+			if i+1 < n {
+				b.WriteString("__")
+				i += 2
+			}
+			continue
+		}
+
+		// Strikethrough ~...~ — preserve delimiters
+		if s[i] == '~' {
+			b.WriteByte('~')
+			i++
+			for i < n && s[i] != '~' && !(i+1 < n && s[i] == '|' && s[i+1] == '|') {
+				b.WriteByte(s[i])
+				i++
+			}
+			if i < n && s[i] == '~' {
+				b.WriteByte('~')
+				i++
+			}
+			continue
+		}
+
+		// Spoiler ||...|| — preserve delimiters
+		if i+1 < n && s[i] == '|' && s[i+1] == '|' {
+			b.WriteString("||")
+			i += 2
+			for i+1 < n && !(s[i] == '|' && s[i+1] == '|') {
+				b.WriteByte(s[i])
+				i++
+			}
+			if i+1 < n {
+				b.WriteString("||")
+				i += 2
+			}
+			continue
+		}
+
+		// Link [text](url) — preserve delimiters
+		if s[i] == '[' {
+			j := i + 1
+			depth := 1
+			for j < n && depth > 0 {
+				if s[j] == '[' {
+					depth++
+				} else if s[j] == ']' {
+					depth--
+				}
+				j++
+			}
+			closeBracket := j - 1
+			if depth == 0 && closeBracket+1 < n && s[closeBracket+1] == '(' {
+				j = closeBracket + 2
+				depth = 1
+				for j < n && depth > 0 {
+					if s[j] == '(' {
+						depth++
+					} else if s[j] == ')' {
+						depth--
+					}
+					j++
+				}
+				if depth == 0 {
+					b.WriteString(s[i:j])
+					i = j
+					continue
+				}
+			}
+		}
+
+		// Blockquote > at line start — preserve
+		if (i == 0 || s[i-1] == '\n') && s[i] == '>' {
+			b.WriteByte('>')
+			i++
+			if i < n && s[i] == '>' {
+				b.WriteByte('>')
+				i++
+			}
+			if i < n && s[i] == ' ' {
+				b.WriteByte(' ')
+				i++
+			}
+			continue
+		}
+
+		// Escape reserved character
+		switch s[i] {
+		case '\\', '_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!':
+			b.WriteByte('\\')
+			b.WriteByte(s[i])
+		default:
+			b.WriteByte(s[i])
+		}
+		i++
+	}
+
+	return b.String()
+}
+
+// tgSendMessage sends a message with MarkdownV2 formatting.
+// Reserved characters are escaped to satisfy Telegram's strict parser
+// while preserving intentional markdown formatting spans.
+// Falls back to plain text on unhandled parse errors.
 func tgSendMessage(client *http.Client, base, chatID, text string) error {
 	u := base + "/sendMessage"
+	escaped := tgEscapeReserved(text)
 	v := url.Values{}
 	v.Set("chat_id", chatID)
-	v.Set("text", text)
+	v.Set("text", escaped)
+	v.Set("parse_mode", "MarkdownV2")
 	resp, err := retryPostForm(client, u, v)
 	if err != nil {
 		return err
 	}
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+	if resp.StatusCode == 200 {
+		return nil
 	}
-	return nil
+	if resp.StatusCode == 400 && bytes.Contains(body, []byte("can't parse entities")) {
+		log.Printf("telegram: markdown parse error, retrying as plain text")
+		v.Set("text", text)
+		v.Del("parse_mode")
+		resp2, err2 := retryPostForm(client, u, v)
+		if err2 != nil {
+			return err2
+		}
+		body2, _ := io.ReadAll(resp2.Body)
+		resp2.Body.Close()
+		if resp2.StatusCode == 200 {
+			return nil
+		}
+		return fmt.Errorf("HTTP %d: %s", resp2.StatusCode, string(body2))
+	}
+	return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
 }
 
