@@ -282,7 +282,11 @@ func runChat(homeFlag string, args []string) {
 	}
 
 	session := tui.New(cfg, provider, homeDir, ws)
-	if err := session.Run(*modelFlag); err != nil {
+	if *modelFlag != "" {
+		session.Model = *modelFlag
+	}
+	ctx := context.Background()
+	if err := session.Run(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "chat error: %v\n", err)
 		os.Exit(1)
 	}

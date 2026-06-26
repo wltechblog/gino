@@ -35,6 +35,17 @@ const (
 	gray    = "\033[90m"
 )
 
+// wprint writes to w and discards the error (terminal writes that fail
+// are not actionable).
+func wprint(w io.Writer, format string, args ...interface{}) {
+	_, _ = fmt.Fprintf(w, format, args...)
+}
+
+// wprintln writes a line to w, discarding the error.
+func wprintln(w io.Writer) {
+	_, _ = fmt.Fprintln(w)
+}
+
 // ─── termios helpers ────────────────────────────────────────────
 
 type termios struct {
@@ -85,36 +96,33 @@ func restoreTerm(fd int, t *termios) {
 // ─── Readline ───────────────────────────────────────────────────
 
 // Readline provides raw-mode line editing with command history.
+// It reads bytes from a channel (fed by a single stdin-owning goroutine)
+// to avoid competing reads.
 type Readline struct {
-	fd       int
-	out      io.Writer
-	prompt   string
-	history  []string
-	histIdx  int // index into history for navigation; len(history) = "new entry"
+	out     io.Writer
+	prompt  string
+	history []string
+	histIdx int // index into history for navigation; len(history) = "new entry"
 
 	// Current buffer state.
-	buf     []byte
-	cursor  int // byte offset within buf
+	buf    []byte
+	cursor int // byte offset within buf
+
+	// Input source.
+	bytes <-chan byte
 }
 
-// NewReadline creates a readline instance and sets the terminal to raw mode.
-func NewReadline(fd int, out io.Writer, prompt string) (*Readline, error) {
-	if _, err := makeRaw(fd); err != nil {
-		return nil, fmt.Errorf("set raw mode: %w", err)
-	}
+// NewReadline creates a readline instance. The terminal must already be in
+// raw mode. It reads from the provided byte channel.
+func NewReadline(out io.Writer, prompt string, bytes <-chan byte) *Readline {
 	rl := &Readline{
-		fd:     fd,
 		out:    out,
 		prompt: prompt,
+		bytes:  bytes,
 	}
 	rl.histIdx = 0
 	rl.render()
-	return rl, nil
-}
-
-// Restore restores the terminal to its original state.
-func (rl *Readline) Restore(orig *termios) {
-	restoreTerm(rl.fd, orig)
+	return rl
 }
 
 // SetPrompt changes the prompt string.
@@ -125,45 +133,54 @@ func (rl *Readline) SetPrompt(p string) {
 // render redraws the current input line.
 func (rl *Readline) render() {
 	// Clear line, move to start, print prompt + buffer.
-	fmt.Fprintf(rl.out, "\r\033[K%s%s", rl.prompt, string(rl.buf))
+	wprint(rl.out, "\r\033[K%s%s", rl.prompt, string(rl.buf))
 	// Move cursor to correct position.
 	total := len(rl.buf)
 	if rl.cursor < total {
 		// Move back by (total - cursor) characters.
 		back := total - rl.cursor
-		fmt.Fprintf(rl.out, "\033[%dD", back)
+		wprint(rl.out, "\033[%dD", back)
 	}
 }
 
 // clearLine clears the input line (for output above it).
 func (rl *Readline) clearLine() {
-	fmt.Fprint(rl.out, "\r\033[K")
+	wprint(rl.out, "\r\033[K")
+}
+
+// readEsc reads a 2-byte escape sequence from the byte channel.
+// Returns the two bytes, or zero values if the channel closed.
+func (rl *Readline) readEsc() (byte, byte) {
+	b1, ok := <-rl.bytes
+	if !ok {
+		return 0, 0
+	}
+	b2, ok := <-rl.bytes
+	if !ok {
+		return b1, 0
+	}
+	return b1, b2
 }
 
 // ReadLine blocks until the user enters a complete line (Enter key).
 // Handles arrow keys, backspace, Ctrl+A/E/W/K, up/down history.
 func (rl *Readline) ReadLine() (string, error) {
-	buf := make([]byte, 1)
-	escBuf := make([]byte, 2)
-
 	for {
-		n, err := os.Stdin.Read(buf)
-		if err != nil || n == 0 {
+		c, ok := <-rl.bytes
+		if !ok {
 			return "", io.ErrUnexpectedEOF
 		}
-		c := buf[0]
 
 		switch {
-		case c == '\n' || c == '\r':			line := string(rl.buf)
-			rl.buf = nil
-			rl.cursor = 0
-			fmt.Fprintln(rl.out) // move to next line
+		case c == '\n' || c == '\r':
+			line := string(rl.buf)
 			if strings.TrimSpace(line) != "" {
 				rl.history = append(rl.history, line)
 			}
 			rl.histIdx = len(rl.history)
 			rl.buf = nil
 			rl.cursor = 0
+			wprintln(rl.out) // move to next line
 			return line, nil
 
 		case c == 0x01: // Ctrl+A — move to start
@@ -173,7 +190,7 @@ func (rl *Readline) ReadLine() (string, error) {
 		case c == 0x03: // Ctrl+C — cancel current line
 			rl.buf = nil
 			rl.cursor = 0
-			fmt.Fprintf(rl.out, "\r\033[K^C\n")
+			wprint(rl.out, "\r\033[K^C\n")
 			rl.render()
 			return "", nil
 
@@ -206,13 +223,9 @@ func (rl *Readline) ReadLine() (string, error) {
 			}
 
 		case c == 0x1B: // Escape sequence
-			// Read the next two bytes for arrow keys.
-			n2, err := os.Stdin.Read(escBuf)
-			if err != nil || n2 < 2 {
-				continue
-			}
-			if escBuf[0] == '[' {
-				switch escBuf[1] {
+			b1, b2 := rl.readEsc()
+			if b1 == '[' {
+				switch b2 {
 				case 'A': // Up — previous history
 					if rl.histIdx > 0 {
 						rl.histIdx--
@@ -248,11 +261,11 @@ func (rl *Readline) ReadLine() (string, error) {
 					rl.cursor = len(rl.buf)
 					rl.render()
 				case '3': // Delete — read one more byte (~)
-					var tilde [1]byte
-					if _, err := os.Stdin.Read(tilde[:]); err != nil {
+					tilde, ok := <-rl.bytes
+					if !ok {
 						continue
 					}
-					if tilde[0] == '~' && rl.cursor < len(rl.buf) {
+					if tilde == '~' && rl.cursor < len(rl.buf) {
 						rl.buf = append(rl.buf[:rl.cursor], rl.buf[rl.cursor+1:]...)
 						rl.render()
 					}
@@ -278,7 +291,7 @@ type ChatSession struct {
 	agent    *agent.AgentLoop
 	provider providers.LLMProvider
 	cfg      config.Config
-	model    string
+	Model    string // exported so main.go can override with -M flag
 	homeDir  string
 	ws       string
 
@@ -294,6 +307,9 @@ type ChatSession struct {
 	rl       *Readline
 	origTerm *termios
 	mu       sync.Mutex // protects output interleaving
+
+	// Single stdin owner: rawBytes is fed by one goroutine.
+	rawBytes chan byte
 }
 
 // New creates a new TUI chat session.
@@ -315,28 +331,46 @@ func (s *ChatSession) sessionKey() string {
 
 // writeAbove prints output above the current input line.
 // It temporarily clears the input line, prints the output,
-// then re-renders the input prompt + buffer.
+// then re-renders the input prompt below.
 func (s *ChatSession) writeAbove(text string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.rl != nil {
+	if s.rl != nil && !s.busy {
 		s.rl.clearLine()
 	}
-	fmt.Fprint(s.out, text)
-	if s.rl != nil {
+	wprint(s.out, "%s", text)
+	if s.rl != nil && !s.busy {
 		s.rl.render()
 	}
 }
 
-// Run starts the interactive chat loop. Blocks until the user exits.
-func (s *ChatSession) Run(modelOverride string) error {
-	s.model = modelOverride
-	if s.model == "" && s.cfg.Agents.Defaults.Model != "" {
-		s.model = s.cfg.Agents.Defaults.Model
-	}
-	if s.model == "" {
-		s.model = s.provider.GetDefaultModel()
-	}
+// startStdinReader launches a single goroutine that owns os.Stdin and
+// feeds raw bytes into the rawBytes channel. This ensures only one
+// goroutine ever reads from stdin.
+func (s *ChatSession) startStdinReader(ctx context.Context) {
+	s.rawBytes = make(chan byte, 256)
+	go func() {
+		buf := make([]byte, 1)
+		for {
+			n, err := os.Stdin.Read(buf)
+			if err != nil || n == 0 {
+				close(s.rawBytes)
+				return
+			}
+			select {
+			case s.rawBytes <- buf[0]:
+			case <-ctx.Done():
+				close(s.rawBytes)
+				return
+			}
+		}
+	}()
+}
+
+// Run starts the interactive chat loop.
+func (s *ChatSession) Run(ctx context.Context) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
 	// Set up hub and agent loop — same as gateway but CLI-only.
 	s.hub = chat.NewHub(100)
@@ -347,7 +381,7 @@ func (s *ChatSession) Run(modelOverride string) error {
 	}
 
 	s.agent = agent.NewAgentLoop(
-		s.hub, s.provider, s.model, maxIter, s.ws,
+		s.hub, s.provider, s.Model, maxIter, s.ws,
 		nil, // scheduler — cron not active in TUI
 		s.cfg.MCPServers, s.cfg.Agents.Defaults.AllowedDirs,
 		s.cfg.Agents.Defaults.DisableTools,
@@ -361,23 +395,8 @@ func (s *ChatSession) Run(modelOverride string) error {
 	)
 	defer s.agent.Close()
 
-	if s.cfg.Agents.Defaults.EnableToolActivityIndicator != nil {
-		s.agent.SetToolActivityIndicator(*s.cfg.Agents.Defaults.EnableToolActivityIndicator)
-	}
-	if s.cfg.Agents.Defaults.EnableToolCallMessages != nil {
-		s.agent.SetToolCallMessages(*s.cfg.Agents.Defaults.EnableToolCallMessages)
-	}
-
-	// Subscribe to the "cli" channel for outbound messages.
 	cliOut := s.hub.Subscribe("cli")
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// Start agent loop.
-	go s.agent.Run(ctx)
-
-	// Start router.
 	s.hub.StartRouter(ctx)
 
 	// Handle Ctrl+C gracefully — the signal handler is a fallback.
@@ -389,7 +408,7 @@ func (s *ChatSession) Run(modelOverride string) error {
 		if s.origTerm != nil {
 			restoreTerm(syscall.Stdin, s.origTerm)
 		}
-		fmt.Fprintln(s.out)
+		wprintln(s.out)
 		cancel()
 		os.Exit(0)
 	}()
@@ -405,11 +424,11 @@ func (s *ChatSession) Run(modelOverride string) error {
 	}
 	defer restoreTerm(syscall.Stdin, s.origTerm)
 
+	// Start the single stdin reader goroutine.
+	s.startStdinReader(ctx)
+
 	prompt := fmt.Sprintf("%syou%s ❯ ", cyan+bold, reset)
-	s.rl, err = NewReadline(syscall.Stdin, s.out, prompt)
-	if err != nil {
-		return err
-	}
+	s.rl = NewReadline(s.out, prompt, s.rawBytes)
 
 	for {
 		line, err := s.rl.ReadLine()
@@ -421,7 +440,7 @@ func (s *ChatSession) Run(modelOverride string) error {
 			continue
 		}
 
-		// Handle slash commands.
+		// Handle slash commands — always processed immediately.
 		if strings.HasPrefix(line, "/") {
 			if !s.handleCommand(line) {
 				break // /exit
@@ -431,12 +450,17 @@ func (s *ChatSession) Run(modelOverride string) error {
 
 		// Send message to agent and wait for response.
 		s.sendMessage(ctx, cliOut, line)
+		// Re-render the input prompt after the turn completes.
+		s.mu.Lock()
+		s.rl.render()
+		s.mu.Unlock()
 	}
 
 	return nil
 }
 
 // sendMessage sends a message to the agent loop and waits for the response.
+// During the wait, it reads from the shared rawBytes channel to detect /stop.
 func (s *ChatSession) sendMessage(ctx context.Context, cliOut <-chan chat.Outbound, text string) {
 	msg := chat.Inbound{
 		Channel:   "cli",
@@ -471,28 +495,11 @@ func (s *ChatSession) sendMessage(ctx context.Context, cliOut <-chan chat.Outbou
 
 	stopSpinner := startSpinner()
 
-	// Channel for user interrupt (/stop typed during response).
-	stopCh := make(chan struct{}, 1)
-	go func() {
-		for {
-			line, err := s.rl.ReadLine()
-			if err != nil {
-				return
-			}
-			cmd := strings.TrimSpace(line)
-			if cmd == "/stop" || cmd == "/abort" || cmd == "/cancel" {
-				select {
-				case stopCh <- struct{}{}:
-				default:
-				}
-				return
-			}
-			// Ignore other input while busy.
-			if cmd != "" {
-				s.writeAbove(fmt.Sprintf("%s(queued: %s)%s\n", gray, cmd, reset))
-			}
-		}
-	}()
+	// Buffer for /stop detection — chars read during busy mode.
+	// These are NOT consumed by ReadLine (which reads from the same channel).
+	// Since we own the channel during sendMessage, any bytes we read here
+	// are intentionally consumed.
+	var lineBuf []byte
 
 	for {
 		select {
@@ -504,25 +511,37 @@ func (s *ChatSession) sendMessage(ctx context.Context, cliOut <-chan chat.Outbou
 			stopSpinner()
 			return
 
-		case <-stopCh:
-			s.agent.StopTurn(s.sessionKey())
-			stopSpinner()
-			// Drain remaining messages.
-			drainTimer := time.NewTimer(2 * time.Second)
-			defer drainTimer.Stop()
-		drainLoop:
-			for {
-				select {
-				case out, ok := <-cliOut:
-					if !ok || !isActivityNotification(out.Content) {
-						break drainLoop
-					}
-				case <-drainTimer.C:
-					break drainLoop
-				}
+		case c, ok := <-s.rawBytes:
+			if !ok {
+				stopSpinner()
+				return
 			}
-			s.writeAbove(fmt.Sprintf("%s✓ Aborted.%s\n", yellow, reset))
-			return
+			if c == '\n' || c == '\r' {
+				cmd := strings.TrimSpace(string(lineBuf))
+				lineBuf = lineBuf[:0]
+				if cmd == "/stop" || cmd == "/abort" || cmd == "/cancel" {
+					s.agent.StopTurn(s.sessionKey())
+					stopSpinner()
+					// Drain remaining messages.
+					drainTimer := time.NewTimer(2 * time.Second)
+				drainLoop:
+					for {
+						select {
+						case out, ok := <-cliOut:
+							if !ok || !isActivityNotification(out.Content) {
+								break drainLoop
+							}
+						case <-drainTimer.C:
+							break drainLoop
+						}
+					}
+					drainTimer.Stop()
+					s.writeAbove(fmt.Sprintf("%s✓ Aborted.%s\n", yellow, reset))
+					return
+				}
+			} else {
+				lineBuf = append(lineBuf, c)
+			}
 
 		case out, ok := <-cliOut:
 			if !ok {
@@ -563,7 +582,7 @@ func isActivityNotification(content string) bool {
 	return false
 }
 
-// spinner prints an animated spinner above the input line.
+// spinner prints an animated spinner on the current line while waiting.
 func (s *ChatSession) spinner(ctx context.Context, done chan<- struct{}) {
 	defer close(done)
 	chars := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
@@ -573,25 +592,12 @@ func (s *ChatSession) spinner(ctx context.Context, done chan<- struct{}) {
 		case <-ctx.Done():
 			// Clear the spinner line.
 			s.mu.Lock()
-			s.rl.clearLine()
-			s.rl.render()
+			wprint(s.out, "\r\033[K")
 			s.mu.Unlock()
 			return
 		case <-time.After(100 * time.Millisecond):
 			s.mu.Lock()
-			// Clear current line, print spinner, re-render input below.
-			s.rl.clearLine()
-			fmt.Fprintf(s.out, "%s%s thinking...%s", gray, chars[i%len(chars)], reset)
-			// Move to next line, render input, then move back up.
-			fmt.Fprintf(s.out, "\n%s%s%s\033[A", s.rl.prompt, string(s.rl.buf), reset)
-			// Position cursor correctly in input.
-			total := len(s.rl.buf)
-			if s.rl.cursor < total {
-				back := total - s.rl.cursor
-				fmt.Fprintf(s.out, "\033[%dD", back)
-			}
-			// Move back up to spinner line.
-			fmt.Fprint(s.out, "\033[A\r")
+			wprint(s.out, "\r\033[K%s%s thinking...%s", gray, chars[i%len(chars)], reset)
 			s.mu.Unlock()
 			i++
 		}
@@ -637,10 +643,10 @@ func (s *ChatSession) handleCommand(line string) bool {
 
 	case "/model":
 		if len(parts) > 1 {
-			s.model = parts[1]
-			s.writeAbove(fmt.Sprintf("%sModel set to: %s%s\n", green, s.model, reset))
+			s.Model = parts[1]
+			s.writeAbove(fmt.Sprintf("%sModel set to: %s%s\n", green, s.Model, reset))
 		} else {
-			s.writeAbove(fmt.Sprintf("%sCurrent model: %s%s\n", dim, s.model, reset))
+			s.writeAbove(fmt.Sprintf("%sCurrent model: %s%s\n", dim, s.Model, reset))
 		}
 
 	case "/multiline", "/multi":
@@ -660,11 +666,11 @@ func (s *ChatSession) handleCommand(line string) bool {
 
 // printBanner shows the startup banner.
 func (s *ChatSession) printBanner() {
-	fmt.Fprintf(s.out, "\n%s╔══════════════════════════════════════════╗\n", cyan)
-	fmt.Fprintf(s.out, "║  🤖 Gino Chat %sv0.5.0%s                     ║\n", dim, cyan)
-	fmt.Fprintf(s.out, "║  Model: %-34s║\n", truncForBox(s.model, 34)+" ")
-	fmt.Fprintf(s.out, "║  Type %s/help%s for commands               ║\n", bold, cyan)
-	fmt.Fprintf(s.out, "%s╚══════════════════════════════════════════╝\n%s\n\n", cyan, reset)
+	wprint(s.out, "\n%s╔══════════════════════════════════════════╗\n", cyan)
+	wprint(s.out, "║  🤖 Gino Chat %sv0.5.0%s                     ║\n", dim, cyan)
+	wprint(s.out, "║  Model: %-34s║\n", truncForBox(s.Model, 34)+" ")
+	wprint(s.out, "║  Type %s/help%s for commands               ║\n", bold, cyan)
+	wprint(s.out, "%s╚══════════════════════════════════════════╝\n%s\n\n", cyan, reset)
 }
 
 // printHelp shows available commands.
