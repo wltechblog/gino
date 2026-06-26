@@ -79,7 +79,7 @@ func restoreTerm(fd int, t *termios) {
 	if t == nil {
 		return
 	}
-	syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), TCSETS, uintptr(unsafe.Pointer(t)))
+	_, _, _ = syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), TCSETS, uintptr(unsafe.Pointer(t)))
 }
 
 // ─── Readline ───────────────────────────────────────────────────
@@ -154,8 +154,7 @@ func (rl *Readline) ReadLine() (string, error) {
 		c := buf[0]
 
 		switch {
-		case c == '\n' || c == '\r':
-			line := string(rl.buf)
+		case c == '\n' || c == '\r':			line := string(rl.buf)
 			rl.buf = nil
 			rl.cursor = 0
 			fmt.Fprintln(rl.out) // move to next line
@@ -250,7 +249,9 @@ func (rl *Readline) ReadLine() (string, error) {
 					rl.render()
 				case '3': // Delete — read one more byte (~)
 					var tilde [1]byte
-					os.Stdin.Read(tilde[:])
+					if _, err := os.Stdin.Read(tilde[:]); err != nil {
+						continue
+					}
 					if tilde[0] == '~' && rl.cursor < len(rl.buf) {
 						rl.buf = append(rl.buf[:rl.cursor], rl.buf[rl.cursor+1:]...)
 						rl.render()
