@@ -79,20 +79,31 @@ func main() {
 	}
 
 	command := os.Args[1]
-	globalFlags := flag.NewFlagSet("gino", flag.ExitOnError)
-	homeFlag := globalFlags.String("home", "", "gino home directory (default: ~/.gino)")
-
-	// Parse global flags from the remaining args (after the command)
+	// Extract -home from args manually so that subcommand-specific flags
+	// (e.g. agent -m) are not consumed by the global flag parser.
 	args := os.Args[2:]
-	_ = globalFlags.Parse(args)
-	rest := globalFlags.Args()
+	homeVal := ""
+	var rest []string
+	for i := 0; i < len(args); i++ {
+		if args[i] == "-home" && i+1 < len(args) {
+			homeVal = args[i+1]
+			i++ // skip value
+			continue
+		}
+		if strings.HasPrefix(args[i], "-home=") {
+			homeVal = strings.TrimPrefix(args[i], "-home=")
+			continue
+		}
+		rest = append(rest, args[i])
+	}
+	homeFlag := homeVal
 
 	switch command {
 	case "version":
 		fmt.Printf("🤖 gino v%s\n", version)
 
 	case "onboard":
-		runOnboard(*homeFlag)
+		runOnboard(homeFlag)
 
 	case "channels":
 		if len(rest) == 0 {
@@ -101,20 +112,20 @@ func main() {
 		}
 		switch rest[0] {
 		case "login":
-			runChannelsLogin(*homeFlag)
+			runChannelsLogin(homeFlag)
 		default:
 			fmt.Fprintf(os.Stderr, "unknown channels subcommand: %s\n", rest[0])
 			os.Exit(2)
 		}
 
 	case "agent":
-		runAgent(*homeFlag, rest)
+		runAgent(homeFlag, rest)
 
 	case "chat":
-		runChat(*homeFlag, rest)
+		runChat(homeFlag, rest)
 
 	case "gateway":
-		runGateway(*homeFlag, rest)
+		runGateway(homeFlag, rest)
 
 	case "signal":
 		if len(rest) == 0 {
@@ -136,15 +147,15 @@ func main() {
 		}
 		switch rest[0] {
 		case "read":
-			runMemoryRead(*homeFlag, rest[1:])
+			runMemoryRead(homeFlag, rest[1:])
 		case "append":
-			runMemoryAppend(*homeFlag, rest[1:])
+			runMemoryAppend(homeFlag, rest[1:])
 		case "write":
-			runMemoryWrite(*homeFlag, rest[1:])
+			runMemoryWrite(homeFlag, rest[1:])
 		case "recent":
-			runMemoryRecent(*homeFlag, rest[1:])
+			runMemoryRecent(homeFlag, rest[1:])
 		case "rank":
-			runMemoryRank(*homeFlag, rest[1:])
+			runMemoryRank(homeFlag, rest[1:])
 		default:
 			fmt.Fprintf(os.Stderr, "unknown memory subcommand: %s\n", rest[0])
 			os.Exit(2)
