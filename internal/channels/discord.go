@@ -288,7 +288,7 @@ func (c *discordClient) handleMessage(_ *discordgo.Session, m *discordgo.Message
 	// Guild channel handling.
 
 	// Monitored channels: engage on every message without requiring a mention.
-	// Reply directly in-channel (no thread creation). Session is keyed on the channel.
+	// Create a thread for the conversation (same as @mention behaviour).
 	if c.isMonitored(m.ChannelID) {
 		log.Printf("discord: channel %s is monitored, forwarding message", m.ChannelID)
 		if !c.checkRateLimit(m.Author.ID) {
@@ -298,7 +298,7 @@ func (c *discordClient) handleMessage(_ *discordgo.Session, m *discordgo.Message
 			}
 			return
 		}
-		c.forwardMessage(m, m.ChannelID, false)
+		c.createThreadAndForward(m, m.ChannelID)
 		return
 	}
 
