@@ -20,6 +20,7 @@ type discordSender interface {
 	ChannelMessageSend(channelID, content string, options ...discordgo.RequestOption) (*discordgo.Message, error)
 	ChannelTyping(channelID string, options ...discordgo.RequestOption) error
 	MessageThreadStartComplex(channelID, messageID string, data *discordgo.ThreadStart, options ...discordgo.RequestOption) (*discordgo.Channel, error)
+	ThreadJoin(threadID string, options ...discordgo.RequestOption) error
 	Channel(channelID string, options ...discordgo.RequestOption) (*discordgo.Channel, error)
 }
 
@@ -391,6 +392,12 @@ func (c *discordClient) createThreadAndForward(m *discordgo.MessageCreate, paren
 	}
 
 	log.Printf("discord: created thread %s (%s) for message from %s", thread.ID, thread.Name, senderDisplayName(m.Author))
+
+	// Explicitly join the thread. Discord should auto-join the creating bot,
+	// but some server configurations require an explicit join.
+	if err := c.sender.ThreadJoin(thread.ID); err != nil {
+		log.Printf("discord: warning: failed to join thread %s: %v", thread.ID, err)
+	}
 
 	// Record the thread owner so we can enforce ownership.
 	c.ownerMu.Lock()
