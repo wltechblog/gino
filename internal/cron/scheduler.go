@@ -1,35 +1,40 @@
 package cron
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
 
 // Job represents a scheduled task.
 type Job struct {
-	ID        string
-	Name      string
-	Message   string
-	FireAt    time.Time
-	Channel   string // originating channel (e.g., "telegram")
-	ChatID    string // originating chat ID
-	Recurring bool   // if true, re-schedule after firing
-	Interval  time.Duration
+	ID        string        `json:"id"`
+	Name      string        `json:"name"`
+	Message   string        `json:"message"`
+	FireAt    time.Time     `json:"fire_at"`
+	Channel   string        `json:"channel,omitempty"`
+	ChatID    string        `json:"chat_id,omitempty"`
+	Recurring bool          `json:"recurring,omitempty"`
+	Interval  time.Duration `json:"interval,omitempty"`
 	fired     bool
 }
 
 // FireCallback is called when a job fires. The scheduler passes the job details.
 type FireCallback func(job Job)
 
-// Scheduler manages in-memory scheduled jobs and fires them when due.
+// Scheduler manages scheduled jobs and fires them when due.
+// Jobs are persisted to disk so they survive restarts.
 type Scheduler struct {
 	mu       sync.Mutex
 	jobs     map[string]*Job
 	callback FireCallback
 	nextID   int
 	running  bool
+	filePath string // if set, jobs are persisted here
 }
 
 // NewScheduler creates a new scheduler with the given fire callback.
@@ -38,6 +43,15 @@ func NewScheduler(callback FireCallback) *Scheduler {
 		jobs:     make(map[string]*Job),
 		callback: callback,
 	}
+}
+
+// SetPersistencePath enables disk persistence at the given file path.
+// Must be called before Start(). Existing jobs are loaded immediately.
+func (s *Scheduler) SetPersistencePath(path string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.filePath = path
+	return s.loadLocked()
 }
 
 // Add schedules a new job. Returns the job ID.
@@ -55,6 +69,7 @@ func (s *Scheduler) Add(name, message string, delay time.Duration, channel, chat
 		ChatID:  chatID,
 	}
 	log.Printf("cron: scheduled job %q (%s) to fire in %v", name, id, delay)
+	s.saveLocked()
 	return id
 }
 
@@ -75,6 +90,7 @@ func (s *Scheduler) AddRecurring(name, message string, interval time.Duration, c
 		Interval:  interval,
 	}
 	log.Printf("cron: scheduled recurring job %q (%s) every %v", name, id, interval)
+	s.saveLocked()
 	return id
 }
 
@@ -85,6 +101,7 @@ func (s *Scheduler) Cancel(id string) bool {
 	if _, ok := s.jobs[id]; ok {
 		delete(s.jobs, id)
 		log.Printf("cron: cancelled job %s", id)
+		s.saveLocked()
 		return true
 	}
 	return false
@@ -98,6 +115,7 @@ func (s *Scheduler) CancelByName(name string) bool {
 		if j.Name == name {
 			delete(s.jobs, id)
 			log.Printf("cron: cancelled job %q (%s)", name, id)
+			s.saveLocked()
 			return true
 		}
 	}
@@ -117,7 +135,10 @@ func (s *Scheduler) List() []Job {
 
 // Start begins the scheduler tick loop. Call in a goroutine.
 func (s *Scheduler) Start(done <-chan struct{}) {
+	s.mu.Lock()
 	s.running = true
+	s.mu.Unlock()
+
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
@@ -125,7 +146,9 @@ func (s *Scheduler) Start(done <-chan struct{}) {
 	for {
 		select {
 		case <-done:
+			s.mu.Lock()
 			s.running = false
+			s.mu.Unlock()
 			log.Println("cron: scheduler stopped")
 			return
 		case now := <-ticker.C:
@@ -153,6 +176,9 @@ func (s *Scheduler) tick(now time.Time) {
 			delete(s.jobs, j.ID)
 		}
 	}
+	if len(toFire) > 0 {
+		s.saveLocked()
+	}
 	s.mu.Unlock()
 
 	// fire callbacks outside lock
@@ -162,4 +188,114 @@ func (s *Scheduler) tick(now time.Time) {
 			s.callback(*j)
 		}
 	}
+}
+
+// ─── Persistence ────────────────────────────────────────────────────────────
+
+// persistedJob is the JSON representation of a saved job.
+// nextID is also stored to avoid ID collisions across restarts.
+type persistedState struct {
+	NextID int    `json:"next_id"`
+	Jobs   []Job  `json:"jobs"`
+}
+
+// loadLocked reads jobs from disk. Caller must hold s.mu.
+func (s *Scheduler) loadLocked() error {
+	if s.filePath == "" {
+		return nil
+	}
+
+	data, err := os.ReadFile(s.filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // first run — no jobs file yet
+		}
+		return fmt.Errorf("cron: read jobs file: %w", err)
+	}
+
+	var state persistedState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return fmt.Errorf("cron: unmarshal jobs file: %w", err)
+	}
+
+	s.nextID = state.NextID
+	now := time.Now()
+	restored := 0
+	dropped := 0
+
+	for _, j := range state.Jobs {
+		// Deep copy since j is a range variable.
+		job := j
+
+		if job.Recurring {
+			// Reschedule recurring job to next interval from now.
+			// This avoids firing a backlog of missed intervals.
+			job.FireAt = now.Add(job.Interval)
+			s.jobs[job.ID] = &job
+			restored++
+		} else {
+			// One-time job — only keep if not yet due.
+			if job.FireAt.After(now) {
+				s.jobs[job.ID] = &job
+				restored++
+			} else {
+				dropped++
+			}
+		}
+	}
+
+	if restored > 0 || dropped > 0 {
+		log.Printf("cron: loaded %d job(s) from disk", restored)
+		if dropped > 0 {
+			log.Printf("cron: dropped %d expired one-time job(s)", dropped)
+		}
+	}
+
+	// Re-normalize nextID in case loaded jobs have higher IDs.
+	for id, j := range s.jobs {
+		var num int
+		if _, err := fmt.Sscanf(j.ID, "job-%d", &num); err == nil && num >= s.nextID {
+			s.nextID = num + 1
+		}
+		_ = id
+	}
+
+	// Save to clean up dropped jobs from the file.
+	s.saveLocked()
+	return nil
+}
+
+// saveLocked writes jobs to disk. Caller must hold s.mu.
+func (s *Scheduler) saveLocked() {
+	if s.filePath == "" {
+		return
+	}
+
+	state := persistedState{
+		NextID: s.nextID,
+		Jobs:   make([]Job, 0, len(s.jobs)),
+	}
+	for _, j := range s.jobs {
+		state.Jobs = append(state.Jobs, *j)
+	}
+
+	data, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		log.Printf("cron: marshal jobs file: %v", err)
+		return
+	}
+
+	// Write atomically: temp file + rename.
+	tmp := s.filePath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		log.Printf("cron: write jobs file: %v", err)
+		return
+	}
+	if err := os.Rename(tmp, s.filePath); err != nil {
+		log.Printf("cron: rename jobs file: %v", err)
+		return
+	}
+
+	// Ensure parent dir exists (belt and suspenders).
+	_ = os.MkdirAll(filepath.Dir(s.filePath), 0700)
 }

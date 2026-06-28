@@ -227,6 +227,11 @@ type DiscordConfig struct {
 	AllowFrom []string `json:"allowFrom"`
 	AllowDMs  bool     `json:"allowDMs"`
 
+	// MonitorChannels are guild channel IDs where the bot engages on every
+	// message without requiring an @mention. The bot replies directly in the
+	// channel (no thread creation).
+	MonitorChannels []string `json:"monitorChannels,omitempty"`
+
 	// Rate limiting (0 = unlimited)
 	RateLimitPerMinute int `json:"rateLimitPerMinute,omitempty"` // max messages per user per minute
 	RateLimitPerHour   int `json:"rateLimitPerHour,omitempty"`   // max messages per user per hour

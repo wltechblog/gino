@@ -90,7 +90,7 @@ func TestTruncate(t *testing.T) {
 // TestStartDiscord_EmptyToken tests that StartDiscord returns an error with empty token.
 func TestStartDiscord_EmptyToken(t *testing.T) {
 	hub := chat.NewHub(100)
-	err := StartDiscord(context.Background(), hub, "", nil, false, DiscordRateLimit{})
+	err := StartDiscord(context.Background(), hub, "", nil, false, nil, DiscordRateLimit{})
 	if err == nil {
 		t.Error("StartDiscord with empty token should return error")
 	}

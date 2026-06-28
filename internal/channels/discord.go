@@ -32,7 +32,7 @@ type DiscordRateLimit struct {
 	TotalHour int // max total messages per hour across all users (0 = unlimited)
 }
 
-func StartDiscord(ctx context.Context, hub *chat.Hub, token string, allowFrom []string, allowDMs bool, rl DiscordRateLimit) error {
+func StartDiscord(ctx context.Context, hub *chat.Hub, token string, allowFrom []string, allowDMs bool, monitorChannels []string, rl DiscordRateLimit) error {
 	if token == "" {
 		return fmt.Errorf("discord token not provided")
 	}
@@ -63,7 +63,8 @@ func StartDiscord(ctx context.Context, hub *chat.Hub, token string, allowFrom []
 	}
 	log.Printf("discord: connected as %s (%s)", botUser.Username, botUser.ID)
 
-	client := newDiscordClient(ctx, session, hub, botUser.ID, allowFrom, allowDMs, rl)
+	client := newDiscordClient(ctx, session, hub, botUser.ID, allowFrom, allowDMs, monitorChannels, rl)
+	log.Printf("discord: monitored channels: %v", monitorChannels)
 	session.AddHandler(client.handleMessage)
 	go client.runOutbound()
 	go func() {
@@ -80,45 +81,58 @@ func StartDiscord(ctx context.Context, hub *chat.Hub, token string, allowFrom []
 
 // discordClient handles Discord messaging using a discordSender.
 type discordClient struct {
-	sender      discordSender
-	hub         *chat.Hub
-	outCh       <-chan chat.Outbound
-	botID       string
-	allowed     map[string]struct{}
-	allowDMs    bool
-	ctx         context.Context
-	typingMu    sync.Mutex
-	typingStop  map[string]chan struct{}
-	threadOwner map[string]string // threadID → owner userID
-	ownerMu     sync.RWMutex
-	rateLimit   DiscordRateLimit
-	rateMu      sync.Mutex
-	userMinute  map[string][]time.Time // userID → timestamps of messages in current minute window
-	userHour    map[string][]time.Time // userID → timestamps of messages in current hour window
-	totalHour   []time.Time            // timestamps of all messages in current hour window
+	sender           discordSender
+	hub              *chat.Hub
+	outCh            <-chan chat.Outbound
+	botID            string
+	allowed          map[string]struct{}
+	allowDMs         bool
+	monitorChannels  map[string]struct{} // channel IDs where bot engages without mention
+	ctx              context.Context
+	typingMu         sync.Mutex
+	typingStop       map[string]chan struct{}
+	threadOwner      map[string]string // threadID → owner userID
+	ownerMu          sync.RWMutex
+	rateLimit        DiscordRateLimit
+	rateMu           sync.Mutex
+	userMinute       map[string][]time.Time // userID → timestamps of messages in current minute window
+	userHour         map[string][]time.Time // userID → timestamps of messages in current hour window
+	totalHour        []time.Time            // timestamps of all messages in current hour window
 }
 
 // newDiscordClient constructs a discordClient and registers it as the hub's
 // "discord" outbound subscriber. Inject a mock discordSender for tests.
-func newDiscordClient(ctx context.Context, sender discordSender, hub *chat.Hub, botID string, allowFrom []string, allowDMs bool, rl DiscordRateLimit) *discordClient {
+func newDiscordClient(ctx context.Context, sender discordSender, hub *chat.Hub, botID string, allowFrom []string, allowDMs bool, monitorChannels []string, rl DiscordRateLimit) *discordClient {
 	allowed := make(map[string]struct{}, len(allowFrom))
 	for _, id := range allowFrom {
 		allowed[id] = struct{}{}
 	}
-	return &discordClient{
-		sender:      sender,
-		hub:         hub,
-		outCh:       hub.Subscribe("discord"),
-		botID:       botID,
-		allowed:     allowed,
-		allowDMs:    allowDMs,
-		ctx:         ctx,
-		typingStop:  make(map[string]chan struct{}),
-		threadOwner: make(map[string]string),
-		rateLimit:   rl,
-		userMinute:  make(map[string][]time.Time),
-		userHour:    make(map[string][]time.Time),
+	monitor := make(map[string]struct{}, len(monitorChannels))
+	for _, id := range monitorChannels {
+		monitor[id] = struct{}{}
 	}
+	return &discordClient{
+		sender:          sender,
+		hub:             hub,
+		outCh:           hub.Subscribe("discord"),
+		botID:           botID,
+		allowed:         allowed,
+		allowDMs:        allowDMs,
+		monitorChannels: monitor,
+		ctx:             ctx,
+		typingStop:      make(map[string]chan struct{}),
+		threadOwner:     make(map[string]string),
+		rateLimit:       rl,
+		userMinute:      make(map[string][]time.Time),
+		userHour:        make(map[string][]time.Time),
+	}
+}
+
+// isMonitored returns true if the channel is in the monitor list (bot engages
+// without requiring an @mention).
+func (c *discordClient) isMonitored(channelID string) bool {
+	_, ok := c.monitorChannels[channelID]
+	return ok
 }
 
 // isThread checks whether a channel is a Discord thread (public, private, or news thread).
@@ -240,6 +254,8 @@ func pruneOld(ts []time.Time, cutoff time.Time) []time.Time {
 // information is held in c.botID so that we can call this in tests without a
 // live session.
 func (c *discordClient) handleMessage(_ *discordgo.Session, m *discordgo.MessageCreate) {
+	log.Printf("discord: handleMessage: author=%s bot=%v channel=%s guild=%s content=%q", m.Author.Username, m.Author.Bot, m.ChannelID, m.GuildID, truncate(m.Content, 80))
+
 	if m.Author == nil || m.Author.Bot || m.Author.ID == c.botID {
 		return
 	}
@@ -270,6 +286,21 @@ func (c *discordClient) handleMessage(_ *discordgo.Session, m *discordgo.Message
 	}
 
 	// Guild channel handling.
+
+	// Monitored channels: engage on every message without requiring a mention.
+	// Reply directly in-channel (no thread creation). Session is keyed on the channel.
+	if c.isMonitored(m.ChannelID) {
+		log.Printf("discord: channel %s is monitored, forwarding message", m.ChannelID)
+		if !c.checkRateLimit(m.Author.ID) {
+			log.Printf("discord: rate limited user %s (%s) in monitored channel %s", m.Author.Username, m.Author.ID, m.ChannelID)
+			if _, err := c.sender.ChannelMessageSend(m.ChannelID, fmt.Sprintf("⏳ <@%s> You're being rate limited. Please wait a moment before sending more messages.", m.Author.ID)); err != nil {
+				log.Printf("discord: failed to send rate limit notice: %v", err)
+			}
+			return
+		}
+		c.forwardMessage(m, m.ChannelID, false)
+		return
+	}
 
 	// If the message is already inside a thread, treat it as a continuation
 	// of that conversation. The thread owner can send freely; other users
