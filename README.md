@@ -234,7 +234,7 @@ The agent automatically extracts important facts from conversations and saves th
 | Channel | Type | Status | Notes |
 |---------|------|--------|-------|
 | **Telegram** | Bot API | ✅ Stable | MarkdownV2 formatting with automatic reserved-character escaping |
-| **Discord** | Bot (discordgo) | ✅ Stable | |
+| **Discord** | Bot (discordgo) | ✅ Stable | Channel monitoring, rate limiting |
 | **CLI** | stdin/stdout | ✅ Built-in | |
 
 ---
@@ -265,7 +265,8 @@ All config lives in `~/.gino/config.json`:
     },
     "discord": {
       "token": "your-bot-token",
-      "allowFrom": ["your-user-id"]
+      "allowFrom": ["your-user-id"],
+      "monitorChannels": ["123456789012345678"]
     }
   },
   "brain": {
@@ -276,6 +277,23 @@ All config lives in `~/.gino/config.json`:
 ```
 
 Run `./gino onboard` to generate a starter config interactively.
+
+### Channel Monitoring (Discord)
+
+By default, the Discord bot only responds to @mentions. You can configure specific channels where the bot responds to **every message** without requiring a mention — useful for dedicated bot channels or continuous conversations:
+
+```json
+{
+  "channels": {
+    "discord": {
+      "token": "your-bot-token",
+      "monitorChannels": ["123456789012345678"]
+    }
+  }
+}
+```
+
+Monitored channels have their own persistent sessions (keyed on channel ID), reply directly in-channel (no threads), and are still subject to rate limiting and the user allowlist.
 
 ---
 
