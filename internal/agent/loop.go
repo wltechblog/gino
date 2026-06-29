@@ -530,9 +530,7 @@ func NewAgentLoop(b *chat.Hub, provider providers.LLMProvider, model string, max
 		if err != nil {
 			// If OAuth is required, surface a user-friendly message
 			if oauthErr, ok := err.(*mcp.ErrOAuthRequired); ok {
-				log.Printf("MCP server %q: OAuth authentication required", name)
-				// Store the pending OAuth error for the agent to surface to the user.
-				// We'll store it so the mcp_auth tool can pick it up.
+				log.Printf("MCP server %q: OAuth authentication required. Auth URL: %s", name, oauthErr.AuthURL)
 				mcp.SetOAuthPending(name, oauthErr)
 				continue
 			}
@@ -612,6 +610,9 @@ func NewAgentLoop(b *chat.Hub, provider providers.LLMProvider, model string, max
 	restartTool.SetCallback(al.restartMCPServer)
 	listMCPTool.SetCallback(al.listMCPServers)
 	authTool.SetCallback(al)
+
+	// Wire OAuth notifications into the context builder so pending auth is surfaced
+	ctx.SetOAuthNotifier(al.ListPendingOAuth)
 
 	log.Printf("Sandbox mode: %s", sandbox.GetMode())
 

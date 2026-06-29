@@ -16,11 +16,12 @@ import (
 
 // ContextBuilder builds messages for the LLM from session history and current message.
 type ContextBuilder struct {
-	workspace    string
-	ranker       memory.Ranker
-	topK         int
-	skillsLoader *skills.Loader
-	brain        *brain.Brain
+	workspace      string
+	ranker         memory.Ranker
+	topK           int
+	skillsLoader   *skills.Loader
+	brain          *brain.Brain
+	oauthNotifier  func() map[string]string // returns server→authURL for pending OAuth
 }
 
 func NewContextBuilder(workspace string, r memory.Ranker, topK int) *ContextBuilder {
@@ -35,6 +36,13 @@ func NewContextBuilder(workspace string, r memory.Ranker, topK int) *ContextBuil
 // SetBrain attaches a knowledge brain for context enrichment.
 func (cb *ContextBuilder) SetBrain(b *brain.Brain) {
 	cb.brain = b
+}
+
+// SetOAuthNotifier attaches a function that returns pending OAuth server names
+// and their auth URLs. When non-empty, the system prompt will instruct the agent
+// to proactively surface them to the user.
+func (cb *ContextBuilder) SetOAuthNotifier(fn func() map[string]string) {
+	cb.oauthNotifier = fn
 }
 
 func (cb *ContextBuilder) BuildMessages(history []string, currentMessage string, channel, chatID, senderID string, memoryContext string, memories []memory.MemoryItem) []providers.Message {
@@ -141,6 +149,22 @@ Do NOT use: # headings, --- rulers, *-bullet-lists, --dash-lists, 1.-numbered-li
 				fmt.Fprintf(&brainSb, "- [%s] %s: %s\n", r.Type, r.Title, r.Snippet)
 			}
 			sysParts = append(sysParts, brainSb.String())
+		}
+	}
+
+	// Pending OAuth notifications — if MCP servers need auth, tell the agent to
+	// proactively inform the user.
+	if cb.oauthNotifier != nil {
+		pending := cb.oauthNotifier()
+		if len(pending) > 0 {
+			var sb strings.Builder
+			sb.WriteString("⚠️ OAuth Authentication Required:\n")
+			sb.WriteString("The following MCP servers need authentication. You MUST proactively inform the user about this NOW:\n\n")
+			for name, authURL := range pending {
+				fmt.Fprintf(&sb, "• Server: %s\n  URL: %s\n", name, authURL)
+			}
+			sb.WriteString("\nTell the user to open the URL, authenticate, then paste the full redirect URL (from their browser address bar after the page fails to load) back to you. Then use the mcp_auth tool with action='complete' to finish authentication.\n")
+			sysParts = append(sysParts, sb.String())
 		}
 	}
 
