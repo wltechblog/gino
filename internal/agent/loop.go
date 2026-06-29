@@ -410,6 +410,7 @@ type AgentLoop struct {
 	running                bool
 	mcpClients             []*mcp.Client
 	mcpConfigs             map[string]config.MCPServerConfig
+	tokenStore             *mcp.TokenStore
 	enableToolActivity     bool
 	enableToolCallMessages bool
 	signalSocketPath       string // GINO_SIGNAL_SOCKET injected into MCP child processes
@@ -505,6 +506,7 @@ func NewAgentLoop(b *chat.Hub, provider providers.LLMProvider, model string, max
 
 	// Connect to configured MCP servers and register their tools.
 	var mcpClients []*mcp.Client
+	tokenStore := mcp.NewTokenStore(homeDir)
 	for name, cfg := range mcpServers {
 		var client *mcp.Client
 		var err error
@@ -520,12 +522,20 @@ func NewAgentLoop(b *chat.Hub, provider providers.LLMProvider, model string, max
 			}
 			client, err = mcp.NewStdioClientWithEnv(name, cfg.Command, cfg.Args, mcpEnv)
 		case cfg.URL != "":
-			client, err = mcp.NewHTTPClient(name, cfg.URL, cfg.Headers)
+			client, err = mcp.NewHTTPClientWithOAuth(name, cfg.URL, cfg.Headers, tokenStore)
 		default:
 			log.Printf("MCP server %q: no command or url configured, skipping", name)
 			continue
 		}
 		if err != nil {
+			// If OAuth is required, surface a user-friendly message
+			if oauthErr, ok := err.(*mcp.ErrOAuthRequired); ok {
+				log.Printf("MCP server %q: OAuth authentication required", name)
+				// Store the pending OAuth error for the agent to surface to the user.
+				// We'll store it so the mcp_auth tool can pick it up.
+				mcp.SetOAuthPending(name, oauthErr)
+				continue
+			}
 			log.Printf("MCP server %q: failed to connect: %v", name, err)
 			continue
 		}
@@ -541,6 +551,8 @@ func NewAgentLoop(b *chat.Hub, provider providers.LLMProvider, model string, max
 	register(restartTool)
 	listMCPTool := tools.NewMCPListTool()
 	register(listMCPTool)
+	authTool := tools.NewMCPAuthTool()
+	register(authTool)
 
 	// Initialize knowledge brain (optional)
 	var brainInst *brain.Brain
@@ -589,6 +601,7 @@ func NewAgentLoop(b *chat.Hub, provider providers.LLMProvider, model string, max
 		maxToolResultChars:     maxToolResultChars,
 		mcpClients:             mcpClients,
 		mcpConfigs:             mcpServers,
+		tokenStore:             tokenStore,
 		enableToolActivity:     true,
 		enableToolCallMessages: false,
 		active:                 make(map[string]*activeTurn),
@@ -598,6 +611,7 @@ func NewAgentLoop(b *chat.Hub, provider providers.LLMProvider, model string, max
 	// Wire the MCP management tool callbacks so they can call back into the loop
 	restartTool.SetCallback(al.restartMCPServer)
 	listMCPTool.SetCallback(al.listMCPServers)
+	authTool.SetCallback(al)
 
 	log.Printf("Sandbox mode: %s", sandbox.GetMode())
 
@@ -716,7 +730,7 @@ func (a *AgentLoop) restartMCPServer(serverName string) (string, error) {
 		}
 		newClient, err = mcp.NewStdioClientWithEnv(serverName, cfg.Command, cfg.Args, mcpEnv)
 	case cfg.URL != "":
-		newClient, err = mcp.NewHTTPClient(serverName, cfg.URL, cfg.Headers)
+		newClient, err = mcp.NewHTTPClientWithOAuth(serverName, cfg.URL, cfg.Headers, a.tokenStore)
 	default:
 		return "", fmt.Errorf("MCP server %q has no command or URL", serverName)
 	}
@@ -766,6 +780,40 @@ func (a *AgentLoop) listMCPServers() string {
 		infos = append(infos, tools.MCPClientInfo{Name: c.Name(), Tools: toolNames})
 	}
 	return tools.FormatMCPServerList(infos)
+}
+
+/*** MCPAuthCallback implementation ***/
+
+// ListPendingOAuth implements tools.MCPAuthCallback.
+func (a *AgentLoop) ListPendingOAuth() map[string]string {
+	result := make(map[string]string)
+	for name, err := range mcp.AllPendingOAuth() {
+		result[name] = err.AuthURL
+	}
+	return result
+}
+
+// CompleteOAuth implements tools.MCPAuthCallback.
+func (a *AgentLoop) CompleteOAuth(serverName, redirectURL string) error {
+	cfg, ok := a.mcpConfigs[serverName]
+	if !ok {
+		return fmt.Errorf("unknown MCP server %q", serverName)
+	}
+	if cfg.URL == "" {
+		return fmt.Errorf("MCP server %q is not an HTTP server (OAuth not applicable)", serverName)
+	}
+	if err := mcp.CompleteAuthForServer(serverName, cfg.URL, redirectURL, cfg.Headers, a.tokenStore); err != nil {
+		return err
+	}
+	// Clear the pending OAuth state — auth is done
+	mcp.ClearOAuthPending(serverName)
+	return nil
+}
+
+// ReconnectAfterAuth implements tools.MCPAuthCallback.
+func (a *AgentLoop) ReconnectAfterAuth(serverName string) error {
+	_, err := a.restartMCPServer(serverName)
+	return err
 }
 
 // Run starts processing inbound messages. This is a blocking call until context is canceled.

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -30,6 +31,10 @@ type Client struct {
 	transport transport
 	nextID    atomic.Int64
 	tools     []Tool
+	// oauth is non-nil when the HTTP transport has an OAuth manager.
+	oauth *oauthManager
+	// url is the server URL (set for HTTP transports, used for token storage).
+	url string
 }
 
 // NewStdioClient creates a client that spawns a child process and communicates via stdin/stdout.
@@ -58,7 +63,7 @@ func NewStdioClientWithEnv(name, command string, args []string, extraEnv map[str
 // NewHTTPClient creates a client that communicates via Streamable HTTP.
 func NewHTTPClient(name, url string, headers map[string]string) (*Client, error) {
 	t := newHTTPTransport(url, headers)
-	c := &Client{name: name, transport: t}
+	c := &Client{name: name, transport: t, url: url}
 	if err := c.initialize(); err != nil {
 		_ = t.close()
 		return nil, fmt.Errorf("mcp %s: %w", name, err)
@@ -69,6 +74,83 @@ func NewHTTPClient(name, url string, headers map[string]string) (*Client, error)
 	}
 	return c, nil
 }
+
+// NewHTTPClientWithOAuth creates an HTTP client with OAuth support.
+// tokenStore is used to cache tokens; if nil, no OAuth support is available.
+func NewHTTPClientWithOAuth(name, serverURL string, headers map[string]string, tokenStore *TokenStore) (*Client, error) {
+	if tokenStore != nil {
+		// Check if we already have a cached token
+		if token, ok := tokenStore.GetToken(serverURL); ok {
+			if token.IsExpired() {
+				// Try refresh
+				om := newOAuthManager(serverURL, name, tokenStore)
+				newToken, err := om.refreshToken(&token)
+				if err != nil {
+					log.Printf("mcp %s: token refresh failed: %v", name, err)
+					tokenStore.DeleteToken(serverURL)
+				} else {
+					tokenStore.SetToken(serverURL, *newToken)
+					// Merge token into headers
+					if headers == nil {
+						headers = make(map[string]string)
+					}
+					headers["Authorization"] = "Bearer " + newToken.AccessToken
+				}
+			} else {
+				// Use cached token
+				if headers == nil {
+					headers = make(map[string]string)
+				}
+				headers["Authorization"] = "Bearer " + token.AccessToken
+			}
+		}
+	}
+
+	t := newHTTPTransport(serverURL, headers)
+	c := &Client{name: name, transport: t, url: serverURL}
+	if tokenStore != nil {
+		c.oauth = newOAuthManager(serverURL, name, tokenStore)
+	}
+
+	if err := c.initialize(); err != nil {
+		// If this is an OAuth-required error and we have an OAuth manager, begin the OAuth flow
+		var reqErr *ErrOAuthRequired
+		if errors.As(err, &reqErr) && c.oauth != nil {
+			authURL, beginErr := c.oauth.beginAuth()
+			if beginErr == nil {
+				return nil, &ErrOAuthRequired{
+					ServerName: name,
+					AuthURL:    authURL,
+					ServerKey:  serverURL,
+				}
+			}
+			// beginAuth failed — fall through to return the original error
+			log.Printf("mcp %s: OAuth beginAuth failed: %v", name, beginErr)
+		}
+		_ = t.close()
+		return nil, fmt.Errorf("mcp %s: %w", name, err)
+	}
+	if err := c.loadTools(); err != nil {
+		_ = t.close()
+		return nil, fmt.Errorf("mcp %s: %w", name, err)
+	}
+	return c, nil
+}
+
+// CompleteOAuthAuth completes a pending OAuth flow by exchanging the redirect URL
+// for a token. This is called after the user has authenticated and pasted back
+// the redirect URL. It returns a new connected Client.
+func CompleteOAuthAuth(name, serverURL, redirectURL string, headers map[string]string, tokenStore *TokenStore) (*Client, error) {
+	om := newOAuthManager(serverURL, name, tokenStore)
+	if err := om.completeAuth(redirectURL); err != nil {
+		return nil, err
+	}
+	// Now connect with the new token
+	return NewHTTPClientWithOAuth(name, serverURL, headers, tokenStore)
+}
+
+// ServerURL returns the URL of the server (empty for stdio transports).
+func (c *Client) ServerURL() string { return c.url }
 
 // Name: returns the server name.
 func (c *Client) Name() string { return c.name }
@@ -152,6 +234,14 @@ func (c *Client) initialize() error {
 		"capabilities": map[string]interface{}{},
 	}
 	if _, err := c.request("initialize", params); err != nil {
+		// If this is a 401/403 and we have an OAuth manager, return ErrOAuthRequired
+		var oauthErr *oauthHTTPError
+		if errors.As(err, &oauthErr) && c.oauth != nil {
+			return &ErrOAuthRequired{
+				ServerName: c.name,
+				ServerKey:  c.url,
+			}
+		}
 		return fmt.Errorf("initialize: %w", err)
 	}
 	// Send the required initialized notification (fire-and-forget).
@@ -350,6 +440,16 @@ func (t *httpTransport) doPost(body []byte) ([]byte, error) {
 	if resp.StatusCode == http.StatusAccepted {
 		return []byte("{}"), nil
 	}
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		b, _ := io.ReadAll(resp.Body)
+		// Return an oauthError to signal that OAuth is needed.
+		// The caller (Client) can check for this and initiate the OAuth flow.
+		return nil, &oauthHTTPError{
+			StatusCode:    resp.StatusCode,
+			WWWAuthenticate: resp.Header.Get("WWW-Authenticate"),
+			Body:          string(b),
+		}
+	}
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(b))
@@ -360,6 +460,17 @@ func (t *httpTransport) doPost(body []byte) ([]byte, error) {
 		return parseSSE(resp.Body)
 	}
 	return io.ReadAll(resp.Body)
+}
+
+// oauthHTTPError wraps a 401/403 response so the caller can detect OAuth requirement.
+type oauthHTTPError struct {
+	StatusCode      int
+	WWWAuthenticate string
+	Body            string
+}
+
+func (e *oauthHTTPError) Error() string {
+	return fmt.Sprintf("HTTP %d: %s", e.StatusCode, e.Body)
 }
 
 func (t *httpTransport) close() error { return nil }
