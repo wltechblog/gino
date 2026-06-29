@@ -287,25 +287,40 @@ func (om *oauthManager) discoverProtectedResource(authHeader string) (*protected
 }
 
 // discoverAuthServer fetches the authorization server metadata.
+// Per RFC 8414, the metadata is at <issuer>/.well-known/oauth-authorization-server.
+// Some providers (e.g. Robinhood) publish it at the origin root rather than the
+// full path, so we try the full URL first and fall back to origin-only.
 func (om *oauthManager) discoverAuthServer(authServerURL string) (*authorizationServerMetadata, error) {
-	metadataURL := strings.TrimRight(authServerURL, "/") + "/.well-known/oauth-authorization-server"
-
-	resp, err := om.httpClient.Get(metadataURL)
-	if err != nil {
-		return nil, fmt.Errorf("fetch auth server metadata: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("auth server metadata: HTTP %d", resp.StatusCode)
+	candidates := []string{
+		strings.TrimRight(authServerURL, "/") + "/.well-known/oauth-authorization-server",
 	}
 
-	var asm authorizationServerMetadata
-	if err := json.NewDecoder(resp.Body).Decode(&asm); err != nil {
-		return nil, fmt.Errorf("decode auth server metadata: %w", err)
+	// Add origin-only fallback (scheme://host/.well-known/...)
+	if parsed, err := url.Parse(authServerURL); err == nil && parsed.Path != "" && parsed.Path != "/" {
+		candidates = append(candidates, parsed.Scheme+"://"+parsed.Host+"/.well-known/oauth-authorization-server")
 	}
 
-	return &asm, nil
+	var lastStatus int
+	for _, metadataURL := range candidates {
+		resp, err := om.httpClient.Get(metadataURL)
+		if err != nil {
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			lastStatus = resp.StatusCode
+			resp.Body.Close()
+			continue
+		}
+		var asm authorizationServerMetadata
+		if err := json.NewDecoder(resp.Body).Decode(&asm); err != nil {
+			resp.Body.Close()
+			return nil, fmt.Errorf("decode auth server metadata: %w", err)
+		}
+		resp.Body.Close()
+		return &asm, nil
+	}
+
+	return nil, fmt.Errorf("auth server metadata: HTTP %d (tried %d URLs)", lastStatus, len(candidates))
 }
 
 // dynamicRegister performs OAuth 2.0 Dynamic Client Registration (RFC7591).
