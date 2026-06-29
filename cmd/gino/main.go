@@ -332,6 +332,9 @@ func runGateway(homeFlag string, args []string) {
 			Content:  fmt.Sprintf("[Scheduled reminder fired] %s — Please relay this to the user in a friendly way.", job.Message),
 		}
 	})
+	if err := scheduler.SetPersistencePath(filepath.Join(homeDir, "cron_jobs.json")); err != nil {
+		log.Printf("cron: failed to set persistence path: %v", err)
+	}
 
 	maxIter := cfg.Agents.Defaults.MaxToolIterations
 	if maxIter <= 0 {
