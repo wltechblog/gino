@@ -433,6 +433,8 @@ func (t *httpTransport) doPost(body []byte) ([]byte, error) {
 	}
 	defer resp.Body.Close()
 
+	log.Printf("[mcp] POST %s → status %d, content-type %s", t.url, resp.StatusCode, resp.Header.Get("Content-Type"))
+
 	if sid := resp.Header.Get("Mcp-Session-Id"); sid != "" {
 		t.sessionID = sid
 	}
@@ -459,7 +461,17 @@ func (t *httpTransport) doPost(body []byte) ([]byte, error) {
 	if strings.HasPrefix(ct, "text/event-stream") {
 		return parseSSE(resp.Body)
 	}
-	return io.ReadAll(resp.Body)
+	// If content-type is application/json, read directly.
+	if strings.HasPrefix(ct, "application/json") {
+		return io.ReadAll(resp.Body)
+	}
+	// Fallback: try to read as raw body.
+	rawBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	log.Printf("[mcp] unexpected content-type %s, body: %s", ct, truncate(string(rawBody), 500))
+	return rawBody, nil
 }
 
 // oauthHTTPError wraps a 401/403 response so the caller can detect OAuth requirement.
@@ -478,19 +490,57 @@ func (t *httpTransport) close() error { return nil }
 // parseSSE extracts the first JSON-RPC response from an SSE stream.
 func parseSSE(r io.Reader) ([]byte, error) {
 	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024) // 1MB buffer
+	var rawLines []string
 	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.HasPrefix(line, "data: ") {
-			data := strings.TrimPrefix(line, "data: ")
-			var probe struct {
-				ID *json.RawMessage `json:"id"`
+		rawLine := scanner.Text()
+		rawLines = append(rawLines, rawLine)
+
+		// Accept "data:" with or without a leading space.
+		var data string
+		if strings.HasPrefix(rawLine, "data: ") {
+			data = strings.TrimPrefix(rawLine, "data: ")
+		} else if strings.HasPrefix(rawLine, "data:") {
+			data = strings.TrimPrefix(rawLine, "data:")
+			data = strings.TrimLeft(data, " ")
+		} else {
+			continue
+		}
+
+		data = strings.TrimSpace(data)
+		if data == "" {
+			continue
+		}
+
+		// Try to parse as JSON. If it's valid JSON, return it.
+		// We no longer require an "id" field — some servers send responses
+		// without it, or send notifications/pings before the actual response.
+		var probe json.RawMessage
+		if json.Unmarshal([]byte(data), &probe) == nil {
+			// Check if it looks like a JSON-RPC response (has jsonrpc field).
+			var check struct {
+				JSONRPC string `json:"jsonrpc"`
 			}
-			if json.Unmarshal([]byte(data), &probe) == nil && probe.ID != nil {
+			if json.Unmarshal([]byte(data), &check) == nil && check.JSONRPC != "" {
 				return []byte(data), nil
 			}
+			// Otherwise still return it — might be a non-standard response.
+			return []byte(data), nil
 		}
 	}
-	return nil, fmt.Errorf("no response in SSE stream")
+	if err := scanner.Err(); err != nil {
+		log.Printf("[mcp] SSE scanner error: %v", err)
+		return nil, fmt.Errorf("SSE scanner error: %w", err)
+	}
+	// Log raw lines for debugging.
+	for i, l := range rawLines {
+		if i >= 20 {
+			log.Printf("[mcp] SSE line %d (truncated, %d more): %s", i, len(rawLines)-i, l)
+			break
+		}
+		log.Printf("[mcp] SSE line %d: %s", i, l)
+	}
+	return nil, fmt.Errorf("no response in SSE stream (%d lines scanned)", len(rawLines))
 }
 
 func truncate(s string, n int) string {
