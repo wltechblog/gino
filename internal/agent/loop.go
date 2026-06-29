@@ -1152,10 +1152,10 @@ func (a *AgentLoop) processTurn(ctx context.Context, at *activeTurn, sessionKey 
 				elapsed := time.Since(start).Round(time.Millisecond)
 
 				if err != nil {
-					if a.enableToolCallMessages {
-						sendChannelNotification(a.hub, msg.Channel, msg.ChatID,
-							fmt.Sprintf("📢 %s failed (%s): %v", tc.Name, elapsed, err))
-					}
+					// Tool errors are always surfaced to the user — they should not
+					// be silently absorbed into the LLM context.
+					sendChannelNotification(a.hub, msg.Channel, msg.ChatID,
+						fmt.Sprintf("⚠️ %s failed: %v", tc.Name, err))
 					res = "(tool error) " + err.Error()
 				} else {
 					if a.enableToolCallMessages {
