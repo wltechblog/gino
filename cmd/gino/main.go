@@ -224,6 +224,7 @@ func runAgent(homeFlag string, args []string) {
 	fs := flag.NewFlagSet("agent", flag.ExitOnError)
 	msg := fs.String("m", "", "Message to send to the agent")
 	modelFlag := fs.String("M", "", "Model to use (overrides config/provider default)")
+	sessionKey := fs.String("session", "", "Session key for multi-turn context persistence")
 	_ = fs.Parse(args)
 
 	if *msg == "" {
@@ -262,7 +263,7 @@ func runAgent(homeFlag string, args []string) {
 		ag.SetToolCallMessages(*cfg.Agents.Defaults.EnableToolCallMessages)
 	}
 
-	resp, err := ag.ProcessDirect(*msg, 60*time.Second)
+	resp, err := ag.ProcessDirectWithSession(*msg, 60*time.Second, *sessionKey)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)

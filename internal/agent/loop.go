@@ -1288,6 +1288,15 @@ func (a *AgentLoop) recoverTurns(ctx context.Context) {
 // ProcessDirect sends a message directly to the provider and returns the response.
 // It supports tool calling - if the model requests tools, they will be executed.
 func (a *AgentLoop) ProcessDirect(content string, timeout time.Duration) (string, error) {
+	return a.ProcessDirectWithSession(content, timeout, "")
+}
+
+// ProcessDirectWithSession is like ProcessDirect but persists conversation
+// history to a session on disk. When sessionKey is non-empty, prior history
+// is loaded and the new exchange is appended. This enables multi-turn
+// benchmarks that invoke gino as a fresh subprocess per turn while still
+// maintaining conversation context.
+func (a *AgentLoop) ProcessDirectWithSession(content string, timeout time.Duration, sessionKey string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
@@ -1304,10 +1313,17 @@ func (a *AgentLoop) ProcessDirect(content string, timeout time.Duration) (string
 		}
 	}
 
+	// Load session history if a session key was provided.
+	var history []string
+	if sessionKey != "" && a.sessions != nil {
+		sess := a.sessions.GetOrCreate(sessionKey)
+		history = sess.GetHistory()
+	}
+
 	// Build full context (bootstrap files, skills, memory) just like the main loop
 	memCtx, _ := a.memory.GetMemoryContext()
 	memories := a.memory.Recent(5)
-	messages := a.context.BuildMessages(nil, content, "cli", "direct", "", memCtx, memories)
+	messages := a.context.BuildMessages(history, content, "cli", "direct", "", memCtx, memories)
 
 	// Support tool calling iterations (similar to main loop)
 	var lastToolResult string
@@ -1334,13 +1350,20 @@ func (a *AgentLoop) ProcessDirect(content string, timeout time.Duration) (string
 		}
 
 		if !resp.HasToolCalls {
-			if resp.Content != "" {
-				return resp.Content, nil
+			reply := resp.Content
+			if reply == "" && lastToolResult != "" {
+				reply = lastToolResult
 			}
-			if lastToolResult != "" {
-				return lastToolResult, nil
+			// Persist the exchange to the session if a key was provided.
+			if sessionKey != "" && a.sessions != nil {
+				sess := a.sessions.GetOrCreate(sessionKey)
+				sess.AddMessage("user", content)
+				sess.AddMessage("assistant", reply)
+				if err := a.sessions.Save(sess); err != nil {
+					log.Printf("error saving session: %v", err)
+				}
 			}
-			return resp.Content, nil
+			return reply, nil
 		}
 
 		messages = append(messages, providers.Message{Role: "assistant", Content: resp.Content, ToolCalls: resp.ToolCalls})
@@ -1354,10 +1377,18 @@ func (a *AgentLoop) ProcessDirect(content string, timeout time.Duration) (string
 		}
 	}
 
-	return "Max iterations reached without final response", nil
+	maxIterReply := "Max iterations reached without final response"
+	// Persist even on max-iterations so the session reflects the exchange.
+	if sessionKey != "" && a.sessions != nil {
+		sess := a.sessions.GetOrCreate(sessionKey)
+		sess.AddMessage("user", content)
+		sess.AddMessage("assistant", maxIterReply)
+		if err := a.sessions.Save(sess); err != nil {
+			log.Printf("error saving session: %v", err)
+		}
+	}
+	return maxIterReply, nil
 }
-
-// initBrain initializes the knowledge brain subsystem.
 // Tries Ollama first, falls back to remote API, then FTS5-only mode.
 // memorySlug creates a URL-safe slug from text for use as a brain page slug.
 func memorySlug(s string) string {
