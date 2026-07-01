@@ -44,6 +44,23 @@ func NewOllamaProvider(cfg OllamaConfig) *OllamaProvider {
 	}
 }
 
+// maxEmbedChars limits text sent to the embedding model to avoid
+// "input length exceeds context length" errors. nomic-embed-text has
+// an 8192-token context window (~32KB of text at ~4 chars/token).
+const maxEmbedChars = 24000
+
+// truncateForEmbed shortens text to fit within the embedding model's
+// context window. It keeps the beginning and end of the text to
+// preserve both the topic and any concluding context.
+func truncateForEmbed(text string) string {
+	if len(text) <= maxEmbedChars {
+		return text
+	}
+	head := maxEmbedChars / 2
+	tail := maxEmbedChars - head
+	return text[:head] + "\n...[truncated]...\n" + text[len(text)-tail:]
+}
+
 func (o *OllamaProvider) Embed(ctx context.Context, text string) ([]float32, error) {
 	vecs, err := o.EmbedBatch(ctx, []string{text})
 	if err != nil {
@@ -56,10 +73,15 @@ func (o *OllamaProvider) Embed(ctx context.Context, text string) ([]float32, err
 }
 
 func (o *OllamaProvider) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
+	// Truncate each text to avoid context-length errors
+	truncated := make([]string, len(texts))
+	for i, t := range texts {
+		truncated[i] = truncateForEmbed(t)
+	}
 	// Ollama's /api/embeddings endpoint (also supports OpenAI-compatible /v1/embeddings)
 	reqBody := map[string]any{
 		"model": o.model,
-		"input": texts,
+		"input": truncated,
 	}
 	body, _ := json.Marshal(reqBody)
 
@@ -142,9 +164,14 @@ func (r *RemoteAPIProvider) Embed(ctx context.Context, text string) ([]float32, 
 }
 
 func (r *RemoteAPIProvider) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
+	// Truncate each text to avoid context-length errors
+	truncated := make([]string, len(texts))
+	for i, t := range texts {
+		truncated[i] = truncateForEmbed(t)
+	}
 	reqBody := map[string]any{
 		"model": r.model,
-		"input": texts,
+		"input": truncated,
 	}
 	body, _ := json.Marshal(reqBody)
 

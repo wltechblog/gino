@@ -1297,6 +1297,13 @@ func (a *AgentLoop) ProcessDirect(content string, timeout time.Duration) (string
 // benchmarks that invoke gino as a fresh subprocess per turn while still
 // maintaining conversation context.
 func (a *AgentLoop) ProcessDirectWithSession(content string, timeout time.Duration, sessionKey string) (string, error) {
+	return a.ProcessDirectWithSessionAndSystemPrompt(content, timeout, sessionKey, "")
+}
+
+// ProcessDirectWithSessionAndSystemPrompt is like ProcessDirectWithSession but
+// allows overriding the system prompt. This is used by benchmarks that inject
+// custom instructions (e.g., "remember all important facts").
+func (a *AgentLoop) ProcessDirectWithSessionAndSystemPrompt(content string, timeout time.Duration, sessionKey string, systemPromptOverride string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
@@ -1324,6 +1331,11 @@ func (a *AgentLoop) ProcessDirectWithSession(content string, timeout time.Durati
 	memCtx, _ := a.memory.GetMemoryContext()
 	memories := a.memory.Recent(5)
 	messages := a.context.BuildMessages(history, content, "cli", "direct", "", memCtx, memories)
+
+	// Override system prompt if provided (used by benchmarks)
+	if systemPromptOverride != "" && len(messages) > 0 && messages[0].Role == "system" {
+		messages[0].Content = systemPromptOverride
+	}
 
 	// Support tool calling iterations (similar to main loop)
 	var lastToolResult string

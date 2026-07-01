@@ -225,6 +225,7 @@ func runAgent(homeFlag string, args []string) {
 	msg := fs.String("m", "", "Message to send to the agent")
 	modelFlag := fs.String("M", "", "Model to use (overrides config/provider default)")
 	sessionKey := fs.String("session", "", "Session key for multi-turn context persistence")
+	systemPromptOverride := fs.String("system-prompt", "", "Override the system prompt (used by benchmarks)")
 	_ = fs.Parse(args)
 
 	if *msg == "" {
@@ -263,7 +264,12 @@ func runAgent(homeFlag string, args []string) {
 		ag.SetToolCallMessages(*cfg.Agents.Defaults.EnableToolCallMessages)
 	}
 
-	resp, err := ag.ProcessDirectWithSession(*msg, 60*time.Second, *sessionKey)
+	// Use requestTimeoutS from config, fallback to 300s
+	cliTimeout := 300 * time.Second
+	if cfg.Agents.Defaults.RequestTimeoutS > 0 {
+		cliTimeout = time.Duration(cfg.Agents.Defaults.RequestTimeoutS) * time.Second
+	}
+	resp, err := ag.ProcessDirectWithSessionAndSystemPrompt(*msg, cliTimeout, *sessionKey, *systemPromptOverride)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
