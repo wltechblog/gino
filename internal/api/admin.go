@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/wltechblog/gino/internal/config"
+	"github.com/wltechblog/gino/internal/providers"
 	"github.com/wltechblog/gino/internal/tenant"
 )
 
@@ -442,6 +443,147 @@ func (s *Server) adminDeleteMCPServer(w http.ResponseWriter, r *http.Request, sc
 		}
 		actor := userIDFromRequest(r)
 		s.store.RecordAdminAction("mcp.delete", actor, name, "user="+scopeUser)
+	}
+
+	s.writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// ─── Providers ─────────────────────────────────────────────────────────────────
+
+// ProviderRequest is the payload for creating/updating a provider.
+type ProviderRequest struct {
+	Name           string             `json:"name"`
+	APIBase        string             `json:"apiBase"`
+	APIKey         string             `json:"apiKey"`
+	IsPrimary      bool               `json:"isPrimary"`
+	MaxTokens      int                `json:"maxTokens,omitempty"`
+	MaxRetries     int                `json:"maxRetries,omitempty"`
+	RetryBaseWaitS int                `json:"retryBaseWaitS,omitempty"`
+	TimeoutS       int                `json:"timeoutS,omitempty"`
+	Fallback       bool               `json:"fallback,omitempty"`
+	RecoverAfter   string             `json:"recoverAfter,omitempty"`
+	FallbackOrder  int                `json:"fallbackOrder,omitempty"`
+	Models         []providers.ModelDef `json:"models,omitempty"`
+}
+
+// handleAdminProviders handles GET (list) and POST (create/update) for providers.
+func (s *Server) handleAdminProviders(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.adminListProviders(w, r)
+	case http.MethodPost:
+		s.adminSaveProvider(w, r)
+	default:
+		s.writeError(w, http.StatusMethodNotAllowed, "Use GET or POST")
+	}
+}
+
+// handleAdminProvider handles DELETE for a single provider.
+func (s *Server) handleAdminProvider(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimPrefix(r.URL.Path, "/api/v1/admin/providers/")
+	if name == "" {
+		s.writeError(w, http.StatusBadRequest, "Provider name required")
+		return
+	}
+
+	switch r.Method {
+	case http.MethodDelete:
+		s.adminDeleteProvider(w, r, name)
+	default:
+		s.writeError(w, http.StatusMethodNotAllowed, "Use DELETE")
+	}
+}
+
+func (s *Server) adminListProviders(w http.ResponseWriter, r *http.Request) {
+	if s.providerMgr == nil {
+		s.writeJSON(w, http.StatusOK, map[string]interface{}{"providers": []interface{}{}})
+		return
+	}
+	defs := s.providerMgr.ListProviders()
+	s.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"providers": defs,
+		"total":     len(defs),
+	})
+}
+
+func (s *Server) adminSaveProvider(w http.ResponseWriter, r *http.Request) {
+	if s.providerMgr == nil {
+		s.writeError(w, http.StatusServiceUnavailable, "Provider management not enabled")
+		return
+	}
+
+	var req ProviderRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, "Invalid JSON body")
+		return
+	}
+	if req.Name == "" {
+		s.writeError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	if req.APIBase == "" {
+		s.writeError(w, http.StatusBadRequest, "apiBase is required")
+		return
+	}
+
+	// If updating and no APIKey provided, keep existing
+	if req.APIKey == "" {
+		existing := s.providerMgr.GetProvider(req.Name)
+		_ = existing // can't get key back; user must re-enter if changing
+	}
+
+	def := providers.ProviderConfigDef{
+		Name:           req.Name,
+		APIBase:        req.APIBase,
+		APIKey:         req.APIKey,
+		IsPrimary:      req.IsPrimary,
+		MaxTokens:      req.MaxTokens,
+		MaxRetries:     req.MaxRetries,
+		RetryBaseWaitS: req.RetryBaseWaitS,
+		TimeoutS:       req.TimeoutS,
+		Fallback:       req.Fallback,
+		RecoverAfter:   req.RecoverAfter,
+		FallbackOrder:  req.FallbackOrder,
+		Models:         req.Models,
+	}
+
+	if err := s.providerMgr.SaveProvider(def); err != nil {
+		s.writeError(w, http.StatusInternalServerError, "Failed to save provider: "+err.Error())
+		return
+	}
+
+	// If this is primary and has a default model, update the agent loop
+	if req.IsPrimary {
+		for _, m := range req.Models {
+			if m.Default && s.agentLoop != nil {
+				s.agentLoop.UpdateModel(m.Name)
+				break
+			}
+		}
+	}
+
+	actor := userIDFromRequest(r)
+	if s.store != nil {
+		s.store.RecordAdminAction("provider.save", actor, req.Name, "")
+	}
+
+	s.writeJSON(w, http.StatusCreated, map[string]string{"status": "saved"})
+}
+
+func (s *Server) adminDeleteProvider(w http.ResponseWriter, r *http.Request, name string) {
+	if s.providerMgr == nil {
+		s.writeError(w, http.StatusServiceUnavailable, "Provider management not enabled")
+		return
+	}
+
+	if err := s.providerMgr.DeleteProvider(name); err != nil {
+		s.writeError(w, http.StatusInternalServerError, "Failed to delete: "+err.Error())
+		return
+	}
+
+	actor := userIDFromRequest(r)
+	if s.store != nil {
+		s.store.RecordAdminAction("provider.delete", actor, name, "")
 	}
 
 	s.writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})

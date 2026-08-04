@@ -76,13 +76,53 @@ func (s *Store) migrate() error {
 			created_at TEXT NOT NULL DEFAULT (datetime('now'))
 		)`,
 	}
+	
+	// Also migrate provider tables in the same DB
 	for _, m := range migrations {
 		if _, err := s.db.Exec(m); err != nil {
 			return fmt.Errorf("exec migration: %w", err)
 		}
 	}
+	
+	// Provider tables (shared in the same SQLite DB)
+	providerMigrations := []string{
+		`CREATE TABLE IF NOT EXISTS providers (
+			id           INTEGER PRIMARY KEY AUTOINCREMENT,
+			name         TEXT NOT NULL UNIQUE,
+			api_base     TEXT NOT NULL DEFAULT '',
+			api_key      TEXT NOT NULL DEFAULT '',
+			is_primary   INTEGER NOT NULL DEFAULT 0,
+			max_tokens   INTEGER NOT NULL DEFAULT 0,
+			max_retries  INTEGER NOT NULL DEFAULT 0,
+			retry_base_wait_s INTEGER NOT NULL DEFAULT 0,
+			timeout_s    INTEGER NOT NULL DEFAULT 0,
+			is_fallback  INTEGER NOT NULL DEFAULT 0,
+			recover_after TEXT NOT NULL DEFAULT '',
+			fallback_order INTEGER NOT NULL DEFAULT 0,
+			updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+		)`,
+		`CREATE TABLE IF NOT EXISTS provider_models (
+			id           INTEGER PRIMARY KEY AUTOINCREMENT,
+			provider_id  INTEGER NOT NULL,
+			name         TEXT NOT NULL,
+			label        TEXT NOT NULL DEFAULT '',
+			vision       INTEGER NOT NULL DEFAULT 0,
+			is_default   INTEGER NOT NULL DEFAULT 0,
+			FOREIGN KEY(provider_id) REFERENCES providers(id) ON DELETE CASCADE,
+			UNIQUE(provider_id, name)
+		)`,
+	}
+	for _, m := range providerMigrations {
+		if _, err := s.db.Exec(m); err != nil {
+			return fmt.Errorf("exec provider migration: %w", err)
+		}
+	}
 	return nil
 }
+
+// DB returns the underlying *sql.DB for use by other managers
+// (e.g. ProviderManager) that share the same SQLite database.
+func (s *Store) DB() *sql.DB { return s.db }
 
 // Close closes the underlying database.
 func (s *Store) Close() error {

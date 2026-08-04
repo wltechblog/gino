@@ -9,6 +9,7 @@ import (
 
 	"github.com/wltechblog/gino/internal/audit"
 	"github.com/wltechblog/gino/internal/chat"
+	"github.com/wltechblog/gino/internal/providers"
 	"github.com/wltechblog/gino/internal/tenant"
 )
 
@@ -97,9 +98,17 @@ type Server struct {
 	visionSupported bool
 	tools           map[string]interface{} // tool name -> anything (for /info listing)
 	httpServer      *http.Server
-	userManager     *tenant.UserManager // optional: for multi-tenant rate limiting
-	store           *tenant.Store       // optional: for persistent admin operations
-	auditStore      *audit.Store        // optional: for dashboard token usage summary
+	userManager     *tenant.UserManager       // optional: for multi-tenant rate limiting
+	store           *tenant.Store             // optional: for persistent admin operations
+	auditStore      *audit.Store              // optional: for dashboard token usage summary
+	providerMgr     *providers.ProviderManager // optional: for dynamic provider management
+	agentLoop       agentLoopMgr              // optional: for hot model updates
+}
+
+// agentLoopMgr is the subset of AgentLoop needed for hot provider/model updates.
+type agentLoopMgr interface {
+	UpdateModel(model string)
+	SwapProvider(p providers.LLMProvider)
 }
 
 // New creates a new API server wired into the existing hub.
@@ -146,6 +155,8 @@ func (s *Server) routes() {
 	mux.HandleFunc("/api/v1/admin/tiers", s.authMiddleware(s.adminMiddleware(s.handleAdminTiers)))
 	mux.HandleFunc("/api/v1/admin/mcp", s.authMiddleware(s.adminMiddleware(s.handleAdminMCPServers)))
 	mux.HandleFunc("/api/v1/admin/mcp/", s.authMiddleware(s.adminMiddleware(s.handleAdminMCPServers)))
+	mux.HandleFunc("/api/v1/admin/providers", s.authMiddleware(s.adminMiddleware(s.handleAdminProviders)))
+	mux.HandleFunc("/api/v1/admin/providers/", s.authMiddleware(s.adminMiddleware(s.handleAdminProvider)))
 
 	// Admin UI — server-rendered templates
 	mux.HandleFunc("/admin/login", s.handleAdminLogin)
@@ -289,6 +300,16 @@ func (s *Server) SetStore(store *tenant.Store) {
 // SetAuditStore wires the audit store for dashboard summaries.
 func (s *Server) SetAuditStore(store *audit.Store) {
 	s.auditStore = store
+}
+
+// SetProviderManager wires the dynamic provider manager.
+func (s *Server) SetProviderManager(pm *providers.ProviderManager) {
+	s.providerMgr = pm
+}
+
+// SetAgentLoop wires the agent loop for hot provider/model updates.
+func (s *Server) SetAgentLoop(a agentLoopMgr) {
+	s.agentLoop = a
 }
 
 // checkRateLimit verifies the user's tier allows a new turn.

@@ -403,11 +403,13 @@ func isSystemChannel(channel string) bool {
 type AgentLoop struct {
 	hub                    *chat.Hub
 	provider               providers.LLMProvider
+	providerMu             sync.RWMutex // guards provider for hot-swap
+	model                  string
+	modelMu                sync.RWMutex // guards model for hot-swap
 	tools                  *tools.Registry
 	sessions               *session.SessionManager
 	checkpoints            *CheckpointManager
 	context                *ContextBuilder
-	model                  string
 	maxIterations          int
 	maxTurnMessages        int
 	maxToolResultChars     int
@@ -1023,6 +1025,24 @@ type ToolListProvider interface {
 func (a *AgentLoop) SetToolListProvider(p ToolListProvider) {
 	a.toolListProvider = p
 	a.notifyToolListChanged()
+}
+
+// UpdateModel hot-swaps the default model used for new turns.
+// Called by the admin API when a provider's default model changes.
+func (a *AgentLoop) UpdateModel(model string) {
+	a.modelMu.Lock()
+	a.model = model
+	a.modelMu.Unlock()
+	log.Printf("agent: model updated to %q", model)
+}
+
+// SwapProvider hot-swaps the LLM provider used for new turns.
+// Called by the admin API when provider configs change.
+func (a *AgentLoop) SwapProvider(p providers.LLMProvider) {
+	a.providerMu.Lock()
+	a.provider = p
+	a.providerMu.Unlock()
+	log.Printf("agent: provider swapped")
 }
 
 // Close shuts down all MCP server connections and the brain.

@@ -591,6 +591,30 @@ func runGateway(homeFlag string, args []string) {
 		if tenantStore != nil {
 			apiServer.SetStore(tenantStore)
 		}
+		// Wire dynamic provider management
+		var providerMgr *providers.ProviderManager
+		if tenantStore != nil {
+			providerMgr = providers.NewProviderManager(tenantStore.DB())
+		} else {
+			providerMgr = providers.NewProviderManager(nil)
+		}
+		// Seed from config on first run
+		if providerMgr.IsEmpty() && cfg.Providers.OpenAI != nil {
+			fbs := make([]struct {
+				Name, APIKey, APIBase, Model, RecoverAfter string
+				MaxTokens                                 int
+			}, len(cfg.Providers.Fallbacks))
+			for i, f := range cfg.Providers.Fallbacks {
+				fbs[i] = struct {
+					Name, APIKey, APIBase, Model, RecoverAfter string
+					MaxTokens                                 int
+				}{f.Name, f.APIKey, f.APIBase, f.Model, f.RecoverAfter, f.MaxTokens}
+			}
+			providerMgr.SeedFromConfig(cfg.Providers.OpenAI.APIKey, cfg.Providers.OpenAI.APIBase, fbs)
+			log.Printf("providers: seeded from config (%d provider(s))", len(providerMgr.ListProviders()))
+		}
+		apiServer.SetProviderManager(providerMgr)
+		apiServer.SetAgentLoop(ag)
 		go func() {
 			if err := apiServer.Start(ctx); err != nil {
 				log.Fatalf("API: %v", err)
