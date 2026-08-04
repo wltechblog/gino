@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/wltechblog/gino/internal/config"
+	"github.com/wltechblog/gino/internal/providers"
 	"github.com/wltechblog/gino/internal/tenant"
 )
 
@@ -188,6 +189,11 @@ func (s *Server) handleAdminDashboard(w http.ResponseWriter, r *http.Request) {
 		if servers, err := s.store.LoadAllMCPServers(); err == nil {
 			dashboardData.MCPServers = len(servers)
 		}
+	}
+
+	// Provider count
+	if s.providerMgr != nil {
+		dashboardData.Providers = len(s.providerMgr.ListProviders())
 	}
 
 	data := adminPageData{
@@ -566,6 +572,215 @@ func (s *Server) handleAdminActionMCP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// ─── Provider Management UI ───────────────────────────────────────────────────
+
+func (s *Server) handleAdminUIProviders(w http.ResponseWriter, r *http.Request) {
+	if s.providerMgr == nil {
+		s.renderAdminError(w, "Provider management not enabled")
+		return
+	}
+
+	defs := s.providerMgr.ListProviders()
+	providers := make([]providerRowData, 0, len(defs))
+	for _, d := range defs {
+		row := providerRowData{
+			Name:          d.Name,
+			APIBase:       d.APIBase,
+			IsPrimary:     d.IsPrimary,
+			HasAPIKey:     d.APIKey != "",
+			MaxTokens:     d.MaxTokens,
+			MaxRetries:    d.MaxRetries,
+			TimeoutS:      d.TimeoutS,
+			IsFallback:    d.Fallback,
+			FallbackOrder: d.FallbackOrder,
+			RecoverAfter:  d.RecoverAfter,
+		}
+		for _, m := range d.Models {
+			row.Models = append(row.Models, providerModelRow{
+				Name:    m.Name,
+				Label:   m.Label,
+				Vision:  m.Vision,
+				Default: m.Default,
+			})
+		}
+		providers = append(providers, row)
+	}
+
+	data := adminPageData{
+		Title:     "Providers",
+		Active:    "providers",
+		BaseURL:   s.adminBaseURL(r),
+		Providers: providers,
+	}
+	s.renderAdmin(w, "providers", data)
+}
+
+func (s *Server) handleAdminUIProviderEdit(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimPrefix(r.URL.Path, "/admin/providers/")
+	if name == "" {
+		http.Redirect(w, r, "/admin/providers", http.StatusSeeOther)
+		return
+	}
+
+	if s.providerMgr == nil {
+		s.renderAdminError(w, "Provider management not enabled")
+		return
+	}
+
+	// Find provider
+	def, found := s.providerMgr.GetProviderDef(name)
+	if !found {
+		// Maybe it's a new provider — show empty form with name pre-filled
+		data := adminPageData{
+			Title:        "Add Provider",
+			Active:       "providers",
+			BaseURL:      s.adminBaseURL(r),
+			EditProvider: &providerRowData{Name: name},
+		}
+		s.renderAdmin(w, "provider_edit", data)
+		return
+	}
+
+	row := providerRowData{
+		Name:          def.Name,
+		APIBase:       def.APIBase,
+		IsPrimary:     def.IsPrimary,
+		HasAPIKey:     def.APIKey != "",
+		MaxTokens:     def.MaxTokens,
+		MaxRetries:    def.MaxRetries,
+		TimeoutS:      def.TimeoutS,
+		IsFallback:    def.Fallback,
+		FallbackOrder: def.FallbackOrder,
+		RecoverAfter:  def.RecoverAfter,
+	}
+	for _, m := range def.Models {
+		row.Models = append(row.Models, providerModelRow{
+			Name:    m.Name,
+			Label:   m.Label,
+			Vision:  m.Vision,
+			Default: m.Default,
+		})
+	}
+
+	data := adminPageData{
+		Title:        "Edit Provider",
+		Active:       "providers",
+		BaseURL:      s.adminBaseURL(r),
+		EditProvider: &row,
+	}
+	s.renderAdmin(w, "provider_edit", data)
+}
+
+func (s *Server) handleAdminActionProvider(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/admin/providers", http.StatusSeeOther)
+		return
+	}
+	if s.providerMgr == nil {
+		s.renderAdminError(w, "Provider management not enabled")
+		return
+	}
+
+	action := r.FormValue("action")
+	switch action {
+	case "create", "update":
+		name := r.FormValue("name")
+		if name == "" {
+			s.renderAdminError(w, "Provider name is required")
+			return
+		}
+		apiBase := r.FormValue("apiBase")
+		if apiBase == "" {
+			s.renderAdminError(w, "API Base URL is required")
+			return
+		}
+
+		// If no API key provided and updating, keep existing
+		apiKey := r.FormValue("apiKey")
+		if apiKey == "" && action == "update" {
+			existing, _ := s.providerMgr.GetProviderDef(name)
+			apiKey = existing.APIKey
+		}
+
+		def := providers.ProviderConfigDef{
+			Name:           name,
+			APIBase:        apiBase,
+			APIKey:         apiKey,
+			IsPrimary:      r.FormValue("isPrimary") == "on",
+			MaxTokens:      atoiSafe(r.FormValue("maxTokens")),
+			MaxRetries:     atoiSafe(r.FormValue("maxRetries")),
+			RetryBaseWaitS: atoiSafe(r.FormValue("retryBaseWaitS")),
+			TimeoutS:       atoiSafe(r.FormValue("timeoutS")),
+			Fallback:       r.FormValue("isFallback") == "on",
+			RecoverAfter:   r.FormValue("recoverAfter"),
+			FallbackOrder:  atoiSafe(r.FormValue("fallbackOrder")),
+		}
+
+		// Parse models from textarea (one per line: name|label|vision|default)
+		modelsText := r.FormValue("models")
+		if modelsText != "" {
+			for _, line := range strings.Split(modelsText, "\n") {
+				line = strings.TrimSpace(line)
+				if line == "" {
+					continue
+				}
+				parts := strings.Split(line, "|")
+				m := providers.ModelDef{Name: strings.TrimSpace(parts[0])}
+				if len(parts) > 1 {
+					m.Label = strings.TrimSpace(parts[1])
+				}
+				if len(parts) > 2 && strings.TrimSpace(parts[2]) == "vision" {
+					m.Vision = true
+				}
+				if len(parts) > 3 && strings.TrimSpace(parts[3]) == "default" {
+					m.Default = true
+				}
+				def.Models = append(def.Models, m)
+			}
+		}
+
+		if err := s.providerMgr.SaveProvider(def); err != nil {
+			s.renderAdminError(w, "Failed to save provider: "+err.Error())
+			return
+		}
+
+		// Hot-swap if primary
+		if def.IsPrimary {
+			for _, m := range def.Models {
+				if m.Default && s.agentLoop != nil {
+					s.agentLoop.UpdateModel(m.Name)
+					break
+				}
+			}
+		}
+
+		if s.store != nil {
+			actor := userIDFromRequest(r)
+			s.store.RecordAdminAction("provider."+action, actor, name, "")
+		}
+		http.Redirect(w, r, "/admin/providers", http.StatusSeeOther)
+
+	case "delete":
+		name := r.FormValue("name")
+		if name == "" {
+			s.renderAdminError(w, "Provider name required")
+			return
+		}
+		if err := s.providerMgr.DeleteProvider(name); err != nil {
+			s.renderAdminError(w, "Failed to delete: "+err.Error())
+			return
+		}
+		if s.store != nil {
+			actor := userIDFromRequest(r)
+			s.store.RecordAdminAction("provider.delete", actor, name, "")
+		}
+		http.Redirect(w, r, "/admin/providers", http.StatusSeeOther)
+
+	default:
+		http.Redirect(w, r, "/admin/providers", http.StatusSeeOther)
+	}
+}
+
 // ─── Rendering ────────────────────────────────────────────────────────────────
 
 type adminPageData struct {
@@ -579,10 +794,12 @@ type adminPageData struct {
 	Users         []userRowData
 	Tiers         []tierRowData
 	MCPServers    []mcpRowData
+	Providers     []providerRowData
 	TierNames     []string
 	UserIDs       []string
 	EditUser      *userRowData
 	EditTier      *tierRowData
+	EditProvider  *providerRowData
 }
 
 type dashboardData struct {
@@ -591,6 +808,7 @@ type dashboardData struct {
 	Admins       int
 	ActiveNow    int
 	MCPServers   int
+	Providers    int
 	TokenSummary json.RawMessage
 }
 
@@ -626,6 +844,27 @@ type mcpRowData struct {
 	Args    []string
 	URL     string
 	HasEnv  bool
+}
+
+type providerRowData struct {
+	Name        string
+	APIBase     string
+	IsPrimary   bool
+	HasAPIKey   bool
+	MaxTokens   int
+	MaxRetries  int
+	TimeoutS    int
+	IsFallback  bool
+	FallbackOrder int
+	RecoverAfter string
+	Models      []providerModelRow
+}
+
+type providerModelRow struct {
+	Name    string
+	Label   string
+	Vision  bool
+	Default bool
 }
 
 func (s *Server) renderAdmin(w http.ResponseWriter, name string, data adminPageData) {

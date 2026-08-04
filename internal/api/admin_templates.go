@@ -119,6 +119,7 @@ const adminSidebar = `
     <a class="nav-item {{if eq .Active "users"}}active{{end}}" href="/admin/users">👥 Users</a>
     <a class="nav-item {{if eq .Active "tiers"}}active{{end}}" href="/admin/tiers">⭐ Tiers</a>
     <a class="nav-item {{if eq .Active "mcp"}}active{{end}}" href="/admin/mcp">🔌 MCP Servers</a>
+    <a class="nav-item {{if eq .Active "providers"}}active{{end}}" href="/admin/providers">🤖 Providers</a>
     <div class="nav-section">System</div>
     <a class="nav-item" href="/api/v1/health" target="_blank">💓 Health</a>
     <a class="nav-item" href="/api/v1/info" target="_blank">ℹ️ Info</a>
@@ -196,6 +197,10 @@ const adminTemplatesRaw = `
       <div class="stat-card">
         <div class="stat-value">{{.Dashboard.MCPServers}}</div>
         <div class="stat-label">MCP Servers</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value">{{.Dashboard.Providers}}</div>
+        <div class="stat-label">Providers</div>
       </div>
     </div>
     {{end}}
@@ -551,6 +556,129 @@ const adminTemplatesRaw = `
       <h1>❌ Error</h1>
     </div>
     <a href="/admin/" class="btn btn-ghost">← Back to Dashboard</a>
+` + adminSidebarEnd + `
+</body>
+</html>
+{{end}}
+
+{{define "providers"}}<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Gino Admin — Providers</title>
+<style>` + adminCSS + `</style>
+</head>
+<body>
+` + adminSidebar + `
+    <div class="page-header">
+      <h1>🤖 Providers</h1>
+      <div class="subtitle">{{len .Providers}} LLM providers configured</div>
+    </div>
+    <div style="margin-bottom:16px">
+      <a href="/admin/providers/new" class="btn btn-primary">+ Add Provider</a>
+    </div>
+    {{if .Providers}}
+    <table>
+      <thead><tr><th>Name</th><th>API Base</th><th>Primary</th><th>Key</th><th>Fallback</th><th>Models</th><th>Actions</th></tr></thead>
+      <tbody>
+      {{range .Providers}}
+        <tr>
+          <td class="mono">{{.Name}}</td>
+          <td class="mono" style="font-size:12px">{{.APIBase}}</td>
+          <td>{{if .IsPrimary}}<span class="badge badge-admin">primary</span>{{else}}—{{end}}</td>
+          <td>{{if .HasAPIKey}}<span class="badge badge-env">set</span>{{else}}<span style="color:var(--danger)">missing</span>{{end}}</td>
+          <td>{{if .IsFallback}}<span class="badge badge-tier">#{{.FallbackOrder}}</span>{{else}}—{{end}}</td>
+          <td>{{range .Models}}<code>{{.Name}}</code>{{if .Default}} ★{{end}} {{end}}</td>
+          <td class="actions-cell">
+            <a href="/admin/providers/{{.Name}}" class="btn btn-ghost btn-sm">Edit</a>
+            <form method="POST" action="/admin/providers/action" onsubmit="return confirm('Delete provider {{.Name}}?')">
+              <input type="hidden" name="action" value="delete"><input type="hidden" name="name" value="{{.Name}}">
+              <button type="submit" class="btn btn-danger btn-sm">Delete</button>
+            </form>
+          </td>
+        </tr>
+      {{end}}
+      </tbody>
+    </table>
+    {{else}}
+    <div class="empty-state">
+      <div style="font-size:48px;margin-bottom:12px">🤖</div>
+      <div>No providers configured. Add one to get started.</div>
+    </div>
+    {{end}}
+` + adminSidebarEnd + `
+</body>
+</html>
+{{end}}
+
+{{define "provider_edit"}}<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Gino Admin — {{.Title}}</title>
+<style>` + adminCSS + `</style>
+</head>
+<body>
+` + adminSidebar + `
+    <div class="page-header">
+      <h1>{{.Title}}</h1>
+      <div class="subtitle">Configure LLM provider endpoint and models</div>
+    </div>
+    {{if .EditProvider}}
+    <div class="card" style="max-width:700px">
+      <form method="POST" action="/admin/providers/action">
+        <input type="hidden" name="action" value="{{if eq .Title "Add Provider"}}create{{else}}update{{end}}">
+        <div class="form-row">
+          <div class="form-group">
+            <label>Provider Name</label>
+            <input name="name" value="{{.EditProvider.Name}}" required placeholder="e.g. primary, cheap-fast">
+            <div class="hint">Unique identifier for this provider</div>
+          </div>
+          <div class="form-group">
+            <label>API Base URL</label>
+            <input name="apiBase" value="{{.EditProvider.APIBase}}" required placeholder="https://api.openai.com/v1">
+          </div>
+        </div>
+        <div class="form-group">
+          <label>API Key</label>
+          <input name="apiKey" type="password" placeholder="{{if .EditProvider.HasAPIKey}}Enter new key to replace{{else}}Enter your API key{{end}}">
+          <div class="hint">{{if .EditProvider.HasAPIKey}}Key is set — enter new value to change{{else}}Required for provider to function{{end}}</div>
+        </div>
+        <div class="form-row">
+          <div class="form-group checkbox-group">
+            <input type="checkbox" name="isPrimary" id="isPrimary" {{if .EditProvider.IsPrimary}}checked{{end}}>
+            <label for="isPrimary" style="margin:0">Primary provider (default for all users)</label>
+          </div>
+          <div class="form-group checkbox-group">
+            <input type="checkbox" name="isFallback" id="isFallback" {{if .EditProvider.IsFallback}}checked{{end}}>
+            <label for="isFallback" style="margin:0">Fallback provider (used when primary fails)</label>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group"><label>Max Tokens</label><input name="maxTokens" type="number" value="{{if .EditProvider.MaxTokens}}{{.EditProvider.MaxTokens}}{{else}}0{{end}}" placeholder="0 = unlimited"></div>
+          <div class="form-group"><label>Timeout (seconds)</label><input name="timeoutS" type="number" value="{{if .EditProvider.TimeoutS}}{{.EditProvider.TimeoutS}}{{else}}0{{end}}" placeholder="0 = default"></div>
+        </div>
+        <div class="form-row">
+          <div class="form-group"><label>Max Retries</label><input name="maxRetries" type="number" value="{{if .EditProvider.MaxRetries}}{{.EditProvider.MaxRetries}}{{else}}2{{end}}"></div>
+          <div class="form-group"><label>Retry Base Wait (s)</label><input name="retryBaseWaitS" type="number" value="2"></div>
+        </div>
+        <div class="form-row">
+          <div class="form-group"><label>Fallback Order</label><input name="fallbackOrder" type="number" value="{{if .EditProvider.FallbackOrder}}{{.EditProvider.FallbackOrder}}{{else}}0{{end}}"></div>
+          <div class="form-group"><label>Recover After</label><input name="recoverAfter" value="{{.EditProvider.RecoverAfter}}" placeholder="e.g. 5m"></div>
+        </div>
+        <div class="form-group">
+          <label>Models</label>
+          <textarea name="models" rows="6" placeholder="glm-5.2|GPT-5.2|default&#10;glm-5v-turbo|Vision|vision&#10;cheap-fast|Fast Model">{{range .EditProvider.Models}}{{.Name}}{{if .Label}}|{{.Label}}{{end}}{{if .Vision}}|vision{{end}}{{if .Default}}|default{{end}}
+{{end}}</textarea>
+          <div class="hint">One per line: name|label|vision|default — label, vision, and default are optional</div>
+        </div>
+        <button type="submit" class="btn btn-primary">Save Provider</button>
+        <a href="/admin/providers" class="btn btn-ghost">Cancel</a>
+      </form>
+    </div>
+    {{end}}
 ` + adminSidebarEnd + `
 </body>
 </html>

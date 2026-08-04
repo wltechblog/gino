@@ -321,6 +321,17 @@ func (pm *ProviderManager) GetProvider(name string) LLMProvider {
 	return nil
 }
 
+// GetProviderDef returns the stored provider config by name (including API key).
+// Returns false if not found.
+func (pm *ProviderManager) GetProviderDef(name string) (ProviderConfigDef, bool) {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	if cp, ok := pm.cache[name]; ok {
+		return cp.config, true
+	}
+	return ProviderConfigDef{}, false
+}
+
 // GetPrimaryProvider returns the primary provider, or nil if none configured.
 func (pm *ProviderManager) GetPrimaryProvider() LLMProvider {
 	pm.mu.RLock()
