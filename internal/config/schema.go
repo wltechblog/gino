@@ -420,6 +420,7 @@ type TenantUserConfig struct {
 	Token             string            `json:"token,omitempty"`
 	Channels          map[string]string `json:"channels,omitempty"`
 	WorkspaceOverride string            `json:"workspaceOverride,omitempty"`
+	Admin             bool              `json:"admin,omitempty"`
 }
 
 // AuditConfig controls the audit trail system.

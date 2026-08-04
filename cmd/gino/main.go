@@ -474,6 +474,7 @@ func runGateway(homeFlag string, args []string) {
 				Token:             uc.Token,
 				Channels:          uc.Channels,
 				WorkspaceOverride: uc.WorkspaceOverride,
+			Admin:             uc.Admin || uc.Tier == "admin",
 				CreatedAt:         time.Now(),
 			})
 			if err != nil {
