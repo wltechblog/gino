@@ -108,28 +108,48 @@ func (pm *ProviderManager) LoadFromDB() error {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
+	// Phase 1: Read all providers into a slice, then close rows.
+	// We must NOT run a second query while iterating rows — SQLite's
+	// connection pool defaults to MaxOpenConns(1), so a nested query
+	// would deadlock waiting for the connection already in use.
 	rows, err := pm.db.Query(`SELECT id, name, api_base, api_key, is_primary, max_tokens, max_retries, retry_base_wait_s, timeout_s, is_fallback, recover_after, fallback_order FROM providers ORDER BY is_primary DESC, fallback_order ASC`)
 	if err != nil {
 		return fmt.Errorf("provider load: %w", err)
 	}
-	defer rows.Close()
 
+	type rawProvider struct {
+		def        ProviderConfigDef
+		isPrimary  bool
+		isFallback bool
+	}
+	var providers []rawProvider
+
+	for rows.Next() {
+		var def ProviderConfigDef
+		var isPrimary, isFallback int
+		if err := rows.Scan(&def.ID, &def.Name, &def.APIBase, &def.APIKey, &isPrimary, &def.MaxTokens, &def.MaxRetries, &def.RetryBaseWaitS, &def.TimeoutS, &isFallback, &def.RecoverAfter, &def.FallbackOrder); err != nil {
+			rows.Close()
+			return fmt.Errorf("provider scan: %w", err)
+		}
+		providers = append(providers, rawProvider{def: def, isPrimary: isPrimary != 0, isFallback: isFallback != 0})
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("provider rows: %w", err)
+	}
+
+	// Phase 2: Load models for each provider and build cache.
 	pm.cache = make(map[string]*cachedProvider)
 	pm.fallback = pm.fallback[:0]
 	pm.primary = ""
 
 	var fallbackNames []string
 
-	for rows.Next() {
-		var def ProviderConfigDef
-		var isPrimary, isFallback int
-		if err := rows.Scan(&def.ID, &def.Name, &def.APIBase, &def.APIKey, &isPrimary, &def.MaxTokens, &def.MaxRetries, &def.RetryBaseWaitS, &def.TimeoutS, &isFallback, &def.RecoverAfter, &def.FallbackOrder); err != nil {
-			return fmt.Errorf("provider scan: %w", err)
-		}
-		def.IsPrimary = isPrimary != 0
-		def.Fallback = isFallback != 0
+	for _, rp := range providers {
+		def := rp.def
+		def.IsPrimary = rp.isPrimary
+		def.Fallback = rp.isFallback
 
-		// Load models for this provider
 		models, err := pm.loadModelsLocked(def.ID)
 		if err != nil {
 			log.Printf("provider: warning: could not load models for %q: %v", def.Name, err)
@@ -157,7 +177,7 @@ func (pm *ProviderManager) LoadFromDB() error {
 	}
 
 	log.Printf("provider: loaded %d providers (primary=%q, fallbacks=%d)", len(pm.cache), pm.primary, len(pm.fallback))
-	return rows.Err()
+	return nil
 }
 
 func (pm *ProviderManager) loadModelsLocked(providerID int64) ([]ModelDef, error) {
