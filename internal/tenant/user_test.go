@@ -158,7 +158,7 @@ func TestUserManagerRegisterAndGet(t *testing.T) {
 	m := NewUserManager(dir)
 	m.RegisterTier(&Tier{Name: "free"})
 
-	err := m.RegisterUser(UserConfig{
+	_, err := m.RegisterUser(UserConfig{
 		ID:    "user1",
 		Tier:  "free",
 		Token: "tok123",
@@ -189,7 +189,7 @@ func TestUserManagerGetByToken(t *testing.T) {
 	m := NewUserManager(dir)
 	m.RegisterTier(&Tier{Name: "free"})
 
-	_ = m.RegisterUser(UserConfig{
+	_, _ = m.RegisterUser(UserConfig{
 		ID:    "user1",
 		Tier:  "free",
 		Token: "secret-token",
@@ -214,7 +214,7 @@ func TestUserManagerGetByChannel(t *testing.T) {
 	m := NewUserManager(dir)
 	m.RegisterTier(&Tier{Name: "free"})
 
-	_ = m.RegisterUser(UserConfig{
+	_, _ = m.RegisterUser(UserConfig{
 		ID:      "user1",
 		Tier:    "free",
 		Channels: map[string]string{"telegram": "12345"},
@@ -233,7 +233,7 @@ func TestUserManagerUnknownTier(t *testing.T) {
 	dir := t.TempDir()
 	m := NewUserManager(dir)
 
-	err := m.RegisterUser(UserConfig{
+	_, err := m.RegisterUser(UserConfig{
 		ID:   "user1",
 		Tier: "nonexistent",
 	})
@@ -248,7 +248,7 @@ func TestEvictionRemovesIdleUsers(t *testing.T) {
 	m.SetEvictionTimeout(50 * time.Millisecond)
 
 	m.RegisterTier(&Tier{Name: "free"})
-	_ = m.RegisterUser(UserConfig{
+	_, _ = m.RegisterUser(UserConfig{
 		ID:    "user1",
 		Tier:  "free",
 		Token: "tok1",
@@ -273,7 +273,7 @@ func TestEvictionSkipsActiveTurns(t *testing.T) {
 	m.SetEvictionTimeout(50 * time.Millisecond)
 
 	m.RegisterTier(&Tier{Name: "free"})
-	_ = m.RegisterUser(UserConfig{
+	_, _ = m.RegisterUser(UserConfig{
 		ID:    "user1",
 		Tier:  "free",
 		Token: "tok1",

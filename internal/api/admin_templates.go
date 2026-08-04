@@ -223,6 +223,14 @@ const adminTemplatesRaw = `
       <h1>👥 Users</h1>
       <div class="subtitle">{{len .Users}} users configured</div>
     </div>
+    {{if .SuccessMsg}}
+    <div class="alert" style="background:rgba(34,197,94,0.15);color:#22c55e;padding:12px 16px;border-radius:8px;margin-bottom:16px;font-family:monospace;font-size:14px">
+      ✅ {{.SuccessMsg}}
+    </div>
+    {{end}}
+    {{if .ErrorMessage}}
+    <div class="alert alert-error">⚠️ {{.ErrorMessage}}</div>
+    {{end}}
     <div style="margin-bottom:16px">
       <button class="btn btn-primary" onclick="document.getElementById('add-user').style.display='block'">+ Add User</button>
     </div>

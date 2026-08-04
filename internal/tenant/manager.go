@@ -1,6 +1,8 @@
 package tenant
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"os"
@@ -82,15 +84,26 @@ func (m *UserManager) GetTier(name string) *Tier {
 	return m.tiers[name]
 }
 
+// generateToken creates a secure random token (32 bytes = 64 hex chars).
+func generateToken() string {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("tok-%d", time.Now().UnixNano())
+	}
+	return "gtok_" + hex.EncodeToString(b)
+}
+
 // RegisterUser adds or updates a user configuration.
 // This creates the user's workspace directory if it doesn't exist.
-func (m *UserManager) RegisterUser(cfg UserConfig) error {
+// If Token is empty, a secure random token is auto-generated.
+// Returns the final token (generated or provided).
+func (m *UserManager) RegisterUser(cfg UserConfig) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	tier := m.tiers[cfg.Tier]
 	if tier == nil {
-		return fmt.Errorf("tenant: unknown tier %q for user %q", cfg.Tier, cfg.ID)
+		return "", fmt.Errorf("tenant: unknown tier %q for user %q", cfg.Tier, cfg.ID)
 	}
 
 	// Determine workspace path
@@ -101,31 +114,34 @@ func (m *UserManager) RegisterUser(cfg UserConfig) error {
 
 	// Create workspace directory
 	if err := os.MkdirAll(wsPath, 0o755); err != nil {
-		return fmt.Errorf("tenant: create workspace for %s: %w", cfg.ID, err)
+		return "", fmt.Errorf("tenant: create workspace for %s: %w", cfg.ID, err)
 	}
 
 	// Create memory subdirectory
 	memDir := filepath.Join(wsPath, "memory")
 	if err := os.MkdirAll(memDir, 0o755); err != nil {
-		return fmt.Errorf("tenant: create memory dir for %s: %w", cfg.ID, err)
+		return "", fmt.Errorf("tenant: create memory dir for %s: %w", cfg.ID, err)
 	}
 
 	// Create sessions subdirectory
 	sessDir := filepath.Join(wsPath, "sessions")
 	if err := os.MkdirAll(sessDir, 0o755); err != nil {
-		return fmt.Errorf("tenant: create sessions dir for %s: %w", cfg.ID, err)
+		return "", fmt.Errorf("tenant: create sessions dir for %s: %w", cfg.ID, err)
+	}
+
+	// Auto-generate token if not provided
+	if cfg.Token == "" {
+		cfg.Token = generateToken()
 	}
 
 	ctx := NewUserContext(cfg, tier, wsPath)
 	m.users[cfg.ID] = ctx
 
 	// Index token for fast lookup
-	if cfg.Token != "" {
-		m.tokens[cfg.Token] = cfg.ID
-	}
+	m.tokens[cfg.Token] = cfg.ID
 
 	log.Printf("tenant: registered user %q (tier=%s, workspace=%s)", cfg.ID, cfg.Tier, wsPath)
-	return nil
+	return cfg.Token, nil
 }
 
 // Get retrieves a user context by ID. Returns nil if not found.
@@ -164,7 +180,7 @@ func (m *UserManager) GetByToken(token string) (*UserContext, string) {
 			for _, u := range users {
 				if u.Token == token {
 					// Re-register to rebuild cache + workspace
-					if err := m.RegisterUser(u); err == nil {
+					if _, err := m.RegisterUser(u); err == nil {
 						return m.GetByToken(token) // recursive but now cached
 					}
 					break
@@ -209,7 +225,7 @@ func (m *UserManager) GetOrCreate(userID string) (*UserContext, error) {
 		return nil, err
 	}
 
-	if err := m.RegisterUser(*cfg); err != nil {
+	if _, err := m.RegisterUser(*cfg); err != nil {
 		return nil, err
 	}
 

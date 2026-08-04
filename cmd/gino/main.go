@@ -467,7 +467,7 @@ func runGateway(homeFlag string, args []string) {
 
 		// Register users from config
 		for _, uc := range cfg.Tenant.Users {
-			err := userMgr.RegisterUser(tenant.UserConfig{
+			_, err := userMgr.RegisterUser(tenant.UserConfig{
 				ID:                uc.ID,
 				DisplayName:       uc.DisplayName,
 				Tier:              uc.Tier,
@@ -490,7 +490,7 @@ func runGateway(homeFlag string, args []string) {
 				log.Printf("warning: failed to load persisted users: %v", err)
 			} else {
 				for _, uc := range persistedUsers {
-					if err := userMgr.RegisterUser(uc); err != nil {
+					if _, err := userMgr.RegisterUser(uc); err != nil {
 						log.Printf("warning: failed to register persisted user %q: %v", uc.ID, err)
 					}
 				}

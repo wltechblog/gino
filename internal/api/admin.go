@@ -63,6 +63,7 @@ type UserResponse struct {
 	ID          string            `json:"id"`
 	DisplayName string            `json:"displayName,omitempty"`
 	Tier        string            `json:"tier"`
+	Token       string            `json:"token,omitempty"` // only returned on create
 	Channels    map[string]string `json:"channels,omitempty"`
 	Admin       bool              `json:"admin,omitempty"`
 	Workspace   string            `json:"workspace,omitempty"`
@@ -163,12 +164,15 @@ func (s *Server) adminCreateUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Hot-reload into UserManager
-	if err := s.userManager.RegisterUser(cfg); err != nil {
+	token, err := s.userManager.RegisterUser(cfg)
+	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, "Failed to register user: "+err.Error())
 		return
 	}
 
-	s.writeJSON(w, http.StatusCreated, userConfigToResponse(cfg))
+	resp := userConfigToResponse(cfg)
+	resp.Token = token
+	s.writeJSON(w, http.StatusCreated, resp)
 }
 
 func (s *Server) adminUpdateUser(w http.ResponseWriter, r *http.Request, userID string) {
@@ -218,7 +222,7 @@ func (s *Server) adminUpdateUser(w http.ResponseWriter, r *http.Request, userID 
 	}
 
 	// Hot-reload
-	if err := s.userManager.RegisterUser(cfg); err != nil {
+	if _, err := s.userManager.RegisterUser(cfg); err != nil {
 		s.writeError(w, http.StatusInternalServerError, "Failed to update user: "+err.Error())
 		return
 	}

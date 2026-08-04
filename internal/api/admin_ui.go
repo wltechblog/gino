@@ -230,12 +230,19 @@ func (s *Server) handleAdminUIUsers(w http.ResponseWriter, r *http.Request) {
 		tierNames = append(tierNames, t.Name)
 	}
 
+	// Check for created-user token flash
+	createdID := r.URL.Query().Get("created")
+	createdToken := r.URL.Query().Get("token")
+
 	data := adminPageData{
-		Title:    "Users",
-		Active:   "users",
-		BaseURL:  s.adminBaseURL(r),
-		Users:    userList,
+		Title:     "Users",
+		Active:    "users",
+		BaseURL:   s.adminBaseURL(r),
+		Users:     userList,
 		TierNames: tierNames,
+	}
+	if createdID != "" && createdToken != "" {
+		data.SuccessMsg = "User \"" + createdID + "\" created. Token: " + createdToken
 	}
 	s.renderAdmin(w, "users", data)
 }
@@ -427,12 +434,17 @@ func (s *Server) handleAdminActionUser(w http.ResponseWriter, r *http.Request) {
 			actor := userIDFromRequest(r)
 			s.store.RecordAdminAction("user."+action, actor, cfg.ID, "tier="+cfg.Tier)
 		}
-		if err := s.userManager.RegisterUser(cfg); err != nil {
+		token, err := s.userManager.RegisterUser(cfg)
+		if err != nil {
 			s.renderAdminError(w, "Failed to register user: "+err.Error())
 			return
 		}
 
-		http.Redirect(w, r, "/admin/users", http.StatusSeeOther)
+		if action == "create" && token != "" {
+			http.Redirect(w, r, "/admin/users?created="+cfg.ID+"&token="+token, http.StatusSeeOther)
+		} else {
+			http.Redirect(w, r, "/admin/users", http.StatusSeeOther)
+		}
 
 	case "delete":
 		userID := r.FormValue("id")
