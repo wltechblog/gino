@@ -474,7 +474,8 @@ func runGateway(homeFlag string, args []string) {
 				Token:             uc.Token,
 				Channels:          uc.Channels,
 				WorkspaceOverride: uc.WorkspaceOverride,
-			Admin:             uc.Admin || uc.Tier == "admin",
+				Admin:             uc.Admin || uc.Tier == "admin",
+				Permanent:         true, // config-seeded users are never evicted
 				CreatedAt:         time.Now(),
 			})
 			if err != nil {
@@ -497,6 +498,11 @@ func runGateway(homeFlag string, args []string) {
 					log.Printf("tenant: loaded %d users from store", len(persistedUsers))
 				}
 			}
+		}
+
+		// Wire store for eviction recovery
+		if tenantStore != nil {
+			userMgr.SetStore(tenantStore)
 		}
 
 		// Configure eviction timeout

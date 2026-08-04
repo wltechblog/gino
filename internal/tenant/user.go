@@ -136,6 +136,11 @@ type UserConfig struct {
 
 	// LastSeen tracks the most recent activity.
 	LastSeen time.Time `json:"lastSeen,omitempty"`
+
+	// Permanent marks the user as non-evictable. Config-seeded users
+	// and admin users should always be permanent so they survive the
+	// idle eviction sweep.
+	Permanent bool `json:"permanent,omitempty"`
 }
 
 // UserContext holds all per-user state needed to process a turn.

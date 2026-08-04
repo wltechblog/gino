@@ -51,6 +51,10 @@ type UserManager struct {
 	// If set, it is called when a user is first encountered (not in cache).
 	// Return an error to deny access.
 	UserFactory func(userID string) (*UserConfig, error)
+
+	// store is an optional persistence backend. When set, GetByToken
+	// and Get fall back to the store to reload evicted non-permanent users.
+	store *Store
 }
 
 // NewUserManager creates a new UserManager.
@@ -137,19 +141,39 @@ func (m *UserManager) Get(userID string) *UserContext {
 
 // GetByToken retrieves a user context by auth token.
 // Returns (nil, "") if the token is not registered.
+// If the user was evicted from cache but exists in the store, it is reloaded.
 func (m *UserManager) GetByToken(token string) (*UserContext, string) {
+	// Fast path: check cache
 	m.mu.RLock()
-	defer m.mu.RUnlock()
-
 	userID, ok := m.tokens[token]
-	if !ok {
-		return nil, ""
+	m.mu.RUnlock()
+	if ok {
+		m.mu.Lock()
+		ctx := m.users[userID]
+		m.mu.Unlock()
+		if ctx != nil {
+			ctx.Touch()
+			return ctx, userID
+		}
 	}
-	ctx := m.users[userID]
-	if ctx != nil {
-		ctx.Touch()
+
+	// Slow path: reload from store if available
+	if m.store != nil {
+		users, err := m.store.LoadUsers()
+		if err == nil {
+			for _, u := range users {
+				if u.Token == token {
+					// Re-register to rebuild cache + workspace
+					if err := m.RegisterUser(u); err == nil {
+						return m.GetByToken(token) // recursive but now cached
+					}
+					break
+				}
+			}
+		}
 	}
-	return ctx, userID
+
+	return nil, ""
 }
 
 // GetByChannel retrieves a user context by their identity on a channel.
@@ -237,6 +261,10 @@ func (m *UserManager) evictIdle() {
 
 	for id, ctx := range m.users {
 		if now.Sub(ctx.LastActivity()) > m.evictionTimeout {
+			// Don't evict permanent users (config-seeded, admin)
+			if ctx.Config.Permanent {
+				continue
+			}
 			// Don't evict if there's an active turn
 			if ctx.activeTurns > 0 {
 				continue
@@ -254,6 +282,13 @@ func (m *UserManager) evictIdle() {
 	if evicted > 0 {
 		log.Printf("tenant: evicted %d idle users, %d active remaining", evicted, len(m.users))
 	}
+}
+
+// SetStore wires a persistence backend for user reload after eviction.
+func (m *UserManager) SetStore(s *Store) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.store = s
 }
 
 // SetEvictionTimeout overrides the default idle eviction timeout.
