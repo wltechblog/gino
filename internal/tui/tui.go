@@ -368,12 +368,10 @@ func (s *ChatSession) startStdinReader(ctx context.Context) {
 	}()
 }
 
-// Run starts the interactive chat loop.
-func (s *ChatSession) Run(ctx context.Context) error {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	// Set up hub and agent loop — same as gateway but CLI-only.
+// startRuntime constructs the hub and agent loop, then starts both the
+// outbound router and AgentLoop.Run. Messages written to hub.In are not
+// processed until this returns.
+func (s *ChatSession) startRuntime(ctx context.Context) <-chan chat.Outbound {
 	s.hub = chat.NewHub(100)
 
 	maxIter := s.cfg.Agents.Defaults.MaxToolIterations
@@ -396,11 +394,20 @@ func (s *ChatSession) Run(ctx context.Context) error {
 		s.cfg.Agents.Defaults.Search,
 		s.cfg.Agents.Defaults.VisionModel,
 	)
-	defer s.agent.Close()
 
 	cliOut := s.hub.Subscribe("cli")
-
 	s.hub.StartRouter(ctx)
+	go s.agent.Run(ctx)
+	return cliOut
+}
+
+// Run starts the interactive chat loop.
+func (s *ChatSession) Run(ctx context.Context) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	cliOut := s.startRuntime(ctx)
+	defer s.agent.Close()
 
 	// Handle Ctrl+C gracefully — the signal handler is a fallback.
 	// In raw mode, Ctrl+C is caught by readline (returns empty line).
