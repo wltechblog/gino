@@ -311,6 +311,10 @@ type ChatSession struct {
 
 	// Single stdin owner: rawBytes is fed by one goroutine.
 	rawBytes chan byte
+
+	// responseWait is how long sendMessage waits for a reply before cancelling
+	// the active turn. Zero means the default of five minutes.
+	responseWait time.Duration
 }
 
 // New creates a new TUI chat session.
@@ -368,12 +372,10 @@ func (s *ChatSession) startStdinReader(ctx context.Context) {
 	}()
 }
 
-// Run starts the interactive chat loop.
-func (s *ChatSession) Run(ctx context.Context) error {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	// Set up hub and agent loop — same as gateway but CLI-only.
+// startRuntime constructs the hub and agent loop, then starts both the
+// outbound router and AgentLoop.Run. Messages written to hub.In are not
+// processed until this returns.
+func (s *ChatSession) startRuntime(ctx context.Context) <-chan chat.Outbound {
 	s.hub = chat.NewHub(100)
 
 	maxIter := s.cfg.Agents.Defaults.MaxToolIterations
@@ -396,11 +398,20 @@ func (s *ChatSession) Run(ctx context.Context) error {
 		s.cfg.Agents.Defaults.Search,
 		s.cfg.Agents.Defaults.VisionModel,
 	)
-	defer s.agent.Close()
 
 	cliOut := s.hub.Subscribe("cli")
-
 	s.hub.StartRouter(ctx)
+	go s.agent.Run(ctx)
+	return cliOut
+}
+
+// Run starts the interactive chat loop.
+func (s *ChatSession) Run(ctx context.Context) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	cliOut := s.startRuntime(ctx)
+	defer s.agent.Close()
 
 	// Handle Ctrl+C gracefully — the signal handler is a fallback.
 	// In raw mode, Ctrl+C is caught by readline (returns empty line).
@@ -498,6 +509,13 @@ func (s *ChatSession) sendMessage(ctx context.Context, cliOut <-chan chat.Outbou
 
 	stopSpinner := startSpinner()
 
+	wait := s.responseWait
+	if wait <= 0 {
+		wait = 5 * time.Minute
+	}
+	timeout := time.NewTimer(wait)
+	defer timeout.Stop()
+
 	// Buffer for /stop detection — chars read during busy mode.
 	// These are NOT consumed by ReadLine (which reads from the same channel).
 	// Since we own the channel during sendMessage, any bytes we read here
@@ -565,8 +583,9 @@ func (s *ChatSession) sendMessage(ctx context.Context, cliOut <-chan chat.Outbou
 			s.writeAbove(fmt.Sprintf("%sgino%s ❯ %s\n\n", magenta+bold, reset, out.Content))
 			return
 
-		case <-time.After(5 * time.Minute):
+		case <-timeout.C:
 			stopSpinner()
+			s.agent.StopTurn(s.sessionKey())
 			s.writeAbove(fmt.Sprintf("%stimeout waiting for response%s\n", red, reset))
 			return
 		}
