@@ -119,6 +119,11 @@ type AgentDefaults struct {
 	// Search controls the web search provider.
 	Search SearchConfig `json:"search"`
 
+	// ReasoningEffort controls reasoning for OpenAI-compatible providers.
+	// Applied by gateway when not overridden by -R flag or provider config.
+	// Valid values: none, low, medium, high.
+	ReasoningEffort string `json:"reasoningEffort,omitempty"`
+
 	// Compaction controls LLM-based context summarization.
 	// When enabled, old messages are summarized by the LLM instead of dropped.
 	Compaction *CompactionConfig `json:"compaction,omitempty"`

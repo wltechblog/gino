@@ -376,6 +376,14 @@ func runGateway(homeFlag string, args []string) {
 		model = provider.GetDefaultModel()
 	}
 
+	// Apply reasoning effort from config (provider config takes precedence,
+	// then agent defaults). Gateway has no -R flag, so config is the only way.
+	if cfg.Agents.Defaults.ReasoningEffort != "" {
+		if effort, ok := providers.NormalizeReasoningEffort(cfg.Agents.Defaults.ReasoningEffort); ok {
+			providers.SetReasoningEffort(provider, effort)
+		}
+	}
+
 	scheduler := cron.NewScheduler(func(job cron.Job) {
 		log.Printf("cron fired: %s — %s", job.Name, job.Message)
 		hub.In <- chat.Inbound{
