@@ -66,6 +66,8 @@ go build -o gino ./cmd/gino
 ./gino gateway
 ```
 
+When Gino Chat is launched inside Herdr with `HERDR_ENV=1` and `HERDR_PANE_ID` set, the TUI reports idle/working lifecycle state. This is best-effort and a no-op outside Herdr; set `GINO_DEBUG=1` to surface reporter errors.
+
 ### Run tests
 
 ```sh
