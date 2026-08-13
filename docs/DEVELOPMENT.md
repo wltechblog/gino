@@ -55,6 +55,10 @@ go build -o gino ./cmd/gino
 # Try a quick query
 ./gino agent -m "Hello!"
 
+# Work on a repository while keeping the persistent Gino profile
+./gino chat --project /path/to/repo
+./gino agent --project /path/to/repo -m "What does this repo do?"
+
 # Login to channels (Telegram, Discord)
 ./gino channels login
 

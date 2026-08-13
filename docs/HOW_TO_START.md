@@ -107,6 +107,15 @@ Edit `~/.gino/workspace/USER.md` to fill in your name, timezone, preferences, et
 ./gino agent -M "google/gemini-2.5-flash" -m "What is 2+2?"
 ```
 
+### Work on a project while keeping your Gino profile
+
+`--project` sets the active working directory (files, exec cwd, project `AGENTS.md`) while identity, memory, skills, sessions, and checkpoints stay in the configured Gino workspace. Omitting the flag keeps the previous behaviour: profile and project are the same directory.
+
+```sh
+./gino chat --project /path/to/repo
+./gino agent --project /path/to/repo -m "What does this repo do?"
+```
+
 ### Login to channels (Telegram, Discord)
 
 ```sh
@@ -130,6 +139,9 @@ This starts the agent loop, heartbeat, and any enabled channels (Telegram, Disco
 | `gino channels login` | Interactively connect Telegram or Discord |
 | `gino agent -m "..."` | Run a single-shot agent query |
 | `gino agent -M model -m "..."` | Query with a specific model |
+| `gino agent --project dir -m "..."` | Query against a project while keeping the Gino profile |
+| `gino chat` | Interactive TUI chat |
+| `gino chat --project dir` | Interactive chat in a project with a persistent Gino profile |
 | `gino gateway` | Start long-running gateway |
 | `gino memory read today` | Read today's memory notes |
 | `gino memory read long` | Read long-term memory |
