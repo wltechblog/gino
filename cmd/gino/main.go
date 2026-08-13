@@ -227,6 +227,7 @@ func runAgent(homeFlag string, args []string) {
 	fs := flag.NewFlagSet("agent", flag.ExitOnError)
 	msg := fs.String("m", "", "Message to send to the agent")
 	modelFlag := fs.String("M", "", "Model to use (overrides config/provider default)")
+	projectFlag := fs.String("project", "", "Project working directory while retaining the configured Gino profile")
 	sessionKey := fs.String("session", "", "Session key for multi-turn context persistence")
 	systemPromptOverride := fs.String("system-prompt", "", "Override the system prompt (used by benchmarks)")
 	_ = fs.Parse(args)
@@ -253,12 +254,18 @@ func runAgent(homeFlag string, args []string) {
 	if maxIter <= 0 {
 		maxIter = 100
 	}
-	ws := expandWorkspace(cfg.Agents.Defaults.Workspace, homeDir)
-	if err := os.Chdir(ws); err != nil {
-		fmt.Fprintf(os.Stderr, "failed to chdir to workspace %q: %v\n", ws, err)
+	profileWS := expandWorkspace(cfg.Agents.Defaults.Workspace, homeDir)
+	projectWS, err := agent.ResolveProjectWorkspace(*projectFlag, profileWS)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	ag := agent.NewAgentLoop(hub, provider, model, maxIter, ws, nil, cfg.MCPServers, cfg.Agents.Defaults.AllowedDirs, cfg.Agents.Defaults.DisableTools, cfg.Brain, homeDir, cfg.Agents.Defaults.Sandbox, "", cfg.Agents.Defaults.MaxTurnMessages, cfg.Agents.Defaults.MaxToolResultChars, cfg.Agents.Defaults.Compaction, cfg.Agents.Defaults.Web, cfg.Agents.Defaults.Search, cfg.Agents.Defaults.VisionModel)
+
+	if err := os.Chdir(projectWS); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to chdir to project %q: %v\n", projectWS, err)
+		os.Exit(1)
+	}
+	ag := agent.NewAgentLoopWithProfileWorkspace(hub, provider, model, maxIter, projectWS, profileWS, nil, cfg.MCPServers, cfg.Agents.Defaults.AllowedDirs, cfg.Agents.Defaults.DisableTools, cfg.Brain, homeDir, cfg.Agents.Defaults.Sandbox, "", cfg.Agents.Defaults.MaxTurnMessages, cfg.Agents.Defaults.MaxToolResultChars, cfg.Agents.Defaults.Compaction, cfg.Agents.Defaults.Web, cfg.Agents.Defaults.Search, cfg.Agents.Defaults.VisionModel)
 	defer ag.Close()
 	if cfg.Agents.Defaults.EnableToolActivityIndicator != nil {
 		ag.SetToolActivityIndicator(*cfg.Agents.Defaults.EnableToolActivityIndicator)
@@ -288,6 +295,7 @@ func runAgent(homeFlag string, args []string) {
 func runChat(homeFlag string, args []string) {
 	fs := flag.NewFlagSet("chat", flag.ExitOnError)
 	modelFlag := fs.String("M", "", "Model to use (overrides config/provider default)")
+	projectFlag := fs.String("project", "", "Project working directory while retaining the configured Gino profile")
 	_ = fs.Parse(args)
 
 	homeDir := resolveHomeDir(homeFlag)
@@ -299,13 +307,19 @@ func runChat(homeFlag string, args []string) {
 
 	provider := providers.NewProviderFromConfig(cfg)
 
-	ws := expandWorkspace(cfg.Agents.Defaults.Workspace, homeDir)
-	if err := os.Chdir(ws); err != nil {
-		fmt.Fprintf(os.Stderr, "failed to chdir to workspace %q: %v\n", ws, err)
+	profileWS := expandWorkspace(cfg.Agents.Defaults.Workspace, homeDir)
+	projectWS, err := agent.ResolveProjectWorkspace(*projectFlag, profileWS)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 
-	session := tui.New(cfg, provider, homeDir, ws)
+	if err := os.Chdir(projectWS); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to chdir to project %q: %v\n", projectWS, err)
+		os.Exit(1)
+	}
+
+	session := tui.NewWithProject(cfg, provider, homeDir, profileWS, projectWS)
 	if *modelFlag != "" {
 		session.Model = *modelFlag
 	}

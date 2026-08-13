@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -37,5 +39,59 @@ func TestBuildMessagesIncludesMemories(t *testing.T) {
 	}
 	if !foundSummary {
 		t.Fatalf("expected memory summary to be present in messages: %v", msgs)
+	}
+}
+
+func TestBuildMessagesLoadsProfileAndProjectAgents(t *testing.T) {
+	profile := t.TempDir()
+	project := t.TempDir()
+	mustWrite := func(dir, name, content string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mustWrite(profile, "SOUL.md", "profile soul")
+	mustWrite(profile, "AGENTS.md", "profile agents")
+	mustWrite(profile, "USER.md", "profile user")
+	mustWrite(profile, "TOOLS.md", "profile tools")
+	mustWrite(project, "AGENTS.md", "project agents")
+	mustWrite(project, "SOUL.md", "project soul should be ignored")
+
+	cb := NewContextBuilderWithProfile(project, profile, memory.NewSimpleRanker(), 5)
+	msgs := cb.BuildMessages(nil, "hello", "cli", "1", "", "", nil, "", nil)
+	if len(msgs) == 0 || msgs[0].Role != "system" {
+		t.Fatalf("expected system message, got %#v", msgs)
+	}
+	sys := msgs[0].Content
+	for _, want := range []string{
+		"## Profile SOUL.md", "profile soul",
+		"## Profile AGENTS.md", "profile agents",
+		"## Profile USER.md", "profile user",
+		"## Profile TOOLS.md", "profile tools",
+		"## Project AGENTS.md", "project agents",
+	} {
+		if !strings.Contains(sys, want) {
+			t.Fatalf("system prompt missing %q:\n%s", want, sys)
+		}
+	}
+	if strings.Contains(sys, "project soul should be ignored") {
+		t.Fatal("project SOUL.md must not replace profile identity")
+	}
+}
+
+func TestBuildMessagesBackwardsCompatibleHeadings(t *testing.T) {
+	ws := t.TempDir()
+	if err := os.WriteFile(filepath.Join(ws, "SOUL.md"), []byte("one workspace soul"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cb := NewContextBuilder(ws, memory.NewSimpleRanker(), 5)
+	msgs := cb.BuildMessages(nil, "hello", "cli", "1", "", "", nil, "", nil)
+	sys := msgs[0].Content
+	if !strings.Contains(sys, "## SOUL.md") {
+		t.Fatalf("same-root workspace should keep original headings:\n%s", sys)
+	}
+	if strings.Contains(sys, "## Profile SOUL.md") {
+		t.Fatal("profile heading should not appear when profile and project are the same")
 	}
 }

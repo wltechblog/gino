@@ -445,6 +445,10 @@ type AgentLoop struct {
 
 	// toolListProvider is notified when the tool set changes (for API /info)
 	toolListProvider ToolListProvider
+
+	// ownedRoots are extra os.Root handles opened for profile-owned services
+	// such as SkillManager when the profile is not the active project.
+	ownedRoots []*os.Root
 }
 
 // pendingMsg holds a user message that arrived while a turn was in progress.
@@ -467,11 +471,25 @@ type SignalTargetRecorder interface {
 }
 
 func NewAgentLoop(b *chat.Hub, provider providers.LLMProvider, model string, maxIterations int, workspace string, scheduler *cron.Scheduler, mcpServers map[string]config.MCPServerConfig, allowedDirs []string, disableTools []string, brainCfg *config.BrainConfig, homeDir string, sandbox config.SandboxConfig, signalSocketPath string, maxTurnMessages int, maxToolResultChars int, compactionCfg *config.CompactionConfig, webCfg config.WebConfig, searchCfg config.SearchConfig, visionModel string) *AgentLoop {
+	return NewAgentLoopWithProfileWorkspace(
+		b, provider, model, maxIterations,
+		workspace, workspace,
+		scheduler, mcpServers, allowedDirs, disableTools,
+		brainCfg, homeDir, sandbox, signalSocketPath,
+		maxTurnMessages, maxToolResultChars, compactionCfg,
+		webCfg, searchCfg, visionModel,
+	)
+}
+
+func NewAgentLoopWithProfileWorkspace(b *chat.Hub, provider providers.LLMProvider, model string, maxIterations int, workspace, profileWorkspace string, scheduler *cron.Scheduler, mcpServers map[string]config.MCPServerConfig, allowedDirs []string, disableTools []string, brainCfg *config.BrainConfig, homeDir string, sandbox config.SandboxConfig, signalSocketPath string, maxTurnMessages int, maxToolResultChars int, compactionCfg *config.CompactionConfig, webCfg config.WebConfig, searchCfg config.SearchConfig, visionModel string) *AgentLoop {
 	if model == "" {
 		model = provider.GetDefaultModel()
 	}
 	if workspace == "" {
 		workspace = "."
+	}
+	if profileWorkspace == "" {
+		profileWorkspace = workspace
 	}
 	reg := tools.NewRegistry()
 
@@ -530,7 +548,7 @@ func NewAgentLoop(b *chat.Hub, provider providers.LLMProvider, model string, max
 		register(tools.NewCronTool(scheduler))
 	}
 
-	sm := session.NewSessionManager(workspace)
+	sm := session.NewSessionManager(profileWorkspace)
 
 	// Restore sessions from disk on startup so conversation history survives restarts.
 	if err := sm.LoadAll(); err != nil {
@@ -539,8 +557,8 @@ func NewAgentLoop(b *chat.Hub, provider providers.LLMProvider, model string, max
 		log.Println("Sessions: restored from disk")
 	}
 
-	ctx := NewContextBuilder(workspace, memory.NewLLMRanker(provider, model), 5)
-	mem := memory.NewMemoryStoreWithWorkspace(workspace, 100)
+	ctx := NewContextBuilderWithProfile(workspace, profileWorkspace, memory.NewLLMRanker(provider, model), 5)
+	mem := memory.NewMemoryStoreWithWorkspace(profileWorkspace, 100)
 	// register memory tools (all share the same store instance)
 	register(tools.NewWriteMemoryTool(mem))
 	register(tools.NewListMemoryTool(mem))
@@ -548,8 +566,20 @@ func NewAgentLoop(b *chat.Hub, provider providers.LLMProvider, model string, max
 	register(tools.NewEditMemoryTool(mem))
 	register(tools.NewDeleteMemoryTool(mem))
 
-	// register skill management tools (share the workspace os.Root)
-	skillMgr := tools.NewSkillManager(fsTool.WorkspaceRoot())
+	// Skill management stays rooted in the persistent Gino profile. The
+	// filesystem tool's primary root remains the active project, so we only
+	// open a dedicated profile root when the two directories differ.
+	skillRoot := fsTool.WorkspaceRoot()
+	var ownedSkillRoot *os.Root
+	if !sameWorkspace(workspace, profileWorkspace) {
+		r, err := os.OpenRoot(profileWorkspace)
+		if err != nil {
+			log.Fatalf("failed to open Gino profile root %q: %v", profileWorkspace, err)
+		}
+		skillRoot = r
+		ownedSkillRoot = r
+	}
+	skillMgr := tools.NewSkillManager(skillRoot)
 	register(tools.NewCreateSkillTool(skillMgr))
 	register(tools.NewListSkillsTool(skillMgr))
 	register(tools.NewReadSkillTool(skillMgr))
@@ -608,7 +638,7 @@ func NewAgentLoop(b *chat.Hub, provider providers.LLMProvider, model string, max
 	// Initialize knowledge brain (optional)
 	var brainInst *brain.Brain
 	if brainCfg != nil && brainCfg.Enabled {
-		brainInst = initBrain(homeDir, workspace, brainCfg, provider)
+		brainInst = initBrain(homeDir, profileWorkspace, brainCfg, provider)
 	}
 	if brainInst != nil {
 		register(tools.NewBrainSearchTool(brainInst))
@@ -619,7 +649,7 @@ func NewAgentLoop(b *chat.Hub, provider providers.LLMProvider, model string, max
 			log.Println("Brain: initialized and tools registered")
 	}
 
-	checkpoints := NewCheckpointManager(workspace)
+	checkpoints := NewCheckpointManager(profileWorkspace)
 
 	if maxTurnMessages <= 0 {
 		maxTurnMessages = 100
@@ -656,6 +686,9 @@ func NewAgentLoop(b *chat.Hub, provider providers.LLMProvider, model string, max
 		active:                 make(map[string]*activeTurn),
 		pending:                make(map[string][]pendingMsg),
 		compactor:              comp,
+	}
+	if ownedSkillRoot != nil {
+		al.ownedRoots = []*os.Root{ownedSkillRoot}
 	}
 
 	// Wire the MCP management tool callbacks so they can call back into the loop
@@ -1033,6 +1066,9 @@ func (a *AgentLoop) Close() {
 	// Close all per-user brain/memory instances (includes the shared/default brain)
 	if a.resourcePool != nil {
 		a.resourcePool.CloseAll()
+	}
+	for _, r := range a.ownedRoots {
+		_ = r.Close()
 	}
 }
 

@@ -288,13 +288,14 @@ func (rl *Readline) ReadLine() (string, error) {
 
 // ChatSession holds the state for a terminal chat session.
 type ChatSession struct {
-	hub      *chat.Hub
-	agent    *agent.AgentLoop
-	provider providers.LLMProvider
-	cfg      config.Config
-	Model    string // exported so main.go can override with -M flag
-	homeDir  string
-	ws       string
+	hub       *chat.Hub
+	agent     *agent.AgentLoop
+	provider  providers.LLMProvider
+	cfg       config.Config
+	Model     string // exported so main.go can override with -M flag
+	homeDir   string
+	profileWS string
+	ws        string
 
 	out    io.Writer
 	chatID string // unique session ID for hub routing
@@ -313,15 +314,27 @@ type ChatSession struct {
 	rawBytes chan byte
 }
 
-// New creates a new TUI chat session.
+// New creates a new TUI chat session using the configured workspace for both
+// profile state and tool execution.
 func New(cfg config.Config, provider providers.LLMProvider, homeDir, ws string) *ChatSession {
+	return NewWithProject(cfg, provider, homeDir, ws, ws)
+}
+
+// NewWithProject creates a TUI session with persistent profile state separated
+// from the active project working directory.
+func NewWithProject(cfg config.Config, provider providers.LLMProvider, homeDir, profileWS, projectWS string) *ChatSession {
+	if profileWS == "" {
+		profileWS = projectWS
+	}
+
 	return &ChatSession{
-		cfg:      cfg,
-		provider: provider,
-		homeDir:  homeDir,
-		ws:       ws,
-		out:      os.Stdout,
-		chatID:   "tui-" + fmt.Sprintf("%d", time.Now().UnixNano()),
+		cfg:       cfg,
+		provider:  provider,
+		homeDir:   homeDir,
+		profileWS: profileWS,
+		ws:        projectWS,
+		out:       os.Stdout,
+		chatID:    "tui-" + fmt.Sprintf("%d", time.Now().UnixNano()),
 	}
 }
 
@@ -381,8 +394,8 @@ func (s *ChatSession) Run(ctx context.Context) error {
 		maxIter = 100
 	}
 
-	s.agent = agent.NewAgentLoop(
-		s.hub, s.provider, s.Model, maxIter, s.ws,
+	s.agent = agent.NewAgentLoopWithProfileWorkspace(
+		s.hub, s.provider, s.Model, maxIter, s.ws, s.profileWS,
 		nil, // scheduler — cron not active in TUI
 		s.cfg.MCPServers, s.cfg.Agents.Defaults.AllowedDirs,
 		s.cfg.Agents.Defaults.DisableTools,
