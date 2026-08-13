@@ -131,7 +131,14 @@ func styledBannerLine(plain, styled string, width int) string {
 		styled = plain
 		w = displayWidth(plain)
 	}
-	return "║" + styled + strings.Repeat(" ", width-w) + "║"
+	// Restore the outer cyan after inner styles so padding and the right
+	// border cannot inherit bold/dim.
+	return "║" + styled + reset + cyan + strings.Repeat(" ", width-w) + "║"
+}
+
+// cyanSpan applies style to text, then restores cyan without leaving bold/dim on.
+func cyanSpan(style, text string) string {
+	return style + text + reset + cyan
 }
 
 func formatBanner(version, model string) []string {
@@ -139,19 +146,19 @@ func formatBanner(version, model string) []string {
 	model = truncateDisplay(model, bannerInnerWidth-displayWidth(modelLabel))
 
 	titlePlain := "  🤖 Gino Chat " + version
-	titleStyled := "  🤖 Gino Chat " + dim + version + cyan
+	titleStyled := "  🤖 Gino Chat " + cyanSpan(dim, version)
 	modelPlain := modelLabel + model
 	helpPlain := "  Type /help for commands"
-	helpStyled := "  Type " + bold + "/help" + cyan + " for commands"
+	helpStyled := "  Type " + cyanSpan(bold, "/help") + " for commands"
 
 	top := "╔" + strings.Repeat("═", bannerInnerWidth) + "╗"
 	bottom := "╚" + strings.Repeat("═", bannerInnerWidth) + "╝"
 
 	return []string{
-		cyan + top,
-		cyan + styledBannerLine(titlePlain, titleStyled, bannerInnerWidth),
-		cyan + bannerLine(modelPlain, bannerInnerWidth),
-		cyan + styledBannerLine(helpPlain, helpStyled, bannerInnerWidth),
+		cyan + top + reset,
+		cyan + styledBannerLine(titlePlain, titleStyled, bannerInnerWidth) + reset,
+		cyan + bannerLine(modelPlain, bannerInnerWidth) + reset,
+		cyan + styledBannerLine(helpPlain, helpStyled, bannerInnerWidth) + reset,
 		cyan + bottom + reset,
 	}
 }
