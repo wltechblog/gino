@@ -59,6 +59,21 @@ func (f *FallbackProvider) GetModelContext(ctx context.Context, model string) (i
 	return f.primary.GetModelContext(ctx, model)
 }
 
+// SetReasoningEffort applies a runtime reasoning override to the whole chain.
+func (f *FallbackProvider) SetReasoningEffort(effort string) {
+	SetReasoningEffort(f.primary, effort)
+
+	for _, entry := range f.entries {
+		SetReasoningEffort(entry.Provider, effort)
+	}
+}
+
+// GetReasoningEffort reports the primary provider's current reasoning setting.
+func (f *FallbackProvider) GetReasoningEffort() string {
+	effort, _ := GetReasoningEffort(f.primary)
+	return effort
+}
+
 // Chat sends messages to the active provider, with automatic fallback and recovery.
 func (f *FallbackProvider) Chat(ctx context.Context, messages []Message, tools []ToolDefinition, model string) (LLMResponse, error) {
 	// Check if we should attempt recovery to primary

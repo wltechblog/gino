@@ -1,12 +1,15 @@
 package providers
 
-import "context"
+import (
+	"context"
+	"strings"
+)
 
 // Message represents a chat message to/from the LLM.
 type Message struct {
 	Role       string     `json:"role"` // "system" | "user" | "assistant" | "tool"
 	Content    string     `json:"content"`
-	Images     []string   `json:"images,omitempty"` // base64-encoded image data URLs (data:image/...;base64,...) for vision models
+	Images     []string   `json:"images,omitempty"`       // base64-encoded image data URLs (data:image/...;base64,...) for vision models
 	ToolCallID string     `json:"tool_call_id,omitempty"` // set when Role == "tool"
 	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`   // set on assistant msgs with tool calls
 }
@@ -40,6 +43,46 @@ type LLMResponse struct {
 	HadParseError bool       `json:"hadParseError,omitempty"` // tool calls were present but all failed to parse
 	FinishReason  string     `json:"finishReason,omitempty"`  // "stop", "length", "content_filter", etc.
 	Usage         UsageStats `json:"usage,omitempty"`         // token counts for billing/audit
+}
+
+// ReasoningEffortController is optionally implemented by providers that
+// support changing reasoning effort at runtime.
+type ReasoningEffortController interface {
+	SetReasoningEffort(string)
+	GetReasoningEffort() string
+}
+
+// NormalizeReasoningEffort validates the OpenAI-compatible reasoning levels.
+func NormalizeReasoningEffort(value string) (string, bool) {
+	value = strings.ToLower(strings.TrimSpace(value))
+
+	switch value {
+	case "none", "low", "medium", "high":
+		return value, true
+	default:
+		return "", false
+	}
+}
+
+// SetReasoningEffort changes reasoning effort when the provider supports it.
+func SetReasoningEffort(provider LLMProvider, effort string) bool {
+	controller, ok := provider.(ReasoningEffortController)
+	if !ok {
+		return false
+	}
+
+	controller.SetReasoningEffort(effort)
+	return true
+}
+
+// GetReasoningEffort returns the provider's current reasoning effort.
+func GetReasoningEffort(provider LLMProvider) (string, bool) {
+	controller, ok := provider.(ReasoningEffortController)
+	if !ok {
+		return "", false
+	}
+
+	return controller.GetReasoningEffort(), true
 }
 
 // LLMProvider is the interface used by the agent loop to call LLMs.
