@@ -313,8 +313,9 @@ type ProvidersConfig struct {
 }
 
 type ProviderConfig struct {
-	APIKey  string `json:"apiKey"`
-	APIBase string `json:"apiBase"`
+	APIKey          string `json:"apiKey"`
+	APIBase         string `json:"apiBase"`
+	ReasoningEffort string `json:"reasoningEffort,omitempty"`
 }
 
 // FallbackConfig defines a fallback LLM provider to use when the primary fails.
@@ -335,6 +336,10 @@ type FallbackConfig struct {
 
 	// MaxTokens overrides the default max tokens for this fallback (0 = use default).
 	MaxTokens int `json:"maxTokens,omitempty"`
+
+	// ReasoningEffort controls reasoning for OpenAI-compatible providers.
+	// For Ollama, "none" disables thinking.
+	ReasoningEffort string `json:"reasoningEffort,omitempty"`
 
 	// RecoverAfter controls how long to stay on this fallback before retrying
 	// the primary provider. Defaults to 5m. Set to "0s" to retry primary on

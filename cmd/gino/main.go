@@ -227,6 +227,7 @@ func runAgent(homeFlag string, args []string) {
 	fs := flag.NewFlagSet("agent", flag.ExitOnError)
 	msg := fs.String("m", "", "Message to send to the agent")
 	modelFlag := fs.String("M", "", "Model to use (overrides config/provider default)")
+	reasoningFlag := fs.String("R", "", "Reasoning effort: none, low, medium, or high")
 	sessionKey := fs.String("session", "", "Session key for multi-turn context persistence")
 	systemPromptOverride := fs.String("system-prompt", "", "Override the system prompt (used by benchmarks)")
 	_ = fs.Parse(args)
@@ -240,6 +241,18 @@ func runAgent(homeFlag string, args []string) {
 	hub := chat.NewHub(100)
 	cfg, _ := config.LoadConfig(homeDir)
 	provider := providers.NewProviderFromConfig(cfg)
+
+	if *reasoningFlag != "" {
+		effort, ok := providers.NormalizeReasoningEffort(*reasoningFlag)
+		if !ok {
+			fmt.Fprintln(os.Stderr, "invalid -R value; use none, low, medium, or high")
+			os.Exit(2)
+		}
+		if !providers.SetReasoningEffort(provider, effort) {
+			fmt.Fprintln(os.Stderr, "configured provider does not support reasoning control")
+			os.Exit(2)
+		}
+	}
 
 	model := *modelFlag
 	if model == "" && cfg.Agents.Defaults.Model != "" {
@@ -288,6 +301,7 @@ func runAgent(homeFlag string, args []string) {
 func runChat(homeFlag string, args []string) {
 	fs := flag.NewFlagSet("chat", flag.ExitOnError)
 	modelFlag := fs.String("M", "", "Model to use (overrides config/provider default)")
+	reasoningFlag := fs.String("R", "", "Reasoning effort: none, low, medium, or high")
 	_ = fs.Parse(args)
 
 	homeDir := resolveHomeDir(homeFlag)
@@ -298,6 +312,18 @@ func runChat(homeFlag string, args []string) {
 	}
 
 	provider := providers.NewProviderFromConfig(cfg)
+
+	if *reasoningFlag != "" {
+		effort, ok := providers.NormalizeReasoningEffort(*reasoningFlag)
+		if !ok {
+			fmt.Fprintln(os.Stderr, "invalid -R value; use none, low, medium, or high")
+			os.Exit(2)
+		}
+		if !providers.SetReasoningEffort(provider, effort) {
+			fmt.Fprintln(os.Stderr, "configured provider does not support reasoning control")
+			os.Exit(2)
+		}
+	}
 
 	ws := expandWorkspace(cfg.Agents.Defaults.Workspace, homeDir)
 	if err := os.Chdir(ws); err != nil {

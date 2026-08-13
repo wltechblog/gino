@@ -315,9 +315,15 @@ type ChatSession struct {
 
 // New creates a new TUI chat session.
 func New(cfg config.Config, provider providers.LLMProvider, homeDir, ws string) *ChatSession {
+	model := cfg.Agents.Defaults.Model
+	if model == "" {
+		model = provider.GetDefaultModel()
+	}
+
 	return &ChatSession{
 		cfg:      cfg,
 		provider: provider,
+		Model:    model,
 		homeDir:  homeDir,
 		ws:       ws,
 		out:      os.Stdout,
@@ -718,6 +724,40 @@ func (s *ChatSession) handleCommand(line string) bool {
 			s.writeAbove(fmt.Sprintf("%sCurrent model: %s%s\n", dim, s.Model, reset))
 		}
 
+	case "/reasoning", "/reason":
+		if len(parts) == 1 {
+			effort, ok := providers.GetReasoningEffort(s.provider)
+			if !ok {
+				s.writeAbove(fmt.Sprintf("%sProvider does not support reasoning control.%s\n", yellow, reset))
+				return true
+			}
+
+			if effort == "" {
+				effort = "provider default"
+			}
+
+			s.writeAbove(fmt.Sprintf("%sCurrent reasoning: %s%s\n", dim, effort, reset))
+			return true
+		}
+
+		if len(parts) != 2 {
+			s.writeAbove(fmt.Sprintf("%sUsage: /reasoning <none|low|medium|high>%s\n", yellow, reset))
+			return true
+		}
+
+		effort, ok := providers.NormalizeReasoningEffort(parts[1])
+		if !ok {
+			s.writeAbove(fmt.Sprintf("%sInvalid reasoning level. Use none, low, medium, or high.%s\n", yellow, reset))
+			return true
+		}
+
+		if !providers.SetReasoningEffort(s.provider, effort) {
+			s.writeAbove(fmt.Sprintf("%sProvider does not support reasoning control.%s\n", yellow, reset))
+			return true
+		}
+
+		s.writeAbove(fmt.Sprintf("%s✓ Reasoning set to: %s%s\n", green, effort, reset))
+
 	case "/multiline", "/multi":
 		s.multiLine = !s.multiLine
 		state := "off"
@@ -753,6 +793,7 @@ func (s *ChatSession) printHelp() {
 	s.writeAbove(fmt.Sprintf("  %s/stop%s       Abort the current response\n", cyan, reset))
 	s.writeAbove(fmt.Sprintf("  %s/clear%s      Clear the terminal screen\n", cyan, reset))
 	s.writeAbove(fmt.Sprintf("  %s/model%s      Show or set model (/model gpt-4o)\n", cyan, reset))
+	s.writeAbove(fmt.Sprintf("  %s/reasoning%s  Show or set reasoning (none|low|medium|high)\n", cyan, reset))
 	s.writeAbove(fmt.Sprintf("  %s/multiline%s  Toggle multi-line input mode\n", cyan, reset))
 	s.writeAbove(fmt.Sprintf("  %s/exit%s       Exit chat\n\n", cyan, reset))
 }

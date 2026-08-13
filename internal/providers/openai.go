@@ -10,18 +10,21 @@ import (
 	"math/rand"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
 // OpenAIProvider calls an OpenAI-compatible API (OpenAI, OpenRouter, or similar).
 type OpenAIProvider struct {
-	APIKey        string
-	APIBase       string // e.g. https://api.openai.com/v1 or https://openrouter.ai/api/v1
-	MaxTokens     int    // 0 means "let the API decide"
-	MaxRetries    int    // number of retries on transient errors (default 2)
-	RetryBaseWait time.Duration
+	APIKey            string
+	APIBase           string // e.g. https://api.openai.com/v1 or https://openrouter.ai/api/v1
+	MaxTokens         int    // 0 means "let the API decide"
+	MaxRetries        int    // number of retries on transient errors (default 2)
+	RetryBaseWait     time.Duration
+	reasoningMu       sync.RWMutex
+	ReasoningEffort   string
 	PerAttemptTimeout time.Duration // timeout per individual API call attempt
-	Client        *http.Client
+	Client            *http.Client
 }
 
 func NewOpenAIProvider(apiKey, apiBase string, timeoutSecs, maxTokens int) *OpenAIProvider {
@@ -42,11 +45,11 @@ func NewOpenAIProviderWithRetry(apiKey, apiBase string, timeoutSecs, maxTokens, 
 		retryBaseWait = 2 * time.Second
 	}
 	return &OpenAIProvider{
-		APIKey:        apiKey,
-		APIBase:       strings.TrimRight(apiBase, "/"),
-		MaxTokens:     maxTokens,
-		MaxRetries:    maxRetries,
-		RetryBaseWait: retryBaseWait,
+		APIKey:            apiKey,
+		APIBase:           strings.TrimRight(apiBase, "/"),
+		MaxTokens:         maxTokens,
+		MaxRetries:        maxRetries,
+		RetryBaseWait:     retryBaseWait,
 		PerAttemptTimeout: time.Duration(timeoutSecs) * time.Second,
 		// Client has no Timeout — we use per-attempt context timeout instead
 		Client: &http.Client{},
@@ -54,6 +57,20 @@ func NewOpenAIProviderWithRetry(apiKey, apiBase string, timeoutSecs, maxTokens, 
 }
 
 func (p *OpenAIProvider) GetDefaultModel() string { return "gpt-4o-mini" }
+
+func (p *OpenAIProvider) SetReasoningEffort(effort string) {
+	p.reasoningMu.Lock()
+	defer p.reasoningMu.Unlock()
+
+	p.ReasoningEffort = effort
+}
+
+func (p *OpenAIProvider) GetReasoningEffort() string {
+	p.reasoningMu.RLock()
+	defer p.reasoningMu.RUnlock()
+
+	return p.ReasoningEffort
+}
 
 // modelInfoResponse represents the /v1/models/{model} endpoint response.
 type modelInfoResponse struct {
@@ -132,10 +149,11 @@ func isRetryable(err error, statusCode int) bool {
 
 // Request/response shapes using the modern OpenAI "tools" format.
 type chatRequest struct {
-	Model     string        `json:"model"`
-	Messages  []messageJSON `json:"messages"`
-	Tools     []toolWrapper `json:"tools,omitempty"`
-	MaxTokens int           `json:"max_tokens,omitempty"`
+	Model           string        `json:"model"`
+	Messages        []messageJSON `json:"messages"`
+	Tools           []toolWrapper `json:"tools,omitempty"`
+	MaxTokens       int           `json:"max_tokens,omitempty"`
+	ReasoningEffort string        `json:"reasoning_effort,omitempty"`
 }
 
 // toolWrapper is the OpenAI tools array element: {"type": "function", "function": {...}}
@@ -152,9 +170,9 @@ type functionDef struct {
 
 // contentPart represents a single part of a multi-part content array (vision).
 type contentPart struct {
-	Type     string            `json:"type"`
-	Text     string            `json:"text,omitempty"`
-	ImageURL *imageURLPart     `json:"image_url,omitempty"`
+	Type     string        `json:"type"`
+	Text     string        `json:"text,omitempty"`
+	ImageURL *imageURLPart `json:"image_url,omitempty"`
 }
 
 type imageURLPart struct {
@@ -207,7 +225,12 @@ func (p *OpenAIProvider) Chat(ctx context.Context, messages []Message, tools []T
 		model = p.GetDefaultModel()
 	}
 
-	reqBody := chatRequest{Model: model, Messages: make([]messageJSON, 0, len(messages)), MaxTokens: p.MaxTokens}
+	reqBody := chatRequest{
+		Model:           model,
+		Messages:        make([]messageJSON, 0, len(messages)),
+		MaxTokens:       p.MaxTokens,
+		ReasoningEffort: p.GetReasoningEffort(),
+	}
 	for _, m := range messages {
 		mj := messageJSON{Role: m.Role, ToolCallID: m.ToolCallID}
 
@@ -371,7 +394,7 @@ func (p *OpenAIProvider) Chat(ctx context.Context, messages []Message, tools []T
 					log.Printf("WARNING: %d/%d tool calls were unparseable and dropped", skipped, len(msg.ToolCalls))
 				}
 				usage := UsageStats{PromptTokens: out.Usage.PromptTokens, CompletionTokens: out.Usage.CompletionTokens, TotalTokens: out.Usage.TotalTokens}
-			return LLMResponse{Content: strings.TrimSpace(msg.Content), HasToolCalls: true, ToolCalls: tcs, FinishReason: finishReason, Usage: usage}, nil
+				return LLMResponse{Content: strings.TrimSpace(msg.Content), HasToolCalls: true, ToolCalls: tcs, FinishReason: finishReason, Usage: usage}, nil
 			}
 			// All tool calls were unparseable — don't silently end the turn.
 			// Signal the parse error so the loop can inject feedback to the LLM.
