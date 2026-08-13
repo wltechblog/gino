@@ -754,11 +754,11 @@ func (s *ChatSession) handleCommand(line string) bool {
 
 // printBanner shows the startup banner.
 func (s *ChatSession) printBanner() {
-	wprint(s.out, "\n%s╔══════════════════════════════════════════╗\n", cyan)
-	wprint(s.out, "║  🤖 Gino Chat %sv0.5.0%s                     ║\n", dim, cyan)
-	wprint(s.out, "║  Model: %-34s║\n", truncForBox(s.Model, 34)+" ")
-	wprint(s.out, "║  Type %s/help%s for commands               ║\n", bold, cyan)
-	wprint(s.out, "%s╚══════════════════════════════════════════╝\n%s\n\n", cyan, reset)
+	wprint(s.out, "\n")
+	for _, line := range formatBanner("v0.5.0", s.Model) {
+		wprint(s.out, "%s\n", line)
+	}
+	wprint(s.out, "\n")
 }
 
 // printHelp shows available commands.
@@ -789,12 +789,4 @@ func humanizeAge(t time.Time) string {
 		return fmt.Sprintf("%dh ago", int(d.Hours()))
 	}
 	return fmt.Sprintf("%dd ago", int(d.Hours()/24))
-}
-
-// truncForBox truncates a string to fit in a box of the given width.
-func truncForBox(str string, max int) string {
-	if len(str) > max {
-		return str[:max]
-	}
-	return str
 }
