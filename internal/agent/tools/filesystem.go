@@ -41,7 +41,7 @@ func NewFilesystemTool(workspaceDir string, allowedDirs []string, sandbox config
 	if sandbox.IsYolo() {
 		allowedDirs = append([]string{"/"}, allowedDirs...)
 	}
-	absWorkspace, err := filepath.Abs(workspaceDir)
+	absWorkspace, err := canonicalDir(workspaceDir)
 	if err != nil {
 		return nil, fmt.Errorf("filesystem: resolve workspace path: %w", err)
 	}
@@ -60,11 +60,10 @@ func NewFilesystemTool(workspaceDir string, allowedDirs []string, sandbox config
 		if d == "" {
 			continue
 		}
-		abs, err := filepath.Abs(d)
+		abs, err := canonicalDir(d)
 		if err != nil {
 			continue
 		}
-		abs = filepath.Clean(abs)
 		// Skip duplicates
 		duplicate := false
 		for _, existing := range allDirs {
@@ -127,6 +126,30 @@ func (t *FilesystemTool) WorkspaceRoot() *os.Root {
 		return nil
 	}
 	return t.roots[0]
+}
+
+// RootForDir returns the managed os.Root corresponding to an allowed directory.
+// The returned root is owned by FilesystemTool and must not be closed by callers.
+func (t *FilesystemTool) RootForDir(dir string) *os.Root {
+	abs, err := canonicalDir(dir)
+	if err != nil {
+		return nil
+	}
+
+	for i, d := range t.dirs {
+		if d == abs && i < len(t.roots) {
+			return t.roots[i]
+		}
+	}
+	return nil
+}
+
+func canonicalDir(dir string) (string, error) {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(abs), nil
 }
 
 // getEffectiveWorkspace returns the workspace path from context (multi-tenant)
@@ -221,7 +244,7 @@ func (t *FilesystemTool) resolve(ctx context.Context, pathStr string) (*os.Root,
 	return nil, "", fmt.Errorf("filesystem: path %q is outside all allowed directories", pathStr)
 }
 
-func (t *FilesystemTool) Name() string        { return "filesystem" }
+func (t *FilesystemTool) Name() string { return "filesystem" }
 func (t *FilesystemTool) Description() string {
 	return "Read, write, edit (find-and-replace), and list files in the workspace and allowed directories. For editing source code and project files, use action 'edit' with old_text/new_text — do NOT use edit_memory (that is only for memory/notes files)."
 }

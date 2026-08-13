@@ -14,23 +14,31 @@ import (
 
 // ContextBuilder builds messages for the LLM from session history and current message.
 type ContextBuilder struct {
-	workspace      string
-	ranker         memory.Ranker
-	topK           int
-	skillsLoader   *skills.Loader
-	oauthNotifier  func() map[string]string // returns server→authURL for pending OAuth
+	workspace        string
+	profileWorkspace string
+	ranker           memory.Ranker
+	topK             int
+	skillsLoader     *skills.Loader
+	oauthNotifier    func() map[string]string // returns server→authURL for pending OAuth
 }
 
 func NewContextBuilder(workspace string, r memory.Ranker, topK int) *ContextBuilder {
-	return &ContextBuilder{
-		workspace:    workspace,
-		ranker:       r,
-		topK:         topK,
-		skillsLoader: skills.NewLoader(workspace),
-	}
+	return NewContextBuilderWithProfile(workspace, workspace, r, topK)
 }
 
+func NewContextBuilderWithProfile(workspace, profileWorkspace string, r memory.Ranker, topK int) *ContextBuilder {
+	if profileWorkspace == "" {
+		profileWorkspace = workspace
+	}
 
+	return &ContextBuilder{
+		workspace:        workspace,
+		profileWorkspace: profileWorkspace,
+		ranker:           r,
+		topK:             topK,
+		skillsLoader:     skills.NewLoader(profileWorkspace),
+	}
+}
 
 // SetOAuthNotifier attaches a function that returns pending OAuth server names
 // and their auth URLs. When non-empty, the system prompt will instruct the agent
@@ -47,17 +55,32 @@ func (cb *ContextBuilder) BuildMessages(history []string, currentMessage string,
 
 	sysParts = append(sysParts, "You are Gino, a helpful assistant.")
 
-	// Load workspace bootstrap files
+	// Load persistent Gino profile bootstrap files.
 	bootstrapFiles := []string{"SOUL.md", "AGENTS.md", "USER.md", "TOOLS.md"}
 	for _, name := range bootstrapFiles {
-		p := filepath.Join(cb.workspace, name)
+		p := filepath.Join(cb.profileWorkspace, name)
 		data, err := os.ReadFile(p)
 		if err != nil {
 			continue // file may not exist yet, skip silently
 		}
 		content := strings.TrimSpace(string(data))
 		if content != "" {
-			sysParts = append(sysParts, fmt.Sprintf("## %s\n\n%s", name, content))
+			heading := name
+			if !sameWorkspace(cb.profileWorkspace, cb.workspace) {
+				heading = "Profile " + name
+			}
+			sysParts = append(sysParts, fmt.Sprintf("## %s\n\n%s", heading, content))
+		}
+	}
+
+	// When working on a separate project, also load that project's AGENTS.md.
+	if !sameWorkspace(cb.profileWorkspace, cb.workspace) {
+		p := filepath.Join(cb.workspace, "AGENTS.md")
+		if data, err := os.ReadFile(p); err == nil {
+			content := strings.TrimSpace(string(data))
+			if content != "" {
+				sysParts = append(sysParts, fmt.Sprintf("## Project AGENTS.md\n\n%s", content))
+			}
 		}
 	}
 
