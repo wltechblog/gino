@@ -296,6 +296,7 @@ type ChatSession struct {
 	homeDir   string
 	profileWS string
 	ws        string
+	herdr     *herdrReporter
 
 	out    io.Writer
 	chatID string // unique session ID for hub routing
@@ -343,6 +344,7 @@ func NewWithProject(cfg config.Config, provider providers.LLMProvider, homeDir, 
 		homeDir:   homeDir,
 		profileWS: profileWS,
 		ws:        projectWS,
+		herdr:     newHerdrReporter(),
 		out:       os.Stdout,
 		chatID:    "tui-" + fmt.Sprintf("%d", time.Now().UnixNano()),
 	}
@@ -432,6 +434,9 @@ func (s *ChatSession) Run(ctx context.Context) error {
 	cliOut := s.startRuntime(ctx)
 	defer s.agent.Close()
 
+	s.herdr.report("idle", "ready")
+	defer s.herdr.release()
+
 	// Handle Ctrl+C gracefully — the signal handler is a fallback.
 	// In raw mode, Ctrl+C is caught by readline (returns empty line).
 	sigCh := make(chan os.Signal, 1)
@@ -443,6 +448,7 @@ func (s *ChatSession) Run(ctx context.Context) error {
 		}
 		wprintln(s.out)
 		cancel()
+		s.herdr.release()
 		os.Exit(0)
 	}()
 
@@ -503,6 +509,8 @@ func (s *ChatSession) sendMessage(ctx context.Context, cliOut <-chan chat.Outbou
 		Timestamp: time.Now(),
 	}
 
+	s.herdr.report("working", "thinking")
+
 	s.hub.In <- msg
 
 	// Mark busy.
@@ -512,6 +520,7 @@ func (s *ChatSession) sendMessage(ctx context.Context, cliOut <-chan chat.Outbou
 	defer func() {
 		s.busy = false
 		s.busyCancel = nil
+		s.herdr.report("idle", "ready")
 	}()
 
 	// startSpinner launches a spinner goroutine and returns a cancel function
