@@ -311,6 +311,10 @@ type ChatSession struct {
 
 	// Single stdin owner: rawBytes is fed by one goroutine.
 	rawBytes chan byte
+
+	// responseWait is how long sendMessage waits for a reply before cancelling
+	// the active turn. Zero means the default of five minutes.
+	responseWait time.Duration
 }
 
 // New creates a new TUI chat session.
@@ -505,6 +509,13 @@ func (s *ChatSession) sendMessage(ctx context.Context, cliOut <-chan chat.Outbou
 
 	stopSpinner := startSpinner()
 
+	wait := s.responseWait
+	if wait <= 0 {
+		wait = 5 * time.Minute
+	}
+	timeout := time.NewTimer(wait)
+	defer timeout.Stop()
+
 	// Buffer for /stop detection — chars read during busy mode.
 	// These are NOT consumed by ReadLine (which reads from the same channel).
 	// Since we own the channel during sendMessage, any bytes we read here
@@ -572,8 +583,9 @@ func (s *ChatSession) sendMessage(ctx context.Context, cliOut <-chan chat.Outbou
 			s.writeAbove(fmt.Sprintf("%sgino%s ❯ %s\n\n", magenta+bold, reset, out.Content))
 			return
 
-		case <-time.After(5 * time.Minute):
+		case <-timeout.C:
 			stopSpinner()
+			s.agent.StopTurn(s.sessionKey())
 			s.writeAbove(fmt.Sprintf("%stimeout waiting for response%s\n", red, reset))
 			return
 		}
