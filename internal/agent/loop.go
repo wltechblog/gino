@@ -14,7 +14,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/wltechblog/gino/internal/audit"
 	"github.com/wltechblog/gino/internal/brain"
 	"github.com/wltechblog/gino/internal/agent/memory"
 	"github.com/wltechblog/gino/internal/agent/tools"
@@ -24,7 +23,6 @@ import (
 	"github.com/wltechblog/gino/internal/mcp"
 	"github.com/wltechblog/gino/internal/providers"
 	"github.com/wltechblog/gino/internal/session"
-	"github.com/wltechblog/gino/internal/tenant"
 )
 
 var rememberRE = regexp.MustCompile(`(?i)^remember(?:\s+to)?\s+(.+)$`)
@@ -230,8 +228,8 @@ func summarizeToolCalls(records []toolCallRecord) string {
 // has relevant context for future queries. Not all tool results are worth
 // storing — we focus on high-signal tools like filesystem reads, web fetches,
 // and exec outputs.
-func (a *AgentLoop) captureToolMemory(toolName, result string, mem *memory.MemoryStore) {
-	if mem == nil || result == "" || strings.HasPrefix(result, "(tool error)") {
+func (a *AgentLoop) captureToolMemory(toolName, result string) {
+	if a.memory == nil || result == "" || strings.HasPrefix(result, "(tool error)") {
 		return
 	}
 
@@ -243,14 +241,14 @@ func (a *AgentLoop) captureToolMemory(toolName, result string, mem *memory.Memor
 		if len(text) > 500 {
 			text = text[:500]
 		}
-		mem.AddShort(fmt.Sprintf("[%s] %s", toolName, text))
+		a.memory.AddShort(fmt.Sprintf("[%s] %s", toolName, text))
 	}
 }
 
 // extractTurnMemory runs a background LLM call to extract facts worth remembering
 // from the completed turn. It runs in a goroutine so it doesn't delay the response.
-func (a *AgentLoop) extractTurnMemory(userMsg, assistantReply string, toolCalls []toolCallRecord, channel, senderID string, mem *memory.MemoryStore, br *brain.Brain) {
-	if mem == nil || a.provider == nil {
+func (a *AgentLoop) extractTurnMemory(userMsg, assistantReply string, toolCalls []toolCallRecord, channel, senderID string) {
+	if a.memory == nil || a.provider == nil {
 		return
 	}
 
@@ -314,7 +312,7 @@ Output one fact per line starting with "- ". If nothing is worth remembering, ou
 
 	// Save to today's notes with a turn-extraction marker (global memory)
 	entry := fmt.Sprintf("[turn-extract] %s", facts)
-	if err := mem.AppendToday(entry); err != nil {
+	if err := a.memory.AppendToday(entry); err != nil {
 		log.Printf("Failed to save turn-extracted facts: %v", err)
 	} else {
 		log.Printf("Turn memory: extracted facts from turn (%d chars)", len(facts))
@@ -322,7 +320,7 @@ Output one fact per line starting with "- ". If nothing is worth remembering, ou
 
 	// For non-owner channels (Discord), also ingest into per-user brain source
 	// so each user's memories are isolated and searchable independently.
-	if br != nil && senderID != "" && channel != "cli" && channel != "telegram" {
+	if a.brain != nil && senderID != "" && channel != "cli" && channel != "telegram" {
 		userSource := fmt.Sprintf("user:%s:%s", channel, senderID)
 		lines := strings.Split(facts, "\n")
 		for _, line := range lines {
@@ -347,7 +345,7 @@ Output one fact per line starting with "- ". If nothing is worth remembering, ou
 					"extracted": "true",
 				},
 			}
-			if _, err := br.IngestPage(context.Background(), page); err != nil {
+			if _, err := a.brain.IngestPage(context.Background(), page); err != nil {
 				log.Printf("Failed to ingest per-user memory for %s: %v", userSource, err)
 			}
 		}
@@ -403,20 +401,19 @@ func isSystemChannel(channel string) bool {
 type AgentLoop struct {
 	hub                    *chat.Hub
 	provider               providers.LLMProvider
-	providerMu             sync.RWMutex // guards provider for hot-swap
-	model                  string
-	modelMu                sync.RWMutex // guards model for hot-swap
 	tools                  *tools.Registry
 	sessions               *session.SessionManager
 	checkpoints            *CheckpointManager
 	context                *ContextBuilder
+	memory                 *memory.MemoryStore
+	brain                  *brain.Brain
+	model                  string
 	maxIterations          int
 	maxTurnMessages        int
 	maxToolResultChars     int
 	running                bool
 	mcpClients             []*mcp.Client
 	mcpConfigs             map[string]config.MCPServerConfig
-	mcpMu                  sync.Mutex // guards mcpClients/mcpConfigs for runtime add/remove
 	tokenStore             *mcp.TokenStore
 	enableToolActivity     bool
 	enableToolCallMessages bool
@@ -433,20 +430,6 @@ type AgentLoop struct {
 	// bgWG tracks background goroutines (e.g. turn memory extraction) so
 	// tests can wait for them to finish before cleaning up temp dirs.
 	bgWG sync.WaitGroup
-
-	// Multi-tenant support (optional — nil in single-user mode)
-	userManager  *tenant.UserManager
-	auditStore   *audit.Store
-	resourcePool *ResourcePool
-	auditCfg    audit.Config
-
-	// requestWorkspace is set per-request by the API gateway to inject
-	// a per-user workspace into the ProcessDirect context. Thread-safe.
-	requestWorkspaceMu sync.RWMutex
-	requestWorkspace   string
-
-	// toolListProvider is notified when the tool set changes (for API /info)
-	toolListProvider ToolListProvider
 
 	// ownedRoots are extra os.Root handles opened for profile-owned services
 	// such as SkillManager when the profile is not the active project.
@@ -634,8 +617,6 @@ func NewAgentLoopWithProfileWorkspace(b *chat.Hub, provider providers.LLMProvide
 	register(listMCPTool)
 	authTool := tools.NewMCPAuthTool()
 	register(authTool)
-	manageTool := tools.NewMCPManageTool()
-	register(manageTool)
 
 	// Initialize knowledge brain (optional)
 	var brainInst *brain.Brain
@@ -648,7 +629,8 @@ func NewAgentLoopWithProfileWorkspace(b *chat.Hub, provider providers.LLMProvide
 		register(tools.NewBrainEntityTool(brainInst))
 		register(tools.NewBrainStatusTool(brainInst))
 		register(tools.NewBrainMaintainTool(brainInst))
-			log.Println("Brain: initialized and tools registered")
+		ctx.SetBrain(brainInst)
+		log.Println("Brain: initialized and tools registered")
 	}
 
 	checkpoints := NewCheckpointManager(profileWorkspace)
@@ -663,7 +645,7 @@ func NewAgentLoopWithProfileWorkspace(b *chat.Hub, provider providers.LLMProvide
 	// Initialize LLM-based compactor if enabled, otherwise nil (falls back to legacy trim).
 	var comp *compactor
 	if compactionCfg != nil && compactionCfg.Enabled {
-		comp = newCompactor(provider, model, compactionCfg, maxTurnMessages, nil) // Memory flusher now handled per-turn via extractTurnMemory
+		comp = newCompactor(provider, model, compactionCfg, maxTurnMessages, newMemoryFlusher(provider, model, mem))
 		log.Printf("Compaction: enabled (maxCtx=%d, reserve=%d, keepRecent=%d)",
 			comp.maxContextTokens, comp.reserveTokens, comp.keepRecentTokens)
 	}
@@ -675,6 +657,8 @@ func NewAgentLoopWithProfileWorkspace(b *chat.Hub, provider providers.LLMProvide
 		sessions:               sm,
 		checkpoints:            checkpoints,
 		context:                ctx,
+		memory:                 mem,
+		brain:                  brainInst,
 		model:                  model,
 		maxIterations:          maxIterations,
 		maxTurnMessages:        maxTurnMessages,
@@ -697,11 +681,6 @@ func NewAgentLoopWithProfileWorkspace(b *chat.Hub, provider providers.LLMProvide
 	restartTool.SetCallback(al.restartMCPServer)
 	listMCPTool.SetCallback(al.listMCPServers)
 	authTool.SetCallback(al)
-	manageTool.SetCallback(al)
-
-	// Create per-user resource pool for multi-tenant brain/memory isolation.
-	// Only active when brain is enabled; single-tenant mode uses shared instances.
-	al.resourcePool = NewResourcePool(homeDir, brainCfg, provider, mem, brainInst)
 
 	// Wire OAuth notifications into the context builder so pending auth is surfaced
 	ctx.SetOAuthNotifier(al.ListPendingOAuth)
@@ -734,358 +713,15 @@ func (a *AgentLoop) SetSignalListener(l SignalTargetRecorder) {
 	a.signalListener = l
 }
 
-// SetUserManager wires the multi-tenant user manager for per-user isolation.
-// When set, each inbound message is resolved to a UserContext that controls
-// workspace access, tool filtering, and rate limits.
-func (a *AgentLoop) SetUserManager(um *tenant.UserManager) {
-	a.userManager = um
-}
-
-// SetRequestWorkspace sets the per-user workspace for the next ProcessDirect call.
-// Used by the API gateway to inject multi-tenant workspace isolation.
-// Must be called before each ProcessDirect/ProcessDirectWithSession call.
-func (a *AgentLoop) SetRequestWorkspace(ws string) {
-	a.requestWorkspaceMu.Lock()
-	a.requestWorkspace = ws
-	a.requestWorkspaceMu.Unlock()
-}
-
-// SetAuditStore wires the audit trail for message and usage logging.
-func (a *AgentLoop) SetAuditStore(s *audit.Store, cfg audit.Config) {
-	a.auditStore = s
-	a.auditCfg = cfg
-}
-
-
-// resolveMemBrain returns the per-user memory and brain instances for a given message.
-// In single-tenant mode, uses the shared instances from ResourcePool.
-// In multi-tenant mode, resolves from the user's workspace via ResourcePool.
-func (a *AgentLoop) resolveMemBrain(msg chat.Inbound) (*memory.MemoryStore, *brain.Brain) {
-	if a.resourcePool == nil {
-		return nil, nil
-	}
-	uid := a.resolveUserID(msg)
-	ws := a.resolveUserWorkspace(msg)
-	return a.resourcePool.Get(uid, ws)
-}
-
-// resolveMemBrainForDirect returns memory/brain for CLI/direct calls.
-// Uses the shared instances from ResourcePool.
-func (a *AgentLoop) resolveMemBrainForDirect() (*memory.MemoryStore, *brain.Brain) {
-	if a.resourcePool == nil {
-		return nil, nil
-	}
-	return a.resourcePool.Get("default", "")
-}
-
-// searchBrain performs a brain search scoped to the user's context.
-// Returns a formatted string for injection into the system prompt.
-func (a *AgentLoop) searchBrain(br *brain.Brain, msg chat.Inbound) string {
-	if br == nil {
-		return ""
-	}
-	searchOpts := brain.SearchOpts{Limit: 5}
-	
-	// Scope search for unprivileged users
-	isPrivileged := true
-	if msg.Metadata != nil {
-		if p, ok := msg.Metadata["privileged"].(bool); ok {
-			isPrivileged = p
-		}
-	}
-	if msg.SenderID != "" && msg.Channel != "cli" && !isPrivileged {
-		userSource := fmt.Sprintf("user:%s:%s", msg.Channel, msg.SenderID)
-		searchOpts.Sources = []string{userSource}
-	}
-	
-	results, err := br.Search(context.Background(), msg.Content, searchOpts)
-	if err != nil || len(results) == 0 {
-		return ""
-	}
-	var sb strings.Builder
-	for _, r := range results {
-		fmt.Fprintf(&sb, "- [%s] %s: %s\n", r.Type, r.Title, r.Snippet)
-	}
-	return sb.String()
-}
-
-// resolveUserID determines the user identity for audit logging.
-// In multi-tenant mode it uses the UserManager; otherwise falls back to SenderID.
-func (a *AgentLoop) resolveUserID(msg chat.Inbound) string {
-	if a.userManager != nil {
-		if ctx, _ := a.userManager.GetByChannel(msg.Channel, msg.SenderID); ctx != nil {
-			return ctx.Config.ID
-		}
-	}
-	if msg.SenderID != "" {
-		return msg.SenderID
-	}
-	return "unknown"
-}
-
-// resolveUserContext returns the UserContext for the message sender.
-// Returns nil in single-tenant mode or if the user can't be resolved.
-func (a *AgentLoop) resolveUserContext(msg chat.Inbound) *tenant.UserContext {
-	if a.userManager == nil {
-		return nil
-	}
-	uctx, _ := a.userManager.GetByChannel(msg.Channel, msg.SenderID)
-	return uctx
-}
-
-// resolveUserWorkspace returns the per-user workspace path for multi-tenant isolation.
-// Returns empty string in single-tenant mode (tools use their default workspace).
-func (a *AgentLoop) resolveUserWorkspace(msg chat.Inbound) string {
-	if a.userManager == nil {
-		return ""
-	}
-	uctx, _ := a.userManager.GetByChannel(msg.Channel, msg.SenderID)
-	if uctx == nil {
-		return ""
-	}
-	return uctx.WorkspacePath
-}
-
-// resolveSessionKey produces a user-scoped session key for multi-tenant isolation.
-//
-// In single-tenant mode (no UserManager), returns the original key unchanged:
-//   "telegram:8113382039" or metadata-provided key.
-//
-// In multi-tenant mode, injects the user ID so users can never cross-access
-// each other's sessions:
-//   "telegram:8113382039" → "telegram:user123:8113382039"
-//
-// If a session_key is explicitly provided in metadata (API gateway), it is
-// validated to already contain the user ID prefix. If it doesn't, the user ID
-// is injected to prevent session hijacking via crafted metadata.
-func (a *AgentLoop) resolveSessionKey(msg chat.Inbound, defaultKey string) string {
-	// Single-tenant mode: no isolation needed
-	if a.userManager == nil {
-		return defaultKey
-	}
-
-	uid := a.resolveUserID(msg)
-	if uid == "" || uid == "unknown" {
-		// Cannot resolve user — this shouldn't happen in multi-tenant mode.
-		// Fall back to the raw key but log a warning.
-		log.Printf("WARNING: multi-tenant mode but could not resolve user ID for session key (channel=%s, sender=%s)",
-			msg.Channel, msg.SenderID)
-		return defaultKey
-	}
-
-	// Check if a session key was explicitly provided (e.g., by API gateway)
-	if msg.Metadata != nil {
-		if sk, ok := msg.Metadata["session_key"].(string); ok && sk != "" {
-			// Security: verify the session key contains the user's ID.
-			// This prevents a user from crafting a session_key to access
-			// another user's session.
-			if strings.HasPrefix(sk, "api:"+uid+":") || sk == "api:"+uid {
-				return sk // Already properly scoped
-			}
-			// Not properly scoped — force-inject the user ID
-			log.Printf("WARNING: session key %q was not scoped to user %q, force-scoping", sk, uid)
-			return "api:" + uid + ":" + sk
-		}
-	}
-
-	// Standard channel message — inject user ID into the key
-	return defaultKey + ":user:" + uid
-}
-
-// isUserAdmin returns true in single-tenant mode or if the user has admin privileges.
-func (a *AgentLoop) isUserAdmin(msg chat.Inbound) bool {
-	if a.userManager == nil {
-		return true // Single-tenant: everyone is admin
-	}
-	uctx, _ := a.userManager.GetByChannel(msg.Channel, msg.SenderID)
-	return uctx != nil && uctx.IsAdmin()
-}
-
-// resolveToolDefs returns the tool definitions for the current turn.
-// In multi-tenant mode, tools are filtered by the user's tier.
-// Definitions are read live from the registry so dynamic changes (MCP
-// add/remove) are reflected without restart.
-func (a *AgentLoop) resolveToolDefs(msg chat.Inbound) []providers.ToolDefinition {
-	if a.userManager != nil && msg.Channel != "" {
-		if uctx, _ := a.userManager.GetByChannel(msg.Channel, msg.SenderID); uctx != nil && uctx.Tier != nil {
-			allNames := a.tools.AllToolNames()
-			allowed := uctx.Tier.AllowedToolNames(allNames)
-			return a.tools.FilteredDefinitions(allowed)
-		}
-	}
-	return a.tools.Definitions()
-}
-
-// resolveModel returns the model for the current turn.
-// In multi-tenant mode, if the user's tier has a Model override, use it.
-func (a *AgentLoop) resolveModel(msg chat.Inbound) string {
-	if a.userManager != nil && msg.Channel != "" {
-		if uctx, _ := a.userManager.GetByChannel(msg.Channel, msg.SenderID); uctx != nil && uctx.Tier != nil {
-			if uctx.Tier.Model != "" {
-				return uctx.Tier.Model
-			}
-		}
-	}
-	return a.model
-}
-
-// resolveProvider returns the provider for the current turn.
-// Currently all tiers share the same provider (with different models).
-// Future: per-tier providers could be constructed from TierProviders config.
-func (a *AgentLoop) resolveProvider(msg chat.Inbound) providers.LLMProvider {
-	return a.provider
-}
-
-// AddMCPServer connects a new MCP server at runtime using flat params.
-// This satisfies the tools.MCPManageCallback interface for the mcp_manage tool.
-func (a *AgentLoop) AddMCPServer(name string, command string, args []string, url string, env map[string]string) error {
-	cfg := config.MCPServerConfig{
-		Command: command,
-		Args:    args,
-		URL:     url,
-		Env:     env,
-	}
-	return a.AddMCPServerWithConfig(name, cfg)
-}
-
-// AddMCPServerWithConfig connects a new MCP server from a config struct.
-func (a *AgentLoop) AddMCPServerWithConfig(name string, cfg config.MCPServerConfig) error {
-	a.mcpMu.Lock()
-	defer a.mcpMu.Unlock()
-
-	// Check if already connected
-	for _, c := range a.mcpClients {
-		if c.Name() == name {
-			return fmt.Errorf("MCP server %q already connected", name)
-		}
-	}
-
-	var client *mcp.Client
-	var err error
-	switch {
-	case cfg.Command != "":
-		mcpEnv := map[string]string{}
-		for k, v := range cfg.Env {
-			mcpEnv[k] = v
-		}
-		if a.signalSocketPath != "" {
-			mcpEnv["GINO_SIGNAL_SOCKET"] = a.signalSocketPath
-			mcpEnv["GINO_MCP_ID"] = name
-		}
-		client, err = mcp.NewStdioClientWithEnv(name, cfg.Command, cfg.Args, mcpEnv)
-	case cfg.URL != "":
-		client, err = mcp.NewHTTPClientWithOAuth(name, cfg.URL, cfg.Headers, a.tokenStore)
-	default:
-		return fmt.Errorf("MCP server %q: no command or url configured", name)
-	}
-	if err != nil {
-		if oauthErr, ok := err.(*mcp.ErrOAuthRequired); ok {
-			mcp.SetOAuthPending(name, oauthErr)
-			return fmt.Errorf("MCP server %q: OAuth authentication required. Auth URL: %s", name, oauthErr.AuthURL)
-		}
-		return fmt.Errorf("MCP server %q: failed to connect: %w", name, err)
-	}
-
-	a.mcpClients = append(a.mcpClients, client)
-	if a.mcpConfigs == nil {
-		a.mcpConfigs = make(map[string]config.MCPServerConfig)
-	}
-	a.mcpConfigs[name] = cfg
-
-	registered := 0
-	for _, tool := range client.Tools() {
-		a.tools.Register(tools.NewMCPTool(client, name, tool))
-		registered++
-	}
-	log.Printf("MCP server %q: connected at runtime, registered %d tools", name, registered)
-	a.notifyToolListChanged()
-	return nil
-}
-
-// RemoveMCPServer disconnects an MCP server and unregisters its tools at runtime.
-func (a *AgentLoop) RemoveMCPServer(name string) error {
-	a.mcpMu.Lock()
-	defer a.mcpMu.Unlock()
-
-	var client *mcp.Client
-	found := false
-	newClients := make([]*mcp.Client, 0, len(a.mcpClients))
-	for _, c := range a.mcpClients {
-		if c.Name() == name {
-			client = c
-			found = true
-		} else {
-			newClients = append(newClients, c)
-		}
-	}
-	if !found {
-		return fmt.Errorf("MCP server %q not found", name)
-	}
-
-	// Unregister all tools from this server
-	for _, tool := range client.Tools() {
-		a.tools.Unregister(tool.Name)
-	}
-
-	_ = client.Close()
-	a.mcpClients = newClients
-	delete(a.mcpConfigs, name)
-	log.Printf("MCP server %q: disconnected at runtime, tools removed", name)
-	a.notifyToolListChanged()
-	return nil
-}
-
-// notifyToolListChanged updates the API /info tool list if a provider is set.
-func (a *AgentLoop) notifyToolListChanged() {
-	if a.toolListProvider != nil {
-		names := make([]string, 0, len(a.tools.Definitions()))
-		for _, def := range a.tools.Definitions() {
-			names = append(names, def.Name)
-		}
-		a.toolListProvider.SetTools(names)
-	}
-}
-
-// ToolListProvider is implemented by the API server to receive the list of
-// registered tool names for the /info endpoint.
-type ToolListProvider interface {
-	SetTools(names []string)
-}
-
-// SetToolListProvider registers a recipient for the tool list.
-// Called after tools are registered so the API /info endpoint can advertise
-// available tools to clients.
-func (a *AgentLoop) SetToolListProvider(p ToolListProvider) {
-	a.toolListProvider = p
-	a.notifyToolListChanged()
-}
-
-// UpdateModel hot-swaps the default model used for new turns.
-// Called by the admin API when a provider's default model changes.
-func (a *AgentLoop) UpdateModel(model string) {
-	a.modelMu.Lock()
-	a.model = model
-	a.modelMu.Unlock()
-	log.Printf("agent: model updated to %q", model)
-}
-
-// SwapProvider hot-swaps the LLM provider used for new turns.
-// Called by the admin API when provider configs change.
-func (a *AgentLoop) SwapProvider(p providers.LLMProvider) {
-	a.providerMu.Lock()
-	a.provider = p
-	a.providerMu.Unlock()
-	log.Printf("agent: provider swapped")
-}
-
 // Close shuts down all MCP server connections and the brain.
 func (a *AgentLoop) Close() {
 	for _, c := range a.mcpClients {
 		_ = c.Close()
 	}
-	// Close all per-user brain/memory instances (includes the shared/default brain)
-	if a.resourcePool != nil {
-		a.resourcePool.CloseAll()
+	if a.brain != nil {
+		if err := a.brain.Close(); err != nil {
+			log.Printf("agent: close brain: %v", err)
+		}
 	}
 	for _, r := range a.ownedRoots {
 		_ = r.Close()
@@ -1539,12 +1175,13 @@ func (a *AgentLoop) Run(ctx context.Context) {
 // Stop commands cancel the active turn; everything else is queued for processing.
 // Signal messages use a separate session namespace so they don't interrupt active turns.
 func (a *AgentLoop) dispatchMessage(ctx context.Context, msg chat.Inbound) {
-	// Build the base session key from channel:chatID (or metadata override)
-	baseSessionKey := msg.Channel + ":" + msg.ChatID
-
-	// In multi-tenant mode, resolveSessionKey injects the user ID to prevent
-	// cross-user session access. In single-tenant mode, it returns the key as-is.
-	sessionKey := a.resolveSessionKey(msg, baseSessionKey)
+	// Use session key from metadata if provided (e.g. per-user group sessions)
+	sessionKey := msg.Channel + ":" + msg.ChatID
+	if msg.Metadata != nil {
+		if sk, ok := msg.Metadata["session_key"].(string); ok && sk != "" {
+			sessionKey = sk
+		}
+	}
 
 	// Determine if this is a signal-originated message.
 	isSignal := isSignalMessage(msg)
@@ -1569,27 +1206,8 @@ func (a *AgentLoop) dispatchMessage(ctx context.Context, msg chat.Inbound) {
 	}
 
 	// Handle /reset — kill all Discord conversations.
-	// ADMIN ONLY: in multi-tenant mode, non-admin users can only reset their own sessions.
+	// Only applies to Discord; Telegram and other channels are unaffected.
 	if strings.TrimSpace(msg.Content) == "/reset" && msg.Channel == "discord" {
-		if !a.isUserAdmin(msg) {
-			// Non-admin: only reset this user's own sessions
-			a.mu.Lock()
-			cancelled := 0
-			for key, at := range a.active {
-				if strings.HasPrefix(key, sessionKey) && !strings.HasPrefix(key, "signal:") {
-					at.stopped = true
-					at.cancel()
-					delete(a.active, key)
-					cancelled++
-				}
-			}
-			a.mu.Unlock()
-			deleted := a.sessions.DeleteByPrefix(sessionKey)
-			sendChannelNotification(a.hub, msg.Channel, msg.ChatID,
-				fmt.Sprintf("🗑️ Cleared your %d session(s) (cancelled %d active turn(s)).", deleted, cancelled))
-			return
-		}
-		// Admin: global reset as before
 		const discordPrefix = "discord:"
 		cancelled := 0
 		a.mu.Lock()
@@ -1608,13 +1226,8 @@ func (a *AgentLoop) dispatchMessage(ctx context.Context, msg chat.Inbound) {
 	}
 
 	// Handle /resetall — kill ALL sessions except the one this was sent from.
-	// ADMIN ONLY: in multi-tenant mode, non-admin users get a rejection.
+	// Works from any channel; typically used from Telegram by the owner.
 	if strings.TrimSpace(msg.Content) == "/resetall" {
-		if !a.isUserAdmin(msg) {
-			sendChannelNotification(a.hub, msg.Channel, msg.ChatID,
-				"⛔ Access denied: /resetall is admin-only.")
-			return
-		}
 		// Cancel all active turns except the current session.
 		cancelled := 0
 		a.mu.Lock()
@@ -1830,8 +1443,7 @@ func (a *AgentLoop) dispatchMessage(ctx context.Context, msg chat.Inbound) {
 	trimmed := strings.TrimSpace(msg.Content)
 	if matches := rememberRE.FindStringSubmatch(trimmed); len(matches) == 2 {
 		note := matches[1]
-		mem, _ := a.resolveMemBrain(msg)
-		if err := mem.AppendToday(note); err != nil {
+		if err := a.memory.AppendToday(note); err != nil {
 			log.Printf("error appending to memory: %v", err)
 		}
 		out := chat.Outbound{Channel: msg.Channel, ChatID: msg.ChatID, Content: "OK, I've remembered that."}
@@ -1876,10 +1488,8 @@ func (a *AgentLoop) dispatchMessage(ctx context.Context, msg chat.Inbound) {
 	} else {
 		sess = a.sessions.GetOrCreate(signalSessionKey)
 	}
-	mem, br := a.resolveMemBrain(msg)
-	memCtx, _ := mem.GetMemoryContext()
-	memories := mem.Recent(5)
-	brainCtx := a.searchBrain(br, msg)
+	memCtx, _ := a.memory.GetMemoryContext()
+	memories := a.memory.Recent(5)
 	userContent := msg.Content
 	if len(msg.Media) > 0 {
 		// List attached file paths so the model can use the vision tool on images
@@ -1888,7 +1498,7 @@ func (a *AgentLoop) dispatchMessage(ctx context.Context, msg chat.Inbound) {
 			userContent += "\n- " + p
 		}
 	}
-	messages := a.context.BuildMessages(sess.GetHistory(), userContent, msg.Channel, msg.ChatID, msg.SenderID, memCtx, memories, brainCtx, msg.Metadata)
+	messages := a.context.BuildMessages(sess.GetHistory(), userContent, msg.Channel, msg.ChatID, msg.SenderID, memCtx, memories, msg.Metadata)
 
 	// For signals, do NOT cancel the active interactive turn — run in parallel.
 	// For regular user messages, queue if a turn is already running (don't interrupt).
@@ -1902,23 +1512,6 @@ func (a *AgentLoop) dispatchMessage(ctx context.Context, msg chat.Inbound) {
 		log.Printf("Turn active for %s — message queued (%d pending)", sessionKey, len(a.pending[sessionKey]))
 		sendChannelNotification(a.hub, msg.Channel, msg.ChatID, "📥 Message queued — will be processed after the current task.", msg.Metadata)
 		return
-	}
-
-	// Multi-tenant rate limit check for non-signal messages.
-	// Signals bypass rate limits (they are system-initiated).
-	if !isSignal && a.userManager != nil {
-		uctx := a.resolveUserContext(msg)
-		if uctx != nil {
-			allowed, reason := uctx.CanStartTurn()
-			if !allowed {
-				log.Printf("Rate limit: user %s blocked — %s", a.resolveUserID(msg), reason)
-				sendChannelNotification(a.hub, msg.Channel, msg.ChatID,
-					fmt.Sprintf("⏳ Rate limit reached (%s). Please try again later.", reason), msg.Metadata)
-				return
-			}
-			// Reserve the turn — will be decremented when the turn goroutine finishes.
-			uctx.BeginTurn()
-		}
 	}
 
 	// Create a cancellable context for this turn
@@ -1936,14 +1529,6 @@ func (a *AgentLoop) dispatchMessage(ctx context.Context, msg chat.Inbound) {
 	go func() {
 		defer close(at.done)
 		defer turnCancel()
-
-		// Ensure rate limit turn is decremented when the turn finishes.
-		if !isSignal && a.userManager != nil {
-			uctx := a.resolveUserContext(msg)
-			if uctx != nil {
-				defer uctx.EndTurn()
-			}
-		}
 
 		result := a.processTurn(turnCtx, at, signalSessionKey, msg, sess, messages)
 
@@ -1992,38 +1577,10 @@ func isSignalMessage(msg chat.Inbound) bool {
 }
 
 func (a *AgentLoop) processTurn(ctx context.Context, at *activeTurn, sessionKey string, msg chat.Inbound, sess *session.Session, messages []providers.Message) string {
-	// Inject per-user workspace into context for multi-tenant tool isolation.
-	// In single-tenant mode, resolveUserWorkspace returns "" and tools use their default.
-	if userWS := a.resolveUserWorkspace(msg); userWS != "" {
-		ctx = tools.WithWorkspace(ctx, userWS)
-		// Inject per-user brain and memory instances for multi-tenant isolation.
-		if a.resourcePool != nil {
-			uid := a.resolveUserID(msg)
-			userMem, userBrain := a.resourcePool.Get(uid, userWS)
-			ctx = tools.WithResources(ctx, userMem, userBrain)
-		}
-	}
-
 	iteration := 0
 	finalContent := ""
 	lastToolResult := ""
-	// Tool definitions are resolved per-iteration via resolveToolDefs() so that
-	// dynamic tool changes (MCP add/remove, tier filtering) are picked up live.
-
-	// Audit: record inbound message
-	if a.auditStore != nil {
-		a.auditStore.RecordMessage(audit.MessageRecord{
-			UserID:    a.resolveUserID(msg),
-			Channel:   msg.Channel,
-			Direction: "inbound",
-			Content:   msg.Content,
-			SessionKey: sessionKey,
-		}, a.auditCfg)
-	}
-
-	// Track cumulative token usage for this turn
-	var turnTokensIn, turnTokensOut int
-	var toolCallCount int
+	toolDefs := a.tools.Definitions()
 
 	// userMsgIdx is the index of the current user message in the messages slice.
 	// BuildMessages always puts it last. We need this for trimTurnMessages.
@@ -2104,15 +1661,8 @@ func (a *AgentLoop) processTurn(ctx context.Context, at *activeTurn, sessionKey 
 			log.Printf("agent: checkpoint save: %v", err)
 		}
 
-		// Resolve tool definitions fresh each iteration so dynamic changes
-		// (MCP add/remove, tier filtering) are reflected without restart.
-		toolDefs := a.resolveToolDefs(msg)
-
 		// Use vision model if images are present (from user message or tool results)
-		provider := a.resolveProvider(msg)
-		model := a.resolveModel(msg)
-
-		resp, err := provider.Chat(ctx, messages, toolDefs, model)
+		resp, err := a.provider.Chat(ctx, messages, toolDefs, a.model)
 		if err != nil {
 			// Check if it was cancelled
 			select {
@@ -2137,8 +1687,6 @@ func (a *AgentLoop) processTurn(ctx context.Context, at *activeTurn, sessionKey 
 			// valid arguments.
 			log.Printf("WARNING: turn %s iter %d — LLM tool calls had parse errors (finish_reason=%s), injecting feedback",
 				sessionKey, iteration, resp.FinishReason)
-			turnTokensIn += resp.Usage.PromptTokens
-			turnTokensOut += resp.Usage.CompletionTokens
 			if resp.Content != "" {
 				messages = append(messages, providers.Message{Role: "assistant", Content: resp.Content})
 			}
@@ -2154,11 +1702,8 @@ func (a *AgentLoop) processTurn(ctx context.Context, at *activeTurn, sessionKey 
 		} else if resp.HasToolCalls {
 			// append assistant message with tool_calls attached
 			messages = append(messages, providers.Message{Role: "assistant", Content: resp.Content, ToolCalls: resp.ToolCalls})
-			turnTokensIn += resp.Usage.PromptTokens
-			turnTokensOut += resp.Usage.CompletionTokens
 			// execute each tool call and return results with "tool" role
 			for _, tc := range resp.ToolCalls {
-				toolCallCount++
 				// Check for cancellation between tool calls
 				select {
 				case <-ctx.Done():
@@ -2218,8 +1763,7 @@ func (a *AgentLoop) processTurn(ctx context.Context, at *activeTurn, sessionKey 
 
 				// Auto-populate short-term memory with tool results so the ranker
 				// has useful context for future queries.
-				mem, _ := a.resolveMemBrain(msg)
-				a.captureToolMemory(tc.Name, toolResultForLLM, mem)
+				a.captureToolMemory(tc.Name, toolResultForLLM)
 
 				toolMsg := providers.Message{Role: "tool", Content: toolResultForLLM, ToolCallID: tc.ID}
 				messages = append(messages, toolMsg)
@@ -2228,8 +1772,6 @@ func (a *AgentLoop) processTurn(ctx context.Context, at *activeTurn, sessionKey 
 			continue
 		} else {
 			finalContent = resp.Content
-			turnTokensIn += resp.Usage.PromptTokens
-			turnTokensOut += resp.Usage.CompletionTokens
 			break
 		}
 	}
@@ -2274,8 +1816,7 @@ done:
 					log.Printf("extractTurnMemory panic recovered: %v", r)
 				}
 			}()
-			mem, br := a.resolveMemBrain(msg)
-			a.extractTurnMemory(msg.Content, finalContent, toolCallLog, msg.Channel, msg.SenderID, mem, br)
+			a.extractTurnMemory(msg.Content, finalContent, toolCallLog, msg.Channel, msg.SenderID)
 		}()
 	}
 
@@ -2309,30 +1850,6 @@ done:
 	default:
 		log.Printf("WARNING: Outbound channel full, DROPPING reply (%d chars) for %s/%s", len(finalContent), msg.Channel, msg.ChatID)
 	}
-	// Audit: record outbound message and token usage for this turn.
-	if a.auditStore != nil {
-		uid := a.resolveUserID(msg)
-		a.auditStore.RecordMessage(audit.MessageRecord{
-			UserID:     uid,
-			Channel:    msg.Channel,
-			Direction:  "outbound",
-			Content:    finalContent,
-			SessionKey: sessionKey,
-			ToolCalls:  toolCallCount,
-			TokensIn:   turnTokensIn,
-			TokensOut:  turnTokensOut,
-		}, a.auditCfg)
-		if turnTokensIn > 0 || turnTokensOut > 0 {
-			a.auditStore.RecordUsage(audit.UsageRecord{
-				UserID:   uid,
-				Model:    a.model,
-				TokensIn: turnTokensIn,
-				TokensOut: turnTokensOut,
-				Channel:  msg.Channel,
-			})
-		}
-	}
-
 	return finalContent
 }
 
@@ -2388,14 +1905,6 @@ func (a *AgentLoop) ProcessDirectWithSessionAndSystemPrompt(content string, time
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	// Inject per-user workspace if set by the API gateway (multi-tenant mode).
-	a.requestWorkspaceMu.RLock()
-	reqWS := a.requestWorkspace
-	a.requestWorkspaceMu.RUnlock()
-	if reqWS != "" {
-		ctx = tools.WithWorkspace(ctx, reqWS)
-	}
-
 	// Set tool context so message/cron tools know the originating channel,
 	// matching what Run() does for hub-based messages.
 	if mt := a.tools.Get("message"); mt != nil {
@@ -2417,21 +1926,9 @@ func (a *AgentLoop) ProcessDirectWithSessionAndSystemPrompt(content string, time
 	}
 
 	// Build full context (bootstrap files, skills, memory) just like the main loop
-	mem, br := a.resolveMemBrainForDirect()
-	memCtx, _ := mem.GetMemoryContext()
-	memories := mem.Recent(5)
-	brainCtx := ""
-	if br != nil {
-		results, err := br.Search(ctx, content, brain.SearchOpts{Limit: 5})
-		if err == nil && len(results) > 0 {
-			var sb strings.Builder
-			for _, r := range results {
-				sb.WriteString(fmt.Sprintf("- [%s] %s: %s\n", r.Type, r.Title, r.Snippet))
-			}
-			brainCtx = sb.String()
-		}
-	}
-	messages := a.context.BuildMessages(history, content, "cli", "direct", "", memCtx, memories, brainCtx, nil)
+	memCtx, _ := a.memory.GetMemoryContext()
+	memories := a.memory.Recent(5)
+	messages := a.context.BuildMessages(history, content, "cli", "direct", "", memCtx, memories, nil)
 
 	// Override system prompt if provided (used by benchmarks)
 	if systemPromptOverride != "" && len(messages) > 0 && messages[0].Role == "system" {
@@ -2457,7 +1954,7 @@ func (a *AgentLoop) ProcessDirectWithSessionAndSystemPrompt(content string, time
 			userMsgIdx = 1
 		}
 
-		resp, err := a.provider.Chat(ctx, messages, a.resolveToolDefs(chat.Inbound{}), a.resolveModel(chat.Inbound{}))
+		resp, err := a.provider.Chat(ctx, messages, a.tools.Definitions(), a.model)
 		if err != nil {
 			return "", err
 		}

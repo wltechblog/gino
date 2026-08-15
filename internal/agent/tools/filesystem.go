@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
 
 	"github.com/wltechblog/gino/internal/config"
 )
@@ -18,20 +17,10 @@ import (
 //
 // Multiple roots can be opened for different allowed directories.
 // Paths are matched to the most specific (longest) matching root.
-//
-// In multi-tenant mode, a workspace path can be injected via context
-// (see WithWorkspace). When present, a per-workspace os.Root is opened
-// and cached for the duration of the process.
 type FilesystemTool struct {
 	roots   []*os.Root
 	rootDir string   // primary workspace (for relative paths)
 	dirs    []string // sorted longest-first for matching
-	sandbox config.SandboxConfig
-
-	// Per-user workspace root cache (multi-tenant mode)
-	mu          sync.Mutex
-	userRoots   map[string]*os.Root // path → root handle
-	userAllowed []string            // allowed dirs from config (applied per-user workspace)
 }
 
 // NewFilesystemTool opens os.Root handles for the workspace and any extra
@@ -47,10 +36,7 @@ func NewFilesystemTool(workspaceDir string, allowedDirs []string, sandbox config
 	}
 
 	ft := &FilesystemTool{
-		rootDir:     absWorkspace,
-		sandbox:     sandbox,
-		userRoots:   make(map[string]*os.Root),
-		userAllowed: allowedDirs,
+		rootDir: absWorkspace,
 	}
 
 	// Collect all directories: workspace + allowed
@@ -100,7 +86,7 @@ func NewFilesystemTool(workspaceDir string, allowedDirs []string, sandbox config
 	return ft, nil
 }
 
-// Close releases all underlying os.Root file descriptors, including cached per-user roots.
+// Close releases all underlying os.Root file descriptors.
 func (t *FilesystemTool) Close() error {
 	var firstErr error
 	for _, r := range t.roots {
@@ -108,14 +94,6 @@ func (t *FilesystemTool) Close() error {
 			firstErr = err
 		}
 	}
-	t.mu.Lock()
-	for _, r := range t.userRoots {
-		if err := r.Close(); err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
-	t.userRoots = nil
-	t.mu.Unlock()
 	return firstErr
 }
 
@@ -152,72 +130,10 @@ func canonicalDir(dir string) (string, error) {
 	return filepath.Clean(abs), nil
 }
 
-// getEffectiveWorkspace returns the workspace path from context (multi-tenant)
-// or falls back to the default workspace (single-tenant).
-func (t *FilesystemTool) getEffectiveWorkspace(ctx context.Context) string {
-	if ws := WorkspaceFromContext(ctx); ws != "" {
-		return ws
-	}
-	return t.rootDir
-}
-
-// getUserRoot opens (and caches) an os.Root for the given workspace path.
-// In multi-tenant mode, this is used to isolate each user's workspace.
-func (t *FilesystemTool) getUserRoot(wsPath string) (*os.Root, error) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	if root, ok := t.userRoots[wsPath]; ok {
-		return root, nil
-	}
-
-	root, err := os.OpenRoot(wsPath)
-	if err != nil {
-		return nil, fmt.Errorf("filesystem: open user workspace root %q: %w", wsPath, err)
-	}
-	t.userRoots[wsPath] = root
-	return root, nil
-}
-
 // resolve finds the matching root and returns (root, relativePath).
 // For absolute paths, it matches against the allowed directories.
 // For relative paths, it uses the primary workspace root.
-//
-// In multi-tenant mode (workspace injected via context), relative paths
-// are resolved against the per-user workspace root.
-func (t *FilesystemTool) resolve(ctx context.Context, pathStr string) (*os.Root, string, error) {
-	// Check for per-turn workspace override (multi-tenant mode)
-	userWS := WorkspaceFromContext(ctx)
-	if userWS != "" && userWS != t.rootDir {
-		// Multi-tenant mode: relative paths resolve to user workspace
-		if !strings.HasPrefix(pathStr, "/") {
-			root, err := t.getUserRoot(userWS)
-			if err != nil {
-				return nil, "", err
-			}
-			return root, pathStr, nil
-		}
-
-		// Absolute path: check if it's within the user workspace or global allowed dirs
-		cleaned := filepath.Clean(pathStr)
-
-		// Check against user workspace
-		if cleaned == userWS || strings.HasPrefix(cleaned, userWS+string(filepath.Separator)) {
-			root, err := t.getUserRoot(userWS)
-			if err != nil {
-				return nil, "", err
-			}
-			rel := strings.TrimPrefix(cleaned, userWS+string(filepath.Separator))
-			if rel == "" {
-				rel = "."
-			}
-			return root, rel, nil
-		}
-
-		// Fall through to global allowed directories (e.g. /tmp, shared tools)
-	}
-
-	// Default resolve: absolute path matching against configured dirs
+func (t *FilesystemTool) resolve(pathStr string) (*os.Root, string, error) {
 	if !strings.HasPrefix(pathStr, "/") {
 		// Relative path — use workspace (first matching root)
 		return t.roots[0], pathStr, nil
@@ -302,7 +218,7 @@ func (t *FilesystemTool) Execute(ctx context.Context, args map[string]interface{
 		pathStr = "."
 	}
 
-	root, relPath, err := t.resolve(ctx, pathStr)
+	root, relPath, err := t.resolve(pathStr)
 	if err != nil {
 		return "", err
 	}

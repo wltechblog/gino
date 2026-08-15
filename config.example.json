@@ -8,40 +8,31 @@
       "maxToolIterations": 50,
       "heartbeatIntervalS": 30,
       "requestTimeoutS": 300,
-
       "maxRetries": 2,
       "retryBaseWaitS": 2,
-
       "visionModel": "",
-
       "enableToolActivityIndicator": true,
       "enableToolCallMessages": false,
       "enableToolErrorMessages": true,
-
       "maxTurnMessages": 0,
       "maxToolResultChars": 0,
-
       "allowedDirs": [],
       "disableTools": [],
-
       "sandbox": {
         "mode": "strict",
         "allowedCommands": [],
         "allowAbsolutePaths": false,
         "allowStringCommands": false
       },
-
       "web": {
         "timeoutS": 30,
         "maxResponseBytes": 1048576,
         "userAgent": ""
       },
-
       "search": {
         "provider": "duckduckgo",
         "braveApiKey": ""
       },
-
       "compaction": {
         "enabled": false,
         "maxContextTokens": 0,
@@ -51,13 +42,11 @@
       }
     }
   },
-
   "providers": {
     "openai": {
       "apiKey": "YOUR_API_KEY",
       "apiBase": "https://api.z.ai/api/coding/paas/v4"
     },
-
     "fallbacks": [
       {
         "name": "backup",
@@ -69,15 +58,15 @@
       }
     ]
   },
-
   "channels": {
     "telegram": {
       "enabled": true,
       "token": "YOUR_TELEGRAM_BOT_TOKEN",
-      "allowFrom": ["YOUR_TELEGRAM_USER_ID"],
+      "allowFrom": [
+        "YOUR_TELEGRAM_USER_ID"
+      ],
       "monitorGroups": []
     },
-
     "discord": {
       "enabled": false,
       "token": "YOUR_DISCORD_BOT_TOKEN",
@@ -91,7 +80,6 @@
       "rateLimitTotalHour": 0
     }
   },
-
   "brain": {
     "enabled": false,
     "embeddingModel": "nomic-embed-text",
@@ -101,7 +89,6 @@
     "remoteApiKey": "",
     "remoteModel": ""
   },
-
   "signal": {
     "enabled": false,
     "socketPath": "",
@@ -115,11 +102,12 @@
       }
     }
   },
-
   "mcpServers": {
     "example-stdio": {
       "command": "node",
-      "args": ["/path/to/server.js"],
+      "args": [
+        "/path/to/server.js"
+      ],
       "env": {
         "API_KEY": "example"
       }
@@ -130,63 +118,5 @@
         "Authorization": "Bearer YOUR_TOKEN"
       }
     }
-  },
-
-  "audit": {
-    "enabled": true,
-    "dbPath": "",
-    "messageRetentionDays": 7,
-    "maxContentLen": 4096,
-    "usageRetentionDays": 365
-  },
-
-  "tenant": {
-    "enabled": false,
-    "workspaceRoot": "",
-    "defaultTier": "default",
-    "evictionTimeoutMinutes": 30,
-    "tiers": [
-      {
-        "name": "default",
-        "maxToolIterations": 100,
-        "allowedTools": ["*"],
-        "rateLimitPerHour": 0,
-        "rateLimitPerDay": 0,
-        "maxConcurrentTurns": 1,
-        "sandbox": "yolo"
-      },
-      {
-        "name": "free",
-        "maxToolIterations": 25,
-        "allowedTools": ["filesystem", "web_search", "brain_search"],
-        "disableTools": ["exec"],
-        "rateLimitPerHour": 10,
-        "rateLimitPerDay": 100,
-        "maxConcurrentTurns": 1,
-        "maxWorkspaceBytes": 104857600,
-        "sandbox": "strict"
-      },
-      {
-        "name": "pro",
-        "maxToolIterations": 100,
-        "allowedTools": ["*"],
-        "rateLimitPerHour": 100,
-        "rateLimitPerDay": 0,
-        "maxConcurrentTurns": 1,
-        "sandbox": "yolo"
-      }
-    ],
-    "users": [
-      {
-        "id": "admin",
-        "displayName": "Admin User",
-        "tier": "default",
-        "token": "your-secure-api-token-here",
-        "channels": {
-          "telegram": "123456789",
-          "discord": "987654321"
-        }
-      }
-    ]
   }
 }

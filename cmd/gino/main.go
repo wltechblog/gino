@@ -15,8 +15,6 @@ import (
 
 	"github.com/wltechblog/gino/internal/agent"
 	"github.com/wltechblog/gino/internal/agent/memory"
-	"github.com/wltechblog/gino/internal/api"
-	"github.com/wltechblog/gino/internal/audit"
 	"github.com/wltechblog/gino/internal/channels"
 	"github.com/wltechblog/gino/internal/chat"
 	"github.com/wltechblog/gino/internal/config"
@@ -24,7 +22,6 @@ import (
 	"github.com/wltechblog/gino/internal/heartbeat"
 	"github.com/wltechblog/gino/internal/providers"
 	picosignal "github.com/wltechblog/gino/internal/signal"
-	"github.com/wltechblog/gino/internal/tenant"
 	"github.com/wltechblog/gino/internal/tui"
 )
 
@@ -412,167 +409,9 @@ func runGateway(homeFlag string, args []string) {
 		signalSocketPath = cfg.Signal.GetSocketPath(homeDir, ws)
 	}
 
-	// ─── Audit Trail ───────────────────────────────────────────────────
-	var auditStore *audit.Store
-	var auditCfg audit.Config
-	if cfg.Audit != nil && cfg.Audit.Enabled {
-		auditCfg = audit.Config{
-			Enabled:              true,
-			DBPath:               cfg.Audit.DBPath,
-			MessageRetentionDays: cfg.Audit.MessageRetentionDays,
-			MaxContentLen:        cfg.Audit.MaxContentLen,
-			UsageRetentionDays:   cfg.Audit.UsageRetentionDays,
-		}
-		if auditCfg.DBPath == "" {
-			auditCfg.DBPath = filepath.Join(homeDir, "audit.db")
-		}
-		if auditCfg.MessageRetentionDays == 0 {
-			auditCfg.MessageRetentionDays = 7
-		}
-		if auditCfg.MaxContentLen == 0 {
-			auditCfg.MaxContentLen = 4096
-		}
-		if auditCfg.UsageRetentionDays == 0 {
-			auditCfg.UsageRetentionDays = 365
-		}
-		var err error
-		auditStore, err = audit.New(auditCfg)
-		if err != nil {
-			log.Printf("warning: audit store init failed, continuing without audit: %v", err)
-			auditStore = nil
-		}
-	}
-
-	// ─── Multi-Tenant Setup ────────────────────────────────────────────
-	var userMgr *tenant.UserManager
-	var tenantStore *tenant.Store
-	if cfg.Tenant != nil && cfg.Tenant.Enabled {
-		wsRoot := cfg.Tenant.WorkspaceRoot
-		if wsRoot == "" {
-			wsRoot = filepath.Join(ws, "users")
-		}
-		userMgr = tenant.NewUserManager(wsRoot)
-
-		// Open persistent store for admin API
-		storePath := filepath.Join(homeDir, "tenant.db")
-		ts, err := tenant.OpenStore(storePath)
-		if err != nil {
-			log.Printf("warning: tenant store init failed, continuing without persistence: %v", err)
-		} else {
-			tenantStore = ts
-			defer ts.Close()
-		}
-
-		// Register tiers from config first
-		for _, tc := range cfg.Tenant.Tiers {
-			tier := &tenant.Tier{
-				Name:               tc.Name,
-				MaxToolIterations:  tc.MaxToolIterations,
-				MaxContextTokens:   tc.MaxContextTokens,
-				AllowedTools:       tc.AllowedTools,
-				DisableTools:       tc.DisableTools,
-				RateLimitPerHour:   tc.RateLimitPerHour,
-				RateLimitPerDay:    tc.RateLimitPerDay,
-				MaxConcurrentTurns: tc.MaxConcurrentTurns,
-				MaxWorkspaceBytes:  tc.MaxWorkspaceBytes,
-				MaxFileUploadBytes: tc.MaxFileUploadBytes,
-				Model:              tc.Model,
-				Sandbox:            tc.Sandbox,
-				AllowedMCP:         tc.AllowedMCP,
-			}
-			userMgr.RegisterTier(tier)
-		}
-
-		// Then load persisted tiers from the store (overrides config if present)
-		if tenantStore != nil {
-			persistedTiers, err := tenantStore.LoadTiers()
-			if err != nil {
-				log.Printf("warning: failed to load persisted tiers: %v", err)
-			} else {
-				for _, ptc := range persistedTiers {
-					tier := &tenant.Tier{
-						Name:               ptc.Name,
-						MaxToolIterations:  ptc.MaxToolIterations,
-						MaxContextTokens:   ptc.MaxContextTokens,
-						AllowedTools:       ptc.AllowedTools,
-						DisableTools:       ptc.DisableTools,
-						RateLimitPerHour:   ptc.RateLimitPerHour,
-						RateLimitPerDay:    ptc.RateLimitPerDay,
-						MaxConcurrentTurns: ptc.MaxConcurrentTurns,
-						MaxWorkspaceBytes:  ptc.MaxWorkspaceBytes,
-						MaxFileUploadBytes: ptc.MaxFileUploadBytes,
-						Model:              ptc.Model,
-						Sandbox:            ptc.Sandbox,
-						AllowedMCP:         ptc.AllowedMCP,
-					}
-					userMgr.RegisterTier(tier)
-				}
-				if len(persistedTiers) > 0 {
-					log.Printf("tenant: loaded %d tiers from store", len(persistedTiers))
-				}
-			}
-		}
-
-		// Register users from config
-		for _, uc := range cfg.Tenant.Users {
-			_, err := userMgr.RegisterUser(tenant.UserConfig{
-				ID:                uc.ID,
-				DisplayName:       uc.DisplayName,
-				Tier:              uc.Tier,
-				Token:             uc.Token,
-				Channels:          uc.Channels,
-				WorkspaceOverride: uc.WorkspaceOverride,
-				Admin:             uc.Admin || uc.Tier == "admin",
-				Permanent:         true, // config-seeded users are never evicted
-				CreatedAt:         time.Now(),
-			})
-			if err != nil {
-				log.Printf("warning: failed to register user %q: %v", uc.ID, err)
-			}
-		}
-
-		// Then load persisted users from the store
-		if tenantStore != nil {
-			persistedUsers, err := tenantStore.LoadUsers()
-			if err != nil {
-				log.Printf("warning: failed to load persisted users: %v", err)
-			} else {
-				for _, uc := range persistedUsers {
-					if _, err := userMgr.RegisterUser(uc); err != nil {
-						log.Printf("warning: failed to register persisted user %q: %v", uc.ID, err)
-					}
-				}
-				if len(persistedUsers) > 0 {
-					log.Printf("tenant: loaded %d users from store", len(persistedUsers))
-				}
-			}
-		}
-
-		// Wire store for eviction recovery
-		if tenantStore != nil {
-			userMgr.SetStore(tenantStore)
-		}
-
-		// Configure eviction timeout
-		if cfg.Tenant.EvictionTimeoutMinutes > 0 {
-			userMgr.SetEvictionTimeout(time.Duration(cfg.Tenant.EvictionTimeoutMinutes) * time.Minute)
-		}
-		userMgr.StartEviction()
-		defer userMgr.StopEviction()
-
-		log.Printf("tenant: multi-user mode enabled (workspace root: %s)", wsRoot)
-	}
-
 	ag := agent.NewAgentLoop(hub, provider, model, maxIter, ws, scheduler, cfg.MCPServers, cfg.Agents.Defaults.AllowedDirs, cfg.Agents.Defaults.DisableTools, cfg.Brain, homeDir, cfg.Agents.Defaults.Sandbox, signalSocketPath, cfg.Agents.Defaults.MaxTurnMessages, cfg.Agents.Defaults.MaxToolResultChars, cfg.Agents.Defaults.Compaction, cfg.Agents.Defaults.Web, cfg.Agents.Defaults.Search, cfg.Agents.Defaults.VisionModel)
 	defer ag.Close()
 
-	// Wire audit + tenant into the agent loop
-	if auditStore != nil {
-		ag.SetAuditStore(auditStore, auditCfg)
-	}
-	if userMgr != nil {
-		ag.SetUserManager(userMgr)
-	}
 	if cfg.Agents.Defaults.EnableToolActivityIndicator != nil {
 		ag.SetToolActivityIndicator(*cfg.Agents.Defaults.EnableToolActivityIndicator)
 	}
@@ -626,87 +465,15 @@ func runGateway(homeFlag string, args []string) {
 		}
 	}
 
-	if cfg.Channels.API.Enabled {
-		apiAddr := cfg.Channels.API.Addr
-		if apiAddr == "" {
-			apiAddr = ":8443"
-		}
-		apiServer := api.New(hub, api.ServerConfig{
-			Addr:            apiAddr,
-			Auth:            api.AuthConfig{Tokens: cfg.Channels.API.Tokens, AllowAnon: cfg.Channels.API.AllowAnon},
-			RequestTimeoutS: cfg.Agents.Defaults.RequestTimeoutS,
-			Model:           model,
-			MaxIterations:   maxIter,
-			VisionSupported: cfg.Agents.Defaults.VisionModel != "",
-		}, version)
-		ag.SetToolListProvider(apiServer)
-		if userMgr != nil {
-			apiServer.SetUserManager(userMgr)
-		}
-		if tenantStore != nil {
-			apiServer.SetStore(tenantStore)
-		}
-		// Wire dynamic provider management
-		var providerMgr *providers.ProviderManager
-		if tenantStore != nil {
-			providerMgr = providers.NewProviderManager(tenantStore.DB())
-		} else {
-			providerMgr = providers.NewProviderManager(nil)
-		}
-		// Seed from config on first run
-		if providerMgr.IsEmpty() && cfg.Providers.OpenAI != nil {
-			fbs := make([]struct {
-				Name, APIKey, APIBase, Model, RecoverAfter string
-				MaxTokens                                 int
-			}, len(cfg.Providers.Fallbacks))
-			for i, f := range cfg.Providers.Fallbacks {
-				fbs[i] = struct {
-					Name, APIKey, APIBase, Model, RecoverAfter string
-					MaxTokens                                 int
-				}{f.Name, f.APIKey, f.APIBase, f.Model, f.RecoverAfter, f.MaxTokens}
-			}
-			providerMgr.SeedFromConfig(cfg.Providers.OpenAI.APIKey, cfg.Providers.OpenAI.APIBase, fbs)
-			log.Printf("providers: seeded from config (%d provider(s))", len(providerMgr.ListProviders()))
-		}
-		apiServer.SetProviderManager(providerMgr)
-		apiServer.SetAgentLoop(ag)
-		go func() {
-			if err := apiServer.Start(ctx); err != nil {
-				log.Fatalf("API: %v", err)
-			}
-		}()
-	}
-
 	// Start the router AFTER all subscribers are registered.
 	// IMPORTANT: Do NOT read from hub.Out directly anywhere else — the router
 	// is the sole consumer of hub.Out and dispatches to channel subscribers.
 	hub.StartRouter(ctx)
 
-	// Periodic audit purge goroutine — runs hourly to clean up old records.
-	if auditStore != nil {
-		go func() {
-			ticker := time.NewTicker(1 * time.Hour)
-			defer ticker.Stop()
-			auditStore.PurgeOld(auditCfg.MessageRetentionDays, auditCfg.UsageRetentionDays)
-			for {
-				select {
-				case <-ticker.C:
-					auditStore.PurgeOld(auditCfg.MessageRetentionDays, auditCfg.UsageRetentionDays)
-				case <-ctx.Done():
-					return
-				}
-			}
-		}()
-	}
-
 	log.Println("gateway started — waiting for messages")
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	<-sigCh
-	log.Println("shutting down...")
-	if auditStore != nil {
-		auditStore.Close()
-	}
 }
 
 // ─── signal send ────────────────────────────────────────────────────────────

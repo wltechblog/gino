@@ -203,18 +203,11 @@ type messageResponseJSON struct {
 	ToolCalls []toolCallJSON `json:"tool_calls,omitempty"`
 }
 
-type usageJSON struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
-}
-
 type chatResponse struct {
 	Choices []struct {
 		Message      messageResponseJSON `json:"message"`
 		FinishReason string              `json:"finish_reason"`
 	} `json:"choices"`
-	Usage usageJSON `json:"usage"`
 }
 
 // Chat calls an OpenAI-compatible chat completion endpoint and returns a simplified response.
@@ -393,8 +386,7 @@ func (p *OpenAIProvider) Chat(ctx context.Context, messages []Message, tools []T
 				if skipped > 0 {
 					log.Printf("WARNING: %d/%d tool calls were unparseable and dropped", skipped, len(msg.ToolCalls))
 				}
-				usage := UsageStats{PromptTokens: out.Usage.PromptTokens, CompletionTokens: out.Usage.CompletionTokens, TotalTokens: out.Usage.TotalTokens}
-				return LLMResponse{Content: strings.TrimSpace(msg.Content), HasToolCalls: true, ToolCalls: tcs, FinishReason: finishReason, Usage: usage}, nil
+				return LLMResponse{Content: strings.TrimSpace(msg.Content), HasToolCalls: true, ToolCalls: tcs, FinishReason: finishReason}, nil
 			}
 			// All tool calls were unparseable — don't silently end the turn.
 			// Signal the parse error so the loop can inject feedback to the LLM.
@@ -405,14 +397,12 @@ func (p *OpenAIProvider) Chat(ctx context.Context, messages []Message, tools []T
 					HasToolCalls:  false,
 					HadParseError: true,
 					FinishReason:  finishReason,
-					Usage:         UsageStats{PromptTokens: out.Usage.PromptTokens, CompletionTokens: out.Usage.CompletionTokens, TotalTokens: out.Usage.TotalTokens},
 				}, nil
 			}
 		}
 
 		// No tool calls
-		usage := UsageStats{PromptTokens: out.Usage.PromptTokens, CompletionTokens: out.Usage.CompletionTokens, TotalTokens: out.Usage.TotalTokens}
-		return LLMResponse{Content: strings.TrimSpace(msg.Content), HasToolCalls: false, FinishReason: finishReason, Usage: usage}, nil
+		return LLMResponse{Content: strings.TrimSpace(msg.Content), HasToolCalls: false, FinishReason: finishReason}, nil
 	}
 
 	// All retries exhausted

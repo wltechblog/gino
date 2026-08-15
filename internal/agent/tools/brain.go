@@ -42,8 +42,7 @@ func (t *BrainSearchTool) Parameters() map[string]interface{} {
 }
 
 func (t *BrainSearchTool) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
-	br := resolveBrain(ctx, t.brain)
-	if br == nil {
+	if t.brain == nil {
 		return "", fmt.Errorf("brain is not initialized")
 	}
 	query, _ := args["query"].(string)
@@ -55,7 +54,7 @@ func (t *BrainSearchTool) Execute(ctx context.Context, args map[string]interface
 		limit = int(l)
 	}
 
-	results, err := br.Search(ctx, query, brain.SearchOpts{Limit: limit})
+	results, err := t.brain.Search(ctx, query, brain.SearchOpts{Limit: limit})
 	if err != nil {
 		return "", fmt.Errorf("brain search failed: %w", err)
 	}
@@ -111,8 +110,7 @@ func (t *BrainIngestTool) Parameters() map[string]interface{} {
 }
 
 func (t *BrainIngestTool) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
-	br := resolveBrain(ctx, t.brain)
-	if br == nil {
+	if t.brain == nil {
 		return "", fmt.Errorf("brain is not initialized")
 	}
 	path, _ := args["path"].(string)
@@ -127,14 +125,14 @@ func (t *BrainIngestTool) Execute(ctx context.Context, args map[string]interface
 	}
 
 	if info.IsDir() {
-		n, err := br.IngestDir(ctx, sourceID, path)
+		n, err := t.brain.IngestDir(ctx, sourceID, path)
 		if err != nil {
 			return "", fmt.Errorf("ingest directory failed: %w", err)
 		}
 		return fmt.Sprintf("Imported %d new pages from %s", n, path), nil
 	}
 
-	_, err = br.IngestFile(ctx, sourceID, path)
+	_, err = t.brain.IngestFile(ctx, sourceID, path)
 	if err != nil {
 		return "", fmt.Errorf("ingest file failed: %w", err)
 	}
@@ -178,8 +176,7 @@ func (t *BrainEntityTool) Parameters() map[string]interface{} {
 }
 
 func (t *BrainEntityTool) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
-	br := resolveBrain(ctx, t.brain)
-	if br == nil {
+	if t.brain == nil {
 		return "", fmt.Errorf("brain is not initialized")
 	}
 	name, _ := args["name"].(string)
@@ -192,7 +189,7 @@ func (t *BrainEntityTool) Execute(ctx context.Context, args map[string]interface
 		depth = int(d)
 	}
 
-	entities, err := br.FindEntities(ctx, name, eType, 5)
+	entities, err := t.brain.FindEntities(ctx, name, eType, 5)
 	if err != nil || len(entities) == 0 {
 		return fmt.Sprintf("No entities found matching %q.", name), nil
 	}
@@ -201,7 +198,7 @@ func (t *BrainEntityTool) Execute(ctx context.Context, args map[string]interface
 	for _, e := range entities {
 		fmt.Fprintf(&sb, "## %s (%s)\nSlug: %s\n", e.Name, e.Type, e.Slug)
 
-		neighbors, edges, _ := br.GraphNeighbors(ctx, e.ID, depth)
+		neighbors, edges, _ := t.brain.GraphNeighbors(ctx, e.ID, depth)
 		if len(edges) > 0 {
 			sb.WriteString("\nRelationships:\n")
 			for _, edge := range edges {
@@ -235,11 +232,10 @@ func (t *BrainStatusTool) Description() string { return "Show knowledge brain st
 func (t *BrainStatusTool) Parameters() map[string]interface{} { return nil }
 
 func (t *BrainStatusTool) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
-	br := resolveBrain(ctx, t.brain)
-	if br == nil {
+	if t.brain == nil {
 		return "Brain is not initialized.", nil
 	}
-	stats, err := br.Stats(ctx)
+	stats, err := t.brain.Stats(ctx)
 	if err != nil {
 		return "", fmt.Errorf("brain stats failed: %w", err)
 	}
@@ -263,11 +259,10 @@ func (t *BrainMaintainTool) Description() string { return "Run brain maintenance
 func (t *BrainMaintainTool) Parameters() map[string]interface{} { return nil }
 
 func (t *BrainMaintainTool) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
-	br := resolveBrain(ctx, t.brain)
-	if br == nil {
+	if t.brain == nil {
 		return "Brain is not initialized.", nil
 	}
-	report, err := br.Maintain(ctx)
+	report, err := t.brain.Maintain(ctx)
 	if err != nil {
 		return "", fmt.Errorf("brain maintain failed: %w", err)
 	}

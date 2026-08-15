@@ -43,8 +43,7 @@ func (t *ListMemoryTool) Description() string {
 func (t *ListMemoryTool) Parameters() map[string]interface{} { return nil }
 
 func (t *ListMemoryTool) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
-	mem := resolveMemory(ctx, t.mem)
-	files, err := mem.ListFiles()
+	files, err := t.mem.ListFiles()
 	if err != nil {
 		return "", err
 	}
@@ -102,8 +101,7 @@ func (t *ReadMemoryTool) Execute(ctx context.Context, args map[string]interface{
 	if err != nil {
 		return "", err
 	}
-	mem := resolveMemory(ctx, t.mem)
-	content, err := mem.ReadFile(name)
+	content, err := t.mem.ReadFile(name)
 	if err != nil {
 		return "", err
 	}
@@ -168,8 +166,7 @@ func (t *EditMemoryTool) Execute(ctx context.Context, args map[string]interface{
 	if err != nil {
 		return "", err
 	}
-	mem := resolveMemory(ctx, t.mem)
-	content, err := mem.ReadFile(name)
+	content, err := t.mem.ReadFile(name)
 	if err != nil {
 		return "", err
 	}
@@ -177,7 +174,7 @@ func (t *EditMemoryTool) Execute(ctx context.Context, args map[string]interface{
 		return "", fmt.Errorf("edit_memory: text not found in %s", name)
 	}
 	updated := strings.ReplaceAll(content, oldText, newText)
-	if err := mem.WriteFile(name, updated); err != nil {
+	if err := t.mem.WriteFile(name, updated); err != nil {
 		return "", err
 	}
 	return fmt.Sprintf("edited %s", name), nil
@@ -221,8 +218,7 @@ func (t *DeleteMemoryTool) Execute(ctx context.Context, args map[string]interfac
 	if _, err := time.Parse("2006-01-02", target); err != nil {
 		return "", fmt.Errorf("delete_memory: target must be a date in YYYY-MM-DD format, got %q", target)
 	}
-	mem := resolveMemory(ctx, t.mem)
-	if err := mem.DeleteFile(target + ".md"); err != nil {
+	if err := t.mem.DeleteFile(target + ".md"); err != nil {
 		return "", err
 	}
 	return fmt.Sprintf("deleted %s.md", target), nil

@@ -29,20 +29,12 @@ type ToolCall struct {
 }
 
 // LLMResponse is a normalized response from a provider.
-// UsageStats holds token usage from an LLM API response.
-type UsageStats struct {
-	PromptTokens     int `json:"promptTokens,omitempty"`
-	CompletionTokens int `json:"completionTokens,omitempty"`
-	TotalTokens      int `json:"totalTokens,omitempty"`
-}
-
 type LLMResponse struct {
 	Content       string     `json:"content"`
 	HasToolCalls  bool       `json:"hasToolCalls"`
 	ToolCalls     []ToolCall `json:"toolCalls,omitempty"`
 	HadParseError bool       `json:"hadParseError,omitempty"` // tool calls were present but all failed to parse
 	FinishReason  string     `json:"finishReason,omitempty"`  // "stop", "length", "content_filter", etc.
-	Usage         UsageStats `json:"usage,omitempty"`         // token counts for billing/audit
 }
 
 // ReasoningEffortController is optionally implemented by providers that

@@ -297,7 +297,7 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]interface{}) (st
 			return "", errors.New("exec: string commands are disallowed; use array form (or enable yolo mode)")
 		}
 		// Resolve working directory
-		workDir, err := t.resolveWorkDir(ctx, args)
+		workDir, err := t.resolveWorkDir(args)
 		if err != nil {
 			return "", err
 		}
@@ -322,7 +322,7 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]interface{}) (st
 	}
 
 	// Resolve working directory
-	workDir, err := t.resolveWorkDir(ctx, args)
+	workDir, err := t.resolveWorkDir(args)
 	if err != nil {
 		return "", err
 	}
@@ -366,28 +366,7 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]interface{}) (st
 	return t.runCmd(ctx, "sh", []string{"-c", shellCmd}, workDir)
 }
 
-func (t *ExecTool) resolveWorkDir(ctx context.Context, args map[string]interface{}) (string, error) {
-	// In multi-tenant mode, default to the per-user workspace from context
-	if userWS := WorkspaceFromContext(ctx); userWS != "" {
-		workDir := userWS
-		if cwdRaw, ok := args["cwd"]; ok {
-			cwd, ok := cwdRaw.(string)
-			if !ok {
-				return workDir, nil
-			}
-			cleaned := filepath.Clean(cwd)
-			if t.isDirAllowed(cleaned) || cleaned == userWS || strings.HasPrefix(cleaned, userWS+string(filepath.Separator)) {
-				return cleaned, nil
-			}
-			if t.sandbox.IsYolo() {
-				return cleaned, nil
-			}
-			return "", fmt.Errorf("exec: cwd %q is not within an allowed directory", cwd)
-		}
-		return workDir, nil
-	}
-
-	// Single-tenant mode: use configured workspace
+func (t *ExecTool) resolveWorkDir(args map[string]interface{}) (string, error) {
 	workDir := t.allowedDir
 	if cwdRaw, ok := args["cwd"]; ok {
 		cwd, ok := cwdRaw.(string)

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/wltechblog/gino/internal/agent/memory"
 	"github.com/wltechblog/gino/internal/agent/skills"
+	"github.com/wltechblog/gino/internal/brain"
 	"github.com/wltechblog/gino/internal/providers"
 )
 
@@ -19,6 +21,7 @@ type ContextBuilder struct {
 	ranker           memory.Ranker
 	topK             int
 	skillsLoader     *skills.Loader
+	brain            *brain.Brain
 	oauthNotifier    func() map[string]string // returns server→authURL for pending OAuth
 }
 
@@ -40,6 +43,11 @@ func NewContextBuilderWithProfile(workspace, profileWorkspace string, r memory.R
 	}
 }
 
+// SetBrain attaches a knowledge brain for context enrichment.
+func (cb *ContextBuilder) SetBrain(b *brain.Brain) {
+	cb.brain = b
+}
+
 // SetOAuthNotifier attaches a function that returns pending OAuth server names
 // and their auth URLs. When non-empty, the system prompt will instruct the agent
 // to proactively surface them to the user.
@@ -47,7 +55,7 @@ func (cb *ContextBuilder) SetOAuthNotifier(fn func() map[string]string) {
 	cb.oauthNotifier = fn
 }
 
-func (cb *ContextBuilder) BuildMessages(history []string, currentMessage string, channel, chatID, senderID string, memoryContext string, memories []memory.MemoryItem, brainContext string, metadata map[string]interface{}) []providers.Message {
+func (cb *ContextBuilder) BuildMessages(history []string, currentMessage string, channel, chatID, senderID string, memoryContext string, memories []memory.MemoryItem, metadata map[string]interface{}) []providers.Message {
 	msgs := make([]providers.Message, 0, len(history)+2)
 
 	// Combine all system instructions into one message at position 0 to avoid errors in strict chat templates (e.g. llama.cpp)
@@ -167,9 +175,33 @@ Do NOT use: # headings, --- rulers, *-bullet-lists, --dash-lists, 1.-numbered-li
 		sysParts = append(sysParts, sb.String())
 	}
 
-	// Brain context enrichment — pre-computed by the caller (per-user in multi-tenant mode).
-	if brainContext != "" {
-		sysParts = append(sysParts, "Relevant Brain Context:\n"+brainContext)
+	// Brain context enrichment — search the knowledge brain for relevant info.
+	// For non-owner channels (e.g. Discord), scope search to the user's personal
+	// source first, then fall back to global.
+	if cb.brain != nil {
+		searchOpts := brain.SearchOpts{Limit: 5}
+
+		// Determine if this is an unprivileged user that needs user-scoped memory
+		isPrivileged := true
+		if metadata != nil {
+			if p, ok := metadata["privileged"].(bool); ok {
+				isPrivileged = p
+			}
+		}
+		if senderID != "" && channel != "cli" && !isPrivileged {
+			userSource := fmt.Sprintf("user:%s:%s", channel, senderID)
+			searchOpts.Sources = []string{userSource}
+		}
+
+		results, err := cb.brain.Search(context.Background(), currentMessage, searchOpts)
+		if err == nil && len(results) > 0 {
+			var brainSb strings.Builder
+			brainSb.WriteString("Relevant Brain Context:\n")
+			for _, r := range results {
+				fmt.Fprintf(&brainSb, "- [%s] %s: %s\n", r.Type, r.Title, r.Snippet)
+			}
+			sysParts = append(sysParts, brainSb.String())
+		}
 	}
 
 	// Pending OAuth notifications — if MCP servers need auth, tell the agent to

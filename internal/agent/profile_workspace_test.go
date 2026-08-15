@@ -41,7 +41,7 @@ func TestProfileProjectWorkspaceSeparation(t *testing.T) {
 	ag := NewAgentLoopWithProfileWorkspace(b, p, p.GetDefaultModel(), 3, project, profile, nil, nil, nil, nil, nil, "", config.SandboxConfig{}, "", 0, 0, nil, config.WebConfig{}, config.SearchConfig{}, "")
 	defer ag.Close()
 
-	sys := ag.context.BuildMessages(nil, "hello", "cli", "1", "", "", nil, "", nil)[0].Content
+	sys := ag.context.BuildMessages(nil, "hello", "cli", "1", "", "", nil, nil)[0].Content
 	if !strings.Contains(sys, "keep this identity") {
 		t.Fatalf("expected profile SOUL.md in context:\n%s", sys)
 	}
@@ -117,7 +117,7 @@ func TestNewAgentLoopKeepsSingleWorkspace(t *testing.T) {
 	ag := NewAgentLoop(b, p, p.GetDefaultModel(), 3, ws, nil, nil, nil, nil, nil, "", config.SandboxConfig{}, "", 0, 0, nil, config.WebConfig{}, config.SearchConfig{}, "")
 	defer ag.Close()
 
-	sys := ag.context.BuildMessages(nil, "hello", "cli", "1", "", "", nil, "", nil)[0].Content
+	sys := ag.context.BuildMessages(nil, "hello", "cli", "1", "", "", nil, nil)[0].Content
 	if strings.Contains(sys, "Profile SOUL.md") {
 		t.Fatal("NewAgentLoop should keep original bootstrap headings")
 	}

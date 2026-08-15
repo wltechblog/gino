@@ -8,8 +8,6 @@ type Config struct {
 	Providers  ProvidersConfig            `json:"providers"`
 	Brain      *BrainConfig               `json:"brain,omitempty"`
 	Signal     SignalConfig               `json:"signal"`
-	Tenant     *TenantConfig              `json:"tenant,omitempty"`
-	Audit      *AuditConfig               `json:"audit,omitempty"`
 }
 
 // BrainConfig configures the optional knowledge brain subsystem.
@@ -101,12 +99,12 @@ type AgentDefaults struct {
 	MaxToolIterations           int           `json:"maxToolIterations"`
 	HeartbeatIntervalS          int           `json:"heartbeatIntervalS"`
 	RequestTimeoutS             int           `json:"requestTimeoutS"`
-	MaxRetries                  int           `json:"maxRetries,omitempty"`    // retries per provider attempt (default: 2)
+	MaxRetries                  int           `json:"maxRetries,omitempty"`     // retries per provider attempt (default: 2)
 	RetryBaseWaitS              int           `json:"retryBaseWaitS,omitempty"` // base wait between retries in seconds (default: 2)
 	EnableToolActivityIndicator *bool         `json:"enableToolActivityIndicator,omitempty"`
-	EnableToolCallMessages     *bool         `json:"enableToolCallMessages,omitempty"`
-	EnableToolErrorMessages    *bool         `json:"enableToolErrorMessages,omitempty"`
-	VisionModel                string        `json:"visionModel,omitempty"`
+	EnableToolCallMessages      *bool         `json:"enableToolCallMessages,omitempty"`
+	EnableToolErrorMessages     *bool         `json:"enableToolErrorMessages,omitempty"`
+	VisionModel                 string        `json:"visionModel,omitempty"`
 	AllowedDirs                 []string      `json:"allowedDirs"`
 	DisableTools                []string      `json:"disableTools"`
 	Sandbox                     SandboxConfig `json:"sandbox"`
@@ -248,30 +246,6 @@ func (s SandboxConfig) AllowsStringCommands() bool {
 type ChannelsConfig struct {
 	Telegram TelegramConfig `json:"telegram"`
 	Discord  DiscordConfig  `json:"discord"`
-	API      APIConfig      `json:"api"`
-}
-
-// APIConfig configures the HTTP/SSE API gateway.
-// This enables mobile, desktop, and web apps to communicate with Gino
-// without relying on Telegram or Discord.
-type APIConfig struct {
-	// Enabled controls whether the API server starts.
-	Enabled bool `json:"enabled"`
-
-	// Addr is the listen address. Default: ":8443"
-	// Behind a reverse proxy (Caddy, nginx), use ":8080" or similar.
-	Addr string `json:"addr,omitempty"`
-
-	// Tokens maps API bearer tokens to user identifiers.
-	// e.g., {"abc123secret": "josh", "tok2": "alice"}
-	// Each key is a secret token; the value is the user ID for session scoping.
-	Tokens map[string]string `json:"tokens,omitempty"`
-
-	// AllowAnon skips token validation (development only).
-	AllowAnon bool `json:"allowAnon,omitempty"`
-
-	// RequestTimeoutS is the max seconds for sync chat requests. Default: 120
-	RequestTimeoutS int `json:"requestTimeoutS,omitempty"`
 }
 
 type DiscordConfig struct {
@@ -350,105 +324,4 @@ type FallbackConfig struct {
 	// the primary provider. Defaults to 5m. Set to "0s" to retry primary on
 	// every request (aggressive recovery).
 	RecoverAfter string `json:"recoverAfter,omitempty"`
-}
-
-// TenantConfig configures multi-tenant mode.
-// When enabled, Gino resolves each incoming message to a per-user context
-// with isolated workspace, tools, and resource limits.
-// When nil or disabled, Gino operates in single-user mode (backward compatible).
-type TenantConfig struct {
-	// Enabled turns on multi-tenant mode.
-	Enabled bool `json:"enabled"`
-
-	// WorkspaceRoot is the base directory for per-user workspaces.
-	// User workspaces are created at {workspaceRoot}/{userID}.
-	// Default: {agents.defaults.workspace}/users
-	WorkspaceRoot string `json:"workspaceRoot,omitempty"`
-
-	// DefaultTier is the tier assigned to users without an explicit tier.
-	// Default: "default"
-	DefaultTier string `json:"defaultTier,omitempty"`
-
-	// EvictionTimeoutMinutes controls how long after last activity a user
-	// context is evicted from memory. Default: 30.
-	EvictionTimeoutMinutes int `json:"evictionTimeoutMinutes,omitempty"`
-
-	// Tiers defines the available tier levels.
-	Tiers []TierConfig `json:"tiers,omitempty"`
-
-	// Users defines known users. For dynamic provisioning (e.g., API tokens
-	// that map to users), use a UserFactory in the UserManager instead.
-	Users []TenantUserConfig `json:"users,omitempty"`
-}
-
-// TierConfig defines a single tier level from configuration.
-type TierConfig struct {
-	Name                 string         `json:"name"`
-	MaxToolIterations    int            `json:"maxToolIterations,omitempty"`
-	MaxContextTokens     int            `json:"maxContextTokens,omitempty"`
-	AllowedTools         []string       `json:"allowedTools,omitempty"`
-	DisableTools         []string       `json:"disableTools,omitempty"`
-	RateLimitPerHour     int            `json:"rateLimitPerHour,omitempty"`
-	RateLimitPerDay      int            `json:"rateLimitPerDay,omitempty"`
-	MaxConcurrentTurns   int            `json:"maxConcurrentTurns,omitempty"`
-	MaxWorkspaceBytes    int64          `json:"maxWorkspaceBytes,omitempty"`
-	MaxFileUploadBytes   int64          `json:"maxFileUploadBytes,omitempty"`
-	Model                string         `json:"model,omitempty"`
-	Models               []ModelOption  `json:"models,omitempty"`   // available models for this tier
-	Sandbox              string         `json:"sandbox,omitempty"`
-	AllowedMCP           []string       `json:"allowedMcp,omitempty"`
-	Providers            *TierProviders `json:"providers,omitempty"` // per-tier LLM providers
-}
-
-// ModelOption defines a selectable model for a tier.
-type ModelOption struct {
-	Name   string `json:"name"`           // model identifier (e.g. "glm-5.2")
-	Label  string `json:"label,omitempty"` // display name (e.g. "GLM-5.2 Turbo")
-	Vision bool   `json:"vision,omitempty"`
-}
-
-// TierProviders allows per-tier LLM provider configuration.
-// If set, users in this tier use these providers instead of the global ones.
-type TierProviders struct {
-	Primary   *TierProviderEntry  `json:"primary,omitempty"`
-	Fallbacks []TierProviderEntry `json:"fallbacks,omitempty"`
-}
-
-// TierProviderEntry is a single provider for a tier.
-type TierProviderEntry struct {
-	APIBase   string `json:"apiBase"`
-	APIKey    string `json:"apiKey"`
-	Model     string `json:"model"`
-	MaxTokens int    `json:"maxTokens,omitempty"`
-}
-
-// TenantUserConfig defines a single user in multi-tenant configuration.
-type TenantUserConfig struct {
-	ID                string            `json:"id"`
-	DisplayName       string            `json:"displayName,omitempty"`
-	Tier              string            `json:"tier"`
-	Token             string            `json:"token,omitempty"`
-	Channels          map[string]string `json:"channels,omitempty"`
-	WorkspaceOverride string            `json:"workspaceOverride,omitempty"`
-	Admin             bool              `json:"admin,omitempty"`
-}
-
-// AuditConfig controls the audit trail system.
-type AuditConfig struct {
-	// Enabled turns on audit logging of all messages and token usage.
-	Enabled bool `json:"enabled"`
-
-	// DBPath is the SQLite database path. Default: {homeDir}/audit.db
-	DBPath string `json:"dbPath,omitempty"`
-
-	// MessageRetentionDays controls how long message logs are kept.
-	// Default: 7. Set to 0 to disable message logging.
-	MessageRetentionDays int `json:"messageRetentionDays,omitempty"`
-
-	// MaxContentLen truncates stored message content. Default: 4096.
-	MaxContentLen int `json:"maxContentLen,omitempty"`
-
-	// UsageRetentionDays controls how long usage/cost records are kept.
-	// Default: 365. Set to 0 for indefinite.
-	UsageRetentionDays int `json:"usageRetentionDays,omitempty"`
 }

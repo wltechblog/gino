@@ -72,52 +72,6 @@ func (r *Registry) Definitions() []providers.ToolDefinition {
 	return defs
 }
 
-// FilteredDefinitions returns tool definitions filtered by an allow-list.
-// If allowList is nil or empty, all tools are returned (backward compatible).
-// If allowList contains "*", all tools are returned.
-func (r *Registry) FilteredDefinitions(allowList []string) []providers.ToolDefinition {
-	if len(allowList) == 0 {
-		return r.Definitions()
-	}
-	// Check for wildcard
-	for _, name := range allowList {
-		if name == "*" {
-			return r.Definitions()
-		}
-	}
-
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	allowed := make(map[string]bool, len(allowList))
-	for _, name := range allowList {
-		allowed[name] = true
-	}
-
-	defs := make([]providers.ToolDefinition, 0, len(r.tools))
-	for _, t := range r.tools {
-		if allowed[t.Name()] {
-			defs = append(defs, providers.ToolDefinition{
-				Name:        t.Name(),
-				Description: t.Description(),
-				Parameters:  t.Parameters(),
-			})
-		}
-	}
-	return defs
-}
-
-// AllToolNames returns the names of all registered tools.
-func (r *Registry) AllToolNames() []string {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	names := make([]string, 0, len(r.tools))
-	for name := range r.tools {
-		names = append(names, name)
-	}
-	return names
-}
-
 // Execute executes a registered tool by name with args and returns result or error.
 func (r *Registry) Execute(ctx context.Context, name string, args map[string]interface{}) (string, error) {
 	if name == "" {
