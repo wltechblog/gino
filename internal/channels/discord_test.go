@@ -4,9 +4,12 @@ package channels
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/bwmarrin/discordgo"
 
 	"github.com/wltechblog/gino/internal/chat"
 )
@@ -90,7 +93,7 @@ func TestTruncate(t *testing.T) {
 // TestStartDiscord_EmptyToken tests that StartDiscord returns an error with empty token.
 func TestStartDiscord_EmptyToken(t *testing.T) {
 	hub := chat.NewHub(100)
-	err := StartDiscord(context.Background(), hub, "", nil, false, nil, false, "", DiscordRateLimit{})
+	err := StartDiscord(context.Background(), hub, "", nil, false, nil, false, "", 0, DiscordRateLimit{})
 	if err == nil {
 		t.Error("StartDiscord with empty token should return error")
 	}
@@ -312,5 +315,185 @@ func TestDiscordClient_NewlineSplit(t *testing.T) {
 	// Second chunk should start with 'b'
 	if !strings.HasPrefix(chunks[1], "b") {
 		t.Error("second chunk should start with 'b'")
+	}
+}
+
+// mockThreadSender is a discordSender implementation that records thread
+// creation and channel messages without touching the Discord API.
+type mockThreadSender struct {
+	threads      map[string]*discordgo.Channel // threadID → channel
+	createdCount int
+	sent         []string
+}
+
+func (m *mockThreadSender) ChannelMessageSend(channelID, content string, options ...discordgo.RequestOption) (*discordgo.Message, error) {
+	m.sent = append(m.sent, channelID+": "+content)
+	return &discordgo.Message{ID: "msg"}, nil
+}
+
+func (m *mockThreadSender) ChannelMessageSendComplex(channelID string, data *discordgo.MessageSend, options ...discordgo.RequestOption) (*discordgo.Message, error) {
+	m.sent = append(m.sent, channelID+": "+data.Content)
+	return &discordgo.Message{ID: "msg"}, nil
+}
+
+func (m *mockThreadSender) ChannelTyping(channelID string, options ...discordgo.RequestOption) error { return nil }
+
+func (m *mockThreadSender) MessageThreadStartComplex(channelID, messageID string, data *discordgo.ThreadStart, options ...discordgo.RequestOption) (*discordgo.Channel, error) {
+	m.createdCount++
+	id := fmt.Sprintf("thread-%d", m.createdCount)
+	ch := &discordgo.Channel{ID: id, Name: data.Name}
+	m.threads[id] = ch
+	return ch, nil
+}
+
+func (m *mockThreadSender) ThreadJoin(threadID string, options ...discordgo.RequestOption) error { return nil }
+
+func (m *mockThreadSender) Channel(channelID string, options ...discordgo.RequestOption) (*discordgo.Channel, error) {
+	if ch, ok := m.threads[channelID]; ok {
+		return ch, nil
+	}
+	return nil, fmt.Errorf("channel not found")
+}
+
+// newCooldownTestClient builds a discordClient with a mock sender and the
+// given thread cooldown for cooldown-behaviour tests.
+func newCooldownTestClient(hub *chat.Hub, sender *mockThreadSender, cooldownS int) *discordClient {
+	return newDiscordClient(context.Background(), sender, hub, "botid", nil, false, []string{"monitored-chan"}, true, "", cooldownS, DiscordRateLimit{})
+}
+
+// TestDiscordThreadCooldown_RoutesToExistingThread verifies that rapid
+// follow-up messages continue in the user's existing thread rather than
+// creating a new one.
+func TestDiscordThreadCooldown_RoutesToExistingThread(t *testing.T) {
+	hub := chat.NewHub(10)
+	sender := &mockThreadSender{threads: map[string]*discordgo.Channel{}}
+	c := newCooldownTestClient(hub, sender, 300)
+
+	msg := func(content string) *discordgo.MessageCreate {
+		return &discordgo.MessageCreate{
+			Message: &discordgo.Message{
+				ID:        "m" + content,
+				ChannelID: "monitored-chan",
+				GuildID:   "guild1",
+				Author:    &discordgo.User{ID: "user1", Username: "tester"},
+				Content:   content,
+			},
+		}
+	}
+
+	// First message: no prior thread, one should be created.
+	c.handleMessage(nil, msg("first"))
+	if sender.createdCount != 1 {
+		t.Fatalf("expected 1 thread after first message, got %d", sender.createdCount)
+	}
+	// Read the first message from the hub (FIFO).
+	select {
+	case got := <-hub.In:
+		if got.ChatID != "thread-1" || got.Content != "first" {
+			t.Fatalf("first message = (%q, %q), want (thread-1, first)", got.ChatID, got.Content)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first message to be forwarded")
+	}
+
+	// Second message within cooldown: should continue in existing thread.
+	c.handleMessage(nil, msg("second"))
+	if sender.createdCount != 1 {
+		t.Fatalf("expected still 1 thread (cooldown should prevent new one), got %d", sender.createdCount)
+	}
+
+	// Verify the second message was forwarded into the first thread.
+	select {
+	case got := <-hub.In:
+		if got.ChatID != "thread-1" {
+			t.Errorf("second message ChatID = %q, want thread-1", got.ChatID)
+		}
+		if got.Content != "second" {
+			t.Errorf("second message content = %q, want %q", got.Content, "second")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for second message to be forwarded")
+	}
+}
+
+// TestDiscordThreadCooldown_ExpiredCreatesNewThread verifies that after the
+// cooldown window passes a new thread is created.
+func TestDiscordThreadCooldown_ExpiredCreatesNewThread(t *testing.T) {
+	hub := chat.NewHub(10)
+	sender := &mockThreadSender{threads: map[string]*discordgo.Channel{}}
+	c := newCooldownTestClient(hub, sender, 1) // 1 second cooldown
+
+	c.handleMessage(nil, &discordgo.MessageCreate{
+		Message: &discordgo.Message{
+			ID: "m1", ChannelID: "monitored-chan", GuildID: "guild1",
+			Author: &discordgo.User{ID: "user1", Username: "tester"}, Content: "first",
+		},
+	})
+	if sender.createdCount != 1 {
+		t.Fatalf("expected 1 thread, got %d", sender.createdCount)
+	}
+
+	// Expire the cooldown by backdating the recorded thread creation.
+	c.lastThreadMu.Lock()
+	key := "user1:monitored-chan"
+	info := c.lastThread[key]
+	info.created = time.Now().Add(-2 * time.Second)
+	c.lastThread[key] = info
+	c.lastThreadMu.Unlock()
+
+	c.handleMessage(nil, &discordgo.MessageCreate{
+		Message: &discordgo.Message{
+			ID: "m2", ChannelID: "monitored-chan", GuildID: "guild1",
+			Author: &discordgo.User{ID: "user1", Username: "tester"}, Content: "second",
+		},
+	})
+	if sender.createdCount != 2 {
+		t.Fatalf("expected 2 threads after cooldown expiry, got %d", sender.createdCount)
+	}
+
+	// Drain hub.
+	for {
+		select {
+		case <-hub.In:
+		default:
+			goto done
+		}
+	}
+done:
+}
+
+// TestDiscordThreadCooldown_Disabled verifies 0 disables the cooldown and
+// every message creates a new thread.
+func TestDiscordThreadCooldown_Disabled(t *testing.T) {
+	hub := chat.NewHub(10)
+	sender := &mockThreadSender{threads: map[string]*discordgo.Channel{}}
+	c := newCooldownTestClient(hub, sender, 0)
+
+	for i := 0; i < 3; i++ {
+		c.handleMessage(nil, &discordgo.MessageCreate{
+			Message: &discordgo.Message{
+				ID: fmt.Sprintf("m%d", i), ChannelID: "monitored-chan", GuildID: "guild1",
+				Author: &discordgo.User{ID: "user1", Username: "tester"}, Content: fmt.Sprintf("msg %d", i),
+			},
+		})
+	}
+	if sender.createdCount != 3 {
+		t.Fatalf("cooldown=0 should create a thread per message, got %d", sender.createdCount)
+	}
+	for {
+		select {
+		case <-hub.In:
+		default:
+			goto done
+		}
+	}
+done:
+}
+
+// TestDiscordThreadCooldown_DefaultValue verifies the default applied by
+// main.go when the config value is unset.
+func TestDiscordThreadCooldown_DefaultValue(t *testing.T) {
+	if DefaultThreadCooldownS != 300 {
+		t.Errorf("DefaultThreadCooldownS = %d, want 300", DefaultThreadCooldownS)
 	}
 }

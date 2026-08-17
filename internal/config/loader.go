@@ -55,4 +55,9 @@ func applyEnvOverrides(cfg *Config) {
 	if v := os.Getenv("GINO_WEB_USER_AGENT"); v != "" {
 		cfg.Agents.Defaults.Web.UserAgent = v
 	}
+	if v := os.Getenv("GINO_DISCORD_THREAD_COOLDOWN_S"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			cfg.Channels.Discord.ThreadCooldownS = &n
+		}
+	}
 }

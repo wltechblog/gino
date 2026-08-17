@@ -75,6 +75,7 @@
       "monitorChannels": [],
       "sendAttachments": false,
       "adminRoleID": "",
+      "threadCooldownS": 300,
       "rateLimitPerMinute": 0,
       "rateLimitPerHour": 0,
       "rateLimitTotalHour": 0

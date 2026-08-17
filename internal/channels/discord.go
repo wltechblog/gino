@@ -36,7 +36,11 @@ type DiscordRateLimit struct {
 	TotalHour int // max total messages per hour across all users (0 = unlimited)
 }
 
-func StartDiscord(ctx context.Context, hub *chat.Hub, token string, allowFrom []string, allowDMs bool, monitorChannels []string, sendAttachments bool, adminRoleID string, rl DiscordRateLimit) error {
+// DefaultThreadCooldownS is the per-user thread creation cooldown (seconds)
+// applied when discord.threadCooldownS is unset in config.
+const DefaultThreadCooldownS = 300
+
+func StartDiscord(ctx context.Context, hub *chat.Hub, token string, allowFrom []string, allowDMs bool, monitorChannels []string, sendAttachments bool, adminRoleID string, threadCooldownS int, rl DiscordRateLimit) error {
 	if token == "" {
 		return fmt.Errorf("discord token not provided")
 	}
@@ -67,7 +71,7 @@ func StartDiscord(ctx context.Context, hub *chat.Hub, token string, allowFrom []
 	}
 	log.Printf("discord: connected as %s (%s)", botUser.Username, botUser.ID)
 
-	client := newDiscordClient(ctx, session, hub, botUser.ID, allowFrom, allowDMs, monitorChannels, sendAttachments, adminRoleID, rl)
+	client := newDiscordClient(ctx, session, hub, botUser.ID, allowFrom, allowDMs, monitorChannels, sendAttachments, adminRoleID, threadCooldownS, rl)
 	log.Printf("discord: monitored channels: %v", monitorChannels)
 	session.AddHandler(client.handleMessage)
 	go client.runOutbound()
@@ -94,11 +98,14 @@ type discordClient struct {
 	monitorChannels  map[string]struct{} // channel IDs where bot engages without mention
 	sendAttachments  bool                // whether to send file attachments outbound
 	adminRoleID      string              // Discord role ID that can post in any thread
+	threadCooldown   time.Duration       // per-user cooldown before a new thread may be created
 	ctx              context.Context
 	typingMu         sync.Mutex
 	typingStop       map[string]chan struct{}
 	threadOwner      map[string]string // threadID → owner userID
 	ownerMu          sync.RWMutex
+	lastThread       map[string]lastThreadInfo // "userID:channelID" → last thread info
+	lastThreadMu     sync.Mutex
 	rateLimit        DiscordRateLimit
 	rateMu           sync.Mutex
 	userMinute       map[string][]time.Time // userID → timestamps of messages in current minute window
@@ -106,9 +113,17 @@ type discordClient struct {
 	totalHour        []time.Time            // timestamps of all messages in current hour window
 }
 
+// lastThreadInfo records the most recent thread created for a user in a
+// channel, so the cooldown logic can route follow-up messages into it.
+type lastThreadInfo struct {
+	threadID string
+	created  time.Time
+}
+
 // newDiscordClient constructs a discordClient and registers it as the hub's
 // "discord" outbound subscriber. Inject a mock discordSender for tests.
-func newDiscordClient(ctx context.Context, sender discordSender, hub *chat.Hub, botID string, allowFrom []string, allowDMs bool, monitorChannels []string, sendAttachments bool, adminRoleID string, rl DiscordRateLimit) *discordClient {
+func newDiscordClient(ctx context.Context, sender discordSender, hub *chat.Hub, botID string, allowFrom []string, allowDMs bool, monitorChannels []string, sendAttachments bool, adminRoleID string, threadCooldownS int, rl DiscordRateLimit) *discordClient {
+	cooldown := time.Duration(threadCooldownS) * time.Second
 	allowed := make(map[string]struct{}, len(allowFrom))
 	for _, id := range allowFrom {
 		allowed[id] = struct{}{}
@@ -130,6 +145,8 @@ func newDiscordClient(ctx context.Context, sender discordSender, hub *chat.Hub, 
 		ctx:             ctx,
 		typingStop:      make(map[string]chan struct{}),
 		threadOwner:     make(map[string]string),
+		lastThread:      make(map[string]lastThreadInfo),
+		threadCooldown:  cooldown,
 		rateLimit:       rl,
 		userMinute:      make(map[string][]time.Time),
 		userHour:        make(map[string][]time.Time),
@@ -141,6 +158,35 @@ func newDiscordClient(ctx context.Context, sender discordSender, hub *chat.Hub, 
 func (c *discordClient) isMonitored(channelID string) bool {
 	_, ok := c.monitorChannels[channelID]
 	return ok
+}
+
+// recentThread returns the thread a user most recently started in the given
+// channel, if it was created within the cooldown window and still exists.
+// The second return value reports whether such a thread was found.
+func (c *discordClient) recentThread(userID, channelID string) (string, bool) {
+	if c.threadCooldown <= 0 {
+		return "", false // cooldown disabled
+	}
+	c.lastThreadMu.Lock()
+	info, ok := c.lastThread[userID+":"+channelID]
+	c.lastThreadMu.Unlock()
+	if !ok || time.Since(info.created) >= c.threadCooldown {
+		return "", false
+	}
+	// Verify the thread still exists (it may have been deleted or the bot
+	// restarted). If the lookup fails, treat it as expired.
+	if _, err := c.sender.Channel(info.threadID); err != nil {
+		return "", false
+	}
+	return info.threadID, true
+}
+
+// recordThreadCreated notes the thread a user just started in a channel so
+// subsequent messages within the cooldown window can be routed into it.
+func (c *discordClient) recordThreadCreated(userID, channelID, threadID string) {
+	c.lastThreadMu.Lock()
+	c.lastThread[userID+":"+channelID] = lastThreadInfo{threadID: threadID, created: time.Now()}
+	c.lastThreadMu.Unlock()
 }
 
 // isThread checks whether a channel is a Discord thread (public, private, or news thread).
@@ -320,6 +366,13 @@ func (c *discordClient) handleMessage(_ *discordgo.Session, m *discordgo.Message
 			}
 			return
 		}
+		// Thread cooldown: route into the user's existing thread when it was
+		// started recently, instead of spawning a new one per message.
+		if threadID, ok := c.recentThread(m.Author.ID, m.ChannelID); ok {
+			log.Printf("discord: thread cooldown active for %s in %s, continuing in existing thread %s", m.Author.Username, m.ChannelID, threadID)
+			c.forwardMessage(m, threadID, false)
+			return
+		}
 		c.createThreadAndForward(m, m.ChannelID)
 		return
 	}
@@ -360,6 +413,11 @@ func (c *discordClient) handleMessage(_ *discordgo.Session, m *discordgo.Message
 				return
 			}
 			parentID := c.parentChannelID(m.ChannelID)
+			if threadID, ok := c.recentThread(m.Author.ID, parentID); ok {
+				log.Printf("discord: thread cooldown active for %s in %s, continuing in existing thread %s", m.Author.Username, parentID, threadID)
+				c.forwardMessage(m, threadID, false)
+				return
+			}
 			c.createThreadAndForward(m, parentID)
 			return
 		}
@@ -399,6 +457,12 @@ func (c *discordClient) handleMessage(_ *discordgo.Session, m *discordgo.Message
 	}
 
 	// Create a thread from the user's message and reply in it.
+	// Apply the same thread cooldown as monitored channels.
+	if threadID, ok := c.recentThread(m.Author.ID, m.ChannelID); ok {
+		log.Printf("discord: thread cooldown active for %s in %s, continuing in existing thread %s", m.Author.Username, m.ChannelID, threadID)
+		c.forwardMessage(m, threadID, false)
+		return
+	}
 	c.createThreadAndForward(m, m.ChannelID)
 }
 
@@ -425,6 +489,10 @@ func (c *discordClient) createThreadAndForward(m *discordgo.MessageCreate, paren
 	if err := c.sender.ThreadJoin(thread.ID); err != nil {
 		log.Printf("discord: warning: failed to join thread %s: %v", thread.ID, err)
 	}
+
+	// Record the thread for cooldown routing: follow-up messages from this
+	// user within the cooldown window continue here rather than in a new thread.
+	c.recordThreadCreated(m.Author.ID, parentChannelID, thread.ID)
 
 	// Record the thread owner so we can enforce ownership.
 	c.ownerMu.Lock()

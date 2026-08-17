@@ -269,6 +269,13 @@ type DiscordConfig struct {
 	// server admins/moderators to correct the bot or assist users.
 	AdminRoleID string `json:"adminRoleID,omitempty"`
 
+	// ThreadCooldownS is the per-user cooldown (in seconds) before a new
+	// thread can be created. Messages arriving from the same user within
+	// the cooldown window are forwarded to their existing thread instead
+	// of starting a new one. Defaults to 300 seconds; 0 disables the
+	// cooldown (every eligible message starts a new thread).
+	ThreadCooldownS *int `json:"threadCooldownS,omitempty"`
+
 	// Rate limiting (0 = unlimited)
 	RateLimitPerMinute int `json:"rateLimitPerMinute,omitempty"` // max messages per user per minute
 	RateLimitPerHour   int `json:"rateLimitPerHour,omitempty"`   // max messages per user per hour

@@ -9,7 +9,7 @@ import (
 	"github.com/wltechblog/gino/internal/chat"
 )
 
-func StartDiscord(ctx context.Context, hub *chat.Hub, token string, allowFrom []string, allowDMs bool, monitorChannels []string, rl DiscordRateLimit) error {
+func StartDiscord(ctx context.Context, hub *chat.Hub, token string, allowFrom []string, allowDMs bool, monitorChannels []string, sendAttachments bool, adminRoleID string, threadCooldownS int, rl DiscordRateLimit) error {
 	log.Println("discord: channel not compiled into this binary (built with single-channel tag).")
 	return nil
 }

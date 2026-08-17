@@ -460,7 +460,11 @@ func runGateway(homeFlag string, args []string) {
 			PerHour:   cfg.Channels.Discord.RateLimitPerHour,
 			TotalHour: cfg.Channels.Discord.RateLimitTotalHour,
 		}
-		if err := channels.StartDiscord(ctx, hub, cfg.Channels.Discord.Token, cfg.Channels.Discord.AllowFrom, cfg.Channels.Discord.AllowDMs, cfg.Channels.Discord.MonitorChannels, cfg.Channels.Discord.SendAttachments, cfg.Channels.Discord.AdminRoleID, rl); err != nil {
+		threadCooldown := channels.DefaultThreadCooldownS
+		if cfg.Channels.Discord.ThreadCooldownS != nil {
+			threadCooldown = *cfg.Channels.Discord.ThreadCooldownS
+		}
+		if err := channels.StartDiscord(ctx, hub, cfg.Channels.Discord.Token, cfg.Channels.Discord.AllowFrom, cfg.Channels.Discord.AllowDMs, cfg.Channels.Discord.MonitorChannels, cfg.Channels.Discord.SendAttachments, cfg.Channels.Discord.AdminRoleID, threadCooldown, rl); err != nil {
 			log.Fatalf("Discord: %v", err)
 		}
 	}
