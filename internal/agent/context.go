@@ -113,9 +113,24 @@ Do NOT use: # headings, --- rulers, *-bullet-lists, --dash-lists, 1.-numbered-li
 	}
 
 	// User identity — include sender info for non-system channels so the LLM
-	// can personalize responses and distinguish between users.
+	// can personalize responses and distinguish between users. In shared
+	// sessions (Discord threads), each message may come from a different user,
+	// so "[from X]" speaker labels on user messages are the source of truth
+	// for who said what; this line only identifies the current turn's starter.
 	if senderID != "" && channel != "cli" {
-		sysParts = append(sysParts, fmt.Sprintf("Current user ID: %s (channel: %s)", senderID, channel))
+		discordName := ""
+		if channel == "discord" && metadata != nil {
+			if name, ok := metadata["sender_name"].(string); ok {
+				discordName = name
+			}
+		}
+		if discordName != "" {
+			sysParts = append(sysParts, fmt.Sprintf(
+				"Current user: %s (ID: %s, channel: %s). This session may have multiple participants; each user message carries a [from X] label identifying its actual speaker — attribute actions and replies to that label, not to this line.",
+				discordName, senderID, channel))
+		} else {
+			sysParts = append(sysParts, fmt.Sprintf("Current user ID: %s (channel: %s)", senderID, channel))
+		}
 	}
 
 	// Privilege level — if metadata marks the user as unprivileged, inject
@@ -241,7 +256,9 @@ Do NOT use: # headings, --- rulers, *-bullet-lists, --dash-lists, 1.-numbered-li
 		msgs = append(msgs, providers.Message{Role: role, Content: content})
 	}
 
-	// Current user message
+	// Current user message. In shared sessions (Discord threads) the loop has
+	// already prefixed the content with a "[from X]" speaker label; history
+	// entries carry their own labels from when they were stored.
 	msgs = append(msgs, providers.Message{Role: "user", Content: currentMessage})
 	return msgs
 }

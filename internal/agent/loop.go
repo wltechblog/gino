@@ -436,10 +436,40 @@ type AgentLoop struct {
 	ownedRoots []*os.Root
 }
 
+// isDiscordDM reports whether message metadata marks a Discord message as a
+// direct message. Guild messages (threads, monitored channels) are shared
+// sessions and need speaker labeling; DMs are single-participant.
+func isDiscordDM(metadata map[string]interface{}) bool {
+	if metadata == nil {
+		return false
+	}
+	v, ok := metadata["is_dm"].(bool)
+	return ok && v
+}
+
+// labelSharedContent prefixes content with a "[from X]" speaker label for
+// Discord guild messages (shared sessions: threads, monitored channels).
+// DMs and other channels are returned unchanged.
+func labelSharedContent(channel string, metadata map[string]interface{}, content string) string {
+	if channel != "discord" || isDiscordDM(metadata) {
+		return content
+	}
+	if metadata == nil {
+		return content
+	}
+	if senderName, ok := metadata["sender_name"].(string); ok && senderName != "" {
+		return fmt.Sprintf("[from %s] %s", senderName, content)
+	}
+	return content
+}
+
 // pendingMsg holds a user message that arrived while a turn was in progress.
 // It will be injected into the running turn at the next iteration boundary.
 type pendingMsg struct {
 	content string
+	// sender identifies who submitted the message so shared-session contexts
+	// (e.g. Discord threads with multiple participants) attribute it correctly.
+	sender string
 }
 
 // activeTurn tracks an in-flight turn for cancellation.
@@ -958,19 +988,37 @@ func (a *AgentLoop) drainPendingMsgs(sessionKey string) string {
 		return ""
 	}
 	delete(a.pending, sessionKey)
+
+	// Attribute messages to their senders when more than one participant has
+	// queued input, or when some senders are known and others are not. This
+	// keeps shared-session contexts (Discord threads) from misattributing
+	// follow-ups to whoever started the turn.
+	senders := make(map[string]bool)
+	for _, m := range msgs {
+		senders[m.sender] = true
+	}
+	attributed := len(senders) > 1 || (len(senders) == 1 && !senders[""])
+
 	var parts []string
 	for _, m := range msgs {
-		parts = append(parts, m.content)
+		if attributed && m.sender != "" {
+			parts = append(parts, fmt.Sprintf("[%s]:\n%s", m.sender, m.content))
+		} else {
+			parts = append(parts, m.content)
+		}
 	}
 	return strings.Join(parts, "\n---\n")
 }
 
 // queuePendingMsg adds a user message to the pending queue for a session.
-func (a *AgentLoop) queuePendingMsg(sessionKey, content string) {
+// The sender identifies who submitted the message (e.g. Discord username)
+// so mid-turn injections can be attributed correctly in shared sessions.
+func (a *AgentLoop) queuePendingMsg(sessionKey, content, sender string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.pending[sessionKey] = append(a.pending[sessionKey], pendingMsg{
 		content: content,
+		sender:  sender,
 	})
 }
 
@@ -1498,6 +1546,15 @@ func (a *AgentLoop) dispatchMessage(ctx context.Context, msg chat.Inbound) {
 			userContent += "\n- " + p
 		}
 	}
+
+	// Shared-session speaker labeling: Discord guild channels (threads and
+	// monitored channels) can have multiple participants sharing one session,
+	// so prefix the user turn with the sender's display name. The label is
+	// stored in session history too, keeping attribution across turns. DMs
+	// are single-participant and stay unlabeled. Mid-turn queued messages are
+	// attributed separately by drainPendingMsgs, so the raw content is queued.
+	queuedContent := userContent
+	userContent = labelSharedContent(msg.Channel, msg.Metadata, userContent)
 	messages := a.context.BuildMessages(sess.GetHistory(), userContent, msg.Channel, msg.ChatID, msg.SenderID, memCtx, memories, msg.Metadata)
 
 	// For signals, do NOT cancel the active interactive turn — run in parallel.
@@ -1508,7 +1565,14 @@ func (a *AgentLoop) dispatchMessage(ctx context.Context, msg chat.Inbound) {
 	} else if a.hasActiveTurn(sessionKey) {
 		// A turn is already running for this session — queue the message
 		// so it can be injected at the next iteration boundary.
-		a.queuePendingMsg(sessionKey, userContent)
+		// Include the sender display name (when known) so shared-session
+		// contexts like Discord threads can attribute the message correctly.
+		// queuedContent is raw: drainPendingMsgs applies the sender prefix.
+		senderLabel := msg.SenderID
+		if name, ok := msg.Metadata["sender_name"].(string); ok && name != "" {
+			senderLabel = fmt.Sprintf("%s (%s)", name, msg.SenderID)
+		}
+		a.queuePendingMsg(sessionKey, queuedContent, senderLabel)
 		log.Printf("Turn active for %s — message queued (%d pending)", sessionKey, len(a.pending[sessionKey]))
 		sendChannelNotification(a.hub, msg.Channel, msg.ChatID, "📥 Message queued — will be processed after the current task.", msg.Metadata)
 		return
@@ -1793,7 +1857,7 @@ done:
 	// follow-up "continue" message can pick up where things left off instead of
 	// re-reading all the same files from scratch.
 	if !isSystemChannel(msg.Channel) {
-		sess.AddMessage("user", msg.Content)
+		sess.AddMessage("user", labelSharedContent(msg.Channel, msg.Metadata, msg.Content))
 		sessionContent := finalContent
 		if summary := summarizeToolCalls(toolCallLog); summary != "" {
 			sessionContent += "\n\n" + summary

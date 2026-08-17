@@ -536,10 +536,11 @@ func (c *discordClient) forwardMessage(m *discordgo.MessageCreate, chatID string
 		Content:   content,
 		Timestamp: time.Now(),
 		Metadata: map[string]interface{}{
-			"username":   senderName,
-			"guild_id":   m.GuildID,
-			"channel_id": m.ChannelID,
-			"is_dm":      isDM,
+			"username":    senderName,
+			"sender_name": senderName, // canonical key — used for speaker labeling and unprivileged-user notices
+			"guild_id":    m.GuildID,
+			"channel_id":  m.ChannelID,
+			"is_dm":       isDM,
 		},
 	}
 }
