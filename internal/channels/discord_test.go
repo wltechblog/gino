@@ -4,6 +4,7 @@ package channels
 
 import (
 	"context"
+	"net/http"
 	"fmt"
 	"strings"
 	"testing"
@@ -318,15 +319,32 @@ func TestDiscordClient_NewlineSplit(t *testing.T) {
 	}
 }
 
+// mockUnknownChannelErr builds a RESTError that mirrors what discordgo
+// returns for a deleted channel, including the fields Error() dereferences.
+func mockUnknownChannelErr() *discordgo.RESTError {
+	return &discordgo.RESTError{
+		Response:     &http.Response{StatusCode: 404, Status: "404 Not Found"},
+		ResponseBody: []byte("{\"message\": \"Unknown Channel\", \"code\": 10003}"),
+		Message:      &discordgo.APIErrorMessage{Code: discordgo.ErrCodeUnknownChannel, Message: "Unknown Channel"},
+	}
+}
+
 // mockThreadSender is a discordSender implementation that records thread
 // creation and channel messages without touching the Discord API.
 type mockThreadSender struct {
-	threads      map[string]*discordgo.Channel // threadID → channel
-	createdCount int
-	sent         []string
+	threads             map[string]*discordgo.Channel // threadID → channel
+	createdCount        int
+	sent                []string
+	failUnknownChannel  map[string]bool // channelID → return 404 Unknown Channel
+	failThreadCreate    bool            // make MessageThreadStartComplex fail
+	failThreadFromMsg   bool            // make message-anchored thread start fail (standalone succeeds)
+	dmChannels          map[string]string // userID → DM channelID
 }
 
 func (m *mockThreadSender) ChannelMessageSend(channelID, content string, options ...discordgo.RequestOption) (*discordgo.Message, error) {
+	if m.failUnknownChannel != nil && m.failUnknownChannel[channelID] {
+		return nil, mockUnknownChannelErr()
+	}
 	m.sent = append(m.sent, channelID+": "+content)
 	return &discordgo.Message{ID: "msg"}, nil
 }
@@ -339,6 +357,12 @@ func (m *mockThreadSender) ChannelMessageSendComplex(channelID string, data *dis
 func (m *mockThreadSender) ChannelTyping(channelID string, options ...discordgo.RequestOption) error { return nil }
 
 func (m *mockThreadSender) MessageThreadStartComplex(channelID, messageID string, data *discordgo.ThreadStart, options ...discordgo.RequestOption) (*discordgo.Channel, error) {
+	if m.failThreadCreate {
+		return nil, fmt.Errorf("missing permissions")
+	}
+	if m.failThreadFromMsg {
+		return nil, mockUnknownChannelErr()
+	}
 	m.createdCount++
 	id := fmt.Sprintf("thread-%d", m.createdCount)
 	ch := &discordgo.Channel{ID: id, Name: data.Name}
@@ -355,10 +379,177 @@ func (m *mockThreadSender) Channel(channelID string, options ...discordgo.Reques
 	return nil, fmt.Errorf("channel not found")
 }
 
+func (m *mockThreadSender) ThreadStartComplex(channelID string, data *discordgo.ThreadStart, options ...discordgo.RequestOption) (*discordgo.Channel, error) {
+	if m.failThreadCreate {
+		return nil, fmt.Errorf("missing permissions")
+	}
+	m.createdCount++
+	id := fmt.Sprintf("thread-%d", m.createdCount)
+	ch := &discordgo.Channel{ID: id, Name: data.Name}
+	m.threads[id] = ch
+	return ch, nil
+}
+
+func (m *mockThreadSender) UserChannelCreate(recipientID string, options ...discordgo.RequestOption) (*discordgo.Channel, error) {
+	if m.dmChannels == nil {
+		m.dmChannels = make(map[string]string)
+	}
+	if id, ok := m.dmChannels[recipientID]; ok {
+		return &discordgo.Channel{ID: id}, nil
+	}
+	id := "dm-" + recipientID
+	m.dmChannels[recipientID] = id
+	return &discordgo.Channel{ID: id}, nil
+}
+
 // newCooldownTestClient builds a discordClient with a mock sender and the
 // given thread cooldown for cooldown-behaviour tests.
 func newCooldownTestClient(hub *chat.Hub, sender *mockThreadSender, cooldownS int) *discordClient {
 	return newDiscordClient(context.Background(), sender, hub, "botid", nil, false, []string{"monitored-chan"}, true, "", cooldownS, DiscordRateLimit{})
+}
+
+// TestDiscordVanishedThread_DMFallback verifies that when the reply target
+// thread is deleted mid-turn (404 Unknown Channel), the reply is delivered
+// via DM to the original sender and routing state is purged.
+func TestDiscordVanishedThread_DMFallback(t *testing.T) {
+	hub := chat.NewHub(10)
+	sender := &mockThreadSender{threads: map[string]*discordgo.Channel{}}
+	sender.failUnknownChannel = map[string]bool{"thread-1": true}
+	c := newCooldownTestClient(hub, sender, 300)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	c.ctx = ctx
+	hub.StartRouter(ctx)
+	go c.runOutbound()
+
+	msg := &discordgo.MessageCreate{
+		Message: &discordgo.Message{
+			ID:        "m1",
+			ChannelID: "monitored-chan",
+			GuildID:   "guild1",
+			Author:    &discordgo.User{ID: "user1", Username: "tester"},
+			Content:   "question",
+		},
+	}
+	c.handleMessage(nil, msg)
+
+	// Simulate the agent's reply to the (now deleted) thread.
+	hub.Out <- chat.Outbound{
+		Channel:  "discord",
+		ChatID:   "thread-1",
+		Content:  "the answer",
+		Metadata: map[string]interface{}{"sender_id": "user1"},
+	}
+
+	// Give runOutbound a moment to process.
+	deadline := time.Now().Add(2 * time.Second)
+	delivered := false
+	for time.Now().Before(deadline) {
+		for _, s := range sender.sent {
+			if strings.Contains(s, "dm-user1") && strings.Contains(s, "the answer") {
+				delivered = true
+			}
+		}
+		if delivered {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !delivered {
+		t.Fatalf("expected DM fallback delivery to dm-user1, sent = %v", sender.sent)
+	}
+
+	// Routing state for the dead thread must be purged so follow-ups create a fresh thread.
+	c.lastThreadMu.Lock()
+	_, stillThere := c.lastThread["user1:monitored-chan"]
+	c.lastThreadMu.Unlock()
+	if stillThere {
+		t.Fatal("expected lastThread routing entry to be purged after 404")
+	}
+}
+
+// TestDiscordArchivedThread_CreatesNewThread verifies that an archived
+// (locked, unsendable) recent thread is treated as expired and a new thread
+// is created for follow-up messages.
+func TestDiscordArchivedThread_CreatesNewThread(t *testing.T) {
+	hub := chat.NewHub(10)
+	sender := &mockThreadSender{threads: map[string]*discordgo.Channel{}}
+	c := newCooldownTestClient(hub, sender, 300)
+
+	msg := func(content string) *discordgo.MessageCreate {
+		return &discordgo.MessageCreate{
+			Message: &discordgo.Message{
+				ID:        "m" + content,
+				ChannelID: "monitored-chan",
+				GuildID:   "guild1",
+				Author:    &discordgo.User{ID: "user1", Username: "tester"},
+				Content:   content,
+			},
+		}
+	}
+
+	// First message creates thread-1.
+	c.handleMessage(nil, msg("first"))
+	select {
+	case <-hub.In:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first message")
+	}
+
+	// Archive it.
+	sender.threads["thread-1"].Type = discordgo.ChannelTypeGuildPublicThread
+	sender.threads["thread-1"].ThreadMetadata = &discordgo.ThreadMetadata{Archived: true}
+
+	// Follow-up within cooldown: archived ≠ usable, so a new thread must be created.
+	c.handleMessage(nil, msg("second"))
+	if sender.createdCount != 2 {
+		t.Fatalf("expected 2 threads (archived first one bypassed), got %d", sender.createdCount)
+	}
+	select {
+	case got := <-hub.In:
+		if got.ChatID != "thread-2" {
+			t.Fatalf("second message went to %q, want thread-2", got.ChatID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for second message")
+	}
+}
+
+// TestDiscordThreadCreateFailure_NotifiesUser verifies that when thread
+// creation fails outright, the user gets an in-channel notice instead of
+// silent silence.
+func TestDiscordThreadCreateFailure_NotifiesUser(t *testing.T) {
+	hub := chat.NewHub(10)
+	sender := &mockThreadSender{threads: map[string]*discordgo.Channel{}}
+	sender.failThreadCreate = true
+	c := newCooldownTestClient(hub, sender, 300)
+
+	msg := &discordgo.MessageCreate{
+		Message: &discordgo.Message{
+			ID:        "m1",
+			ChannelID: "monitored-chan",
+			GuildID:   "guild1",
+			Author:    &discordgo.User{ID: "user1", Username: "tester"},
+			Content:   "question",
+		},
+	}
+	c.handleMessage(nil, msg)
+
+	notified := false
+	for _, s := range sender.sent {
+		if strings.Contains(s, "monitored-chan") && strings.Contains(s, "couldn't create a thread") {
+			notified = true
+		}
+	}
+	if !notified {
+		t.Fatalf("expected in-channel failure notice, sent = %v", sender.sent)
+	}
+	// Nothing should have been forwarded to the agent.
+	select {
+	case got := <-hub.In:
+		t.Fatalf("message should not be forwarded on thread creation failure, got %+v", got)
+	default:
+	}
 }
 
 // TestDiscordThreadCooldown_RoutesToExistingThread verifies that rapid

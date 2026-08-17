@@ -4,6 +4,7 @@ package channels
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -23,8 +24,10 @@ type discordSender interface {
 	ChannelMessageSendComplex(channelID string, data *discordgo.MessageSend, options ...discordgo.RequestOption) (*discordgo.Message, error)
 	ChannelTyping(channelID string, options ...discordgo.RequestOption) error
 	MessageThreadStartComplex(channelID, messageID string, data *discordgo.ThreadStart, options ...discordgo.RequestOption) (*discordgo.Channel, error)
+	ThreadStartComplex(channelID string, data *discordgo.ThreadStart, options ...discordgo.RequestOption) (*discordgo.Channel, error)
 	ThreadJoin(threadID string, options ...discordgo.RequestOption) error
 	Channel(channelID string, options ...discordgo.RequestOption) (*discordgo.Channel, error)
+	UserChannelCreate(recipientID string, options ...discordgo.RequestOption) (*discordgo.Channel, error)
 }
 
 // StartDiscord starts a Discord bot using the discordgo library.
@@ -175,7 +178,13 @@ func (c *discordClient) recentThread(userID, channelID string) (string, bool) {
 	}
 	// Verify the thread still exists (it may have been deleted or the bot
 	// restarted). If the lookup fails, treat it as expired.
-	if _, err := c.sender.Channel(info.threadID); err != nil {
+	ch, err := c.sender.Channel(info.threadID)
+	if err != nil {
+		return "", false
+	}
+	// A thread that exists but is archived cannot accept messages either;
+	// treat it as expired so a fresh thread gets created instead.
+	if ch.IsThread() && ch.ThreadMetadata != nil && ch.ThreadMetadata.Archived {
 		return "", false
 	}
 	return info.threadID, true
@@ -477,8 +486,21 @@ func (c *discordClient) createThreadAndForward(m *discordgo.MessageCreate, paren
 		Type:                discordgo.ChannelTypeGuildPublicThread,
 	})
 	if err != nil {
+		// The source message may have been deleted between receive and thread
+		// creation. Retry without the message anchor (standalone thread).
+		log.Printf("discord: thread creation from message failed (%v); retrying without message anchor", err)
+		thread, err = c.sender.ThreadStartComplex(parentChannelID, &discordgo.ThreadStart{
+			Name:                threadName,
+			AutoArchiveDuration: 10080, // 1 week (max)
+			Type:                discordgo.ChannelTypeGuildPublicThread,
+		})
+	}
+	if err != nil {
 		log.Printf("discord: failed to create thread: %v", err)
-		// Don't fall back to parent channel — just drop it so we never reply outside a thread.
+		// Tell the user in-channel instead of silently dropping their message.
+		if _, sendErr := c.sender.ChannelMessageSend(parentChannelID, fmt.Sprintf("⚠️ <@%s> I couldn't create a thread for your message (the bot may lack Create Public Threads permission). Please try again or contact a mod.", m.Author.ID)); sendErr != nil {
+			log.Printf("discord: failed to notify user after thread creation failure: %v", sendErr)
+		}
 		return
 	}
 
@@ -545,6 +567,66 @@ func (c *discordClient) forwardMessage(m *discordgo.MessageCreate, chatID string
 	}
 }
 
+// isUnknownChannelErr reports whether the error is a Discord REST error for
+// an unknown/deleted channel (HTTP 404, code 10003).
+func isUnknownChannelErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	var restErr *discordgo.RESTError
+	if errors.As(err, &restErr) {
+		if restErr.Message != nil && restErr.Message.Code == discordgo.ErrCodeUnknownChannel {
+			return true
+		}
+	}
+	return false
+}
+
+// forgetThread removes cooldown-routing state for the given thread so
+// subsequent messages from its owner create a fresh thread.
+func (c *discordClient) forgetThread(threadID string) {
+	c.lastThreadMu.Lock()
+	for key, info := range c.lastThread {
+		if info.threadID == threadID {
+			delete(c.lastThread, key)
+		}
+	}
+	c.lastThreadMu.Unlock()
+	c.ownerMu.Lock()
+	delete(c.threadOwner, threadID)
+	c.ownerMu.Unlock()
+}
+
+// sendTextChunks delivers content to channelID in ≤2000-char chunks and
+// reports whether every chunk was accepted (no unknown-channel failure).
+func (c *discordClient) sendTextChunks(channelID, content string) bool {
+	ok := true
+	for _, chunk := range splitMessage(content, 2000) {
+		if _, err := c.sender.ChannelMessageSend(channelID, chunk); err != nil {
+			log.Printf("discord: send error: %v", err)
+			if isUnknownChannelErr(err) {
+				ok = false
+				break
+			}
+		}
+	}
+	return ok
+}
+
+// sendWithFallback delivers the reply via DM, retrying once against the
+// original destination in case the failure was transient.
+func (c *discordClient) sendWithFallback(out chat.Outbound, fallbackID string) {
+	prefix := "⚠️ The thread you asked in was deleted while I was working, so replying here instead:\n\n"
+	dm, err := c.sender.UserChannelCreate(fallbackID)
+	if err == nil {
+		c.sendTextChunks(dm.ID, prefix+out.Content)
+		return
+	}
+	log.Printf("discord: DM fallback to %s failed: %v", fallbackID, err)
+	// Last resort: retry the original destination once.
+	c.sendTextChunks(out.ChatID, out.Content)
+}
+
 // runOutbound reads replies from the hub's discord subscription and sends them.
 func (c *discordClient) runOutbound() {
 	for {
@@ -560,11 +642,27 @@ func (c *discordClient) runOutbound() {
 				continue
 			}
 
-			for _, chunk := range splitMessage(out.Content, 2000) {
-				if _, err := c.sender.ChannelMessageSend(out.ChatID, chunk); err != nil {
-					log.Printf("discord: send error: %v", err)
+			if c.sendTextChunks(out.ChatID, out.Content) {
+				continue
+			}
+
+			// The thread/channel vanished mid-turn (deleted or archived while
+			// the agent was working). Purge stale routing state and deliver
+			// the reply via DM so the research isn't silently lost.
+			log.Printf("discord: channel %s vanished mid-turn; purging routing state and falling back to DM", out.ChatID)
+			c.forgetThread(out.ChatID)
+
+			fallbackID := ""
+			if out.Metadata != nil {
+				if v, ok := out.Metadata["sender_id"].(string); ok {
+					fallbackID = v
 				}
 			}
+			if fallbackID == "" {
+				log.Printf("discord: no sender_id in outbound metadata; reply dropped")
+				continue
+			}
+			c.sendWithFallback(out, fallbackID)
 		}
 	}
 }
