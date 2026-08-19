@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/wltechblog/gino/internal/config"
 )
@@ -18,6 +19,7 @@ import (
 // Multiple roots can be opened for different allowed directories.
 // Paths are matched to the most specific (longest) matching root.
 type FilesystemTool struct {
+	mu      sync.RWMutex
 	roots   []*os.Root
 	rootDir string   // primary workspace (for relative paths)
 	dirs    []string // sorted longest-first for matching
@@ -88,18 +90,101 @@ func NewFilesystemTool(workspaceDir string, allowedDirs []string, sandbox config
 
 // Close releases all underlying os.Root file descriptors.
 func (t *FilesystemTool) Close() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	var firstErr error
 	for _, r := range t.roots {
 		if err := r.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
+	t.roots = nil
 	return firstErr
+}
+
+// SetWorkspace atomically swaps the primary workspace to dir. Relative paths
+// resolve against it; the previously configured allowed directories remain
+// accessible. Used by runtime project switching.
+func (t *FilesystemTool) SetWorkspace(dir string) error {
+	abs, err := canonicalDir(dir)
+	if err != nil {
+		return fmt.Errorf("filesystem: resolve workspace path: %w", err)
+	}
+	if info, err := os.Stat(abs); err != nil || !info.IsDir() {
+		return fmt.Errorf("filesystem: workspace %q is not an accessible directory", abs)
+	}
+	root, err := os.OpenRoot(abs)
+	if err != nil {
+		return fmt.Errorf("filesystem: open root %q: %w", abs, err)
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	var oldPrimaryDir string
+	var oldPrimaryRoot *os.Root
+	if len(t.dirs) > 0 {
+		oldPrimaryDir = t.dirs[0]
+		oldPrimaryRoot = t.roots[0]
+	}
+
+	// New set: new workspace first, then carry over the existing
+	// non-primary allowed dirs (deduped against the new primary).
+	newDirs := []string{abs}
+	newRoots := []*os.Root{root}
+	for i, d := range t.dirs {
+		if i == 0 {
+			continue // old primary handled separately below
+		}
+		if d == abs {
+			// Same dir as the new primary; keep the new root, drop the old one.
+			_ = t.roots[i].Close()
+			continue
+		}
+		newDirs = append(newDirs, d)
+		newRoots = append(newRoots, t.roots[i])
+	}
+
+	// Retain the old primary as a plain allowed dir if it differs from the
+	// new primary — switching projects should not revoke access to files
+	// written under the previous project (e.g. session work products).
+	if oldPrimaryDir != "" && oldPrimaryDir != abs {
+		newDirs = append(newDirs, oldPrimaryDir)
+		newRoots = append(newRoots, oldPrimaryRoot)
+	}
+
+	// Sort longest-first so we match the most specific root first.
+	type pair struct {
+		dir  string
+		root *os.Root
+	}
+	pairs := make([]pair, len(newDirs))
+	for i := range pairs {
+		pairs[i] = pair{newDirs[i], newRoots[i]}
+	}
+	sort.SliceStable(pairs, func(a, b int) bool { return len(pairs[a].dir) > len(pairs[b].dir) })
+	t.dirs = make([]string, len(pairs))
+	t.roots = make([]*os.Root, len(pairs))
+	for i := range pairs {
+		t.dirs[i] = pairs[i].dir
+		t.roots[i] = pairs[i].root
+	}
+	t.rootDir = abs
+	return nil
+}
+
+// WorkspaceDir returns the current primary workspace directory path.
+func (t *FilesystemTool) WorkspaceDir() string {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.rootDir
 }
 
 // WorkspaceRoot returns the primary workspace os.Root for use by other tools
 // (e.g. SkillManager) that only operate within the workspace.
 func (t *FilesystemTool) WorkspaceRoot() *os.Root {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
 	if len(t.roots) == 0 {
 		return nil
 	}
@@ -114,6 +199,8 @@ func (t *FilesystemTool) RootForDir(dir string) *os.Root {
 		return nil
 	}
 
+	t.mu.RLock()
+	defer t.mu.RUnlock()
 	for i, d := range t.dirs {
 		if d == abs && i < len(t.roots) {
 			return t.roots[i]
@@ -136,10 +223,15 @@ func canonicalDir(dir string) (string, error) {
 func (t *FilesystemTool) resolve(pathStr string) (*os.Root, string, error) {
 	if !strings.HasPrefix(pathStr, "/") {
 		// Relative path — use workspace (first matching root)
+		t.mu.RLock()
+		defer t.mu.RUnlock()
 		return t.roots[0], pathStr, nil
 	}
 
 	cleaned := filepath.Clean(pathStr)
+
+	t.mu.RLock()
+	defer t.mu.RUnlock()
 
 	// dirs is sorted longest-first, so first match is most specific
 	for i, d := range t.dirs {

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/wltechblog/gino/internal/agent/memory"
 	"github.com/wltechblog/gino/internal/agent/skills"
@@ -16,6 +17,7 @@ import (
 
 // ContextBuilder builds messages for the LLM from session history and current message.
 type ContextBuilder struct {
+	mu               sync.RWMutex
 	workspace        string
 	profileWorkspace string
 	ranker           memory.Ranker
@@ -55,10 +57,26 @@ func (cb *ContextBuilder) SetOAuthNotifier(fn func() map[string]string) {
 	cb.oauthNotifier = fn
 }
 
+// SetWorkspace atomically updates the active workspace used for the system
+// prompt context (workspace path line and Project AGENTS.md loading).
+// The profile workspace stays fixed. Used by runtime project switching.
+func (cb *ContextBuilder) SetWorkspace(dir string) {
+	cb.mu.Lock()
+	cb.workspace = dir
+	cb.mu.Unlock()
+}
+
 func (cb *ContextBuilder) BuildMessages(history []string, currentMessage string, channel, chatID, senderID string, memoryContext string, memories []memory.MemoryItem, metadata map[string]interface{}) []providers.Message {
 	msgs := make([]providers.Message, 0, len(history)+2)
 
 	// Combine all system instructions into one message at position 0 to avoid errors in strict chat templates (e.g. llama.cpp)
+	// Snapshot the active workspace under RLock so a concurrent project
+	// switch cannot tear the system prompt mid-build.
+	cb.mu.RLock()
+	activeWorkspace := cb.workspace
+	profileWorkspace := cb.profileWorkspace
+	cb.mu.RUnlock()
+
 	var sysParts []string
 
 	sysParts = append(sysParts, "You are Gino, a helpful assistant.")
@@ -66,7 +84,7 @@ func (cb *ContextBuilder) BuildMessages(history []string, currentMessage string,
 	// Load persistent Gino profile bootstrap files.
 	bootstrapFiles := []string{"SOUL.md", "AGENTS.md", "USER.md", "TOOLS.md"}
 	for _, name := range bootstrapFiles {
-		p := filepath.Join(cb.profileWorkspace, name)
+		p := filepath.Join(profileWorkspace, name)
 		data, err := os.ReadFile(p)
 		if err != nil {
 			continue // file may not exist yet, skip silently
@@ -74,7 +92,7 @@ func (cb *ContextBuilder) BuildMessages(history []string, currentMessage string,
 		content := strings.TrimSpace(string(data))
 		if content != "" {
 			heading := name
-			if !sameWorkspace(cb.profileWorkspace, cb.workspace) {
+			if !sameWorkspace(profileWorkspace, activeWorkspace) {
 				heading = "Profile " + name
 			}
 			sysParts = append(sysParts, fmt.Sprintf("## %s\n\n%s", heading, content))
@@ -82,8 +100,8 @@ func (cb *ContextBuilder) BuildMessages(history []string, currentMessage string,
 	}
 
 	// When working on a separate project, also load that project's AGENTS.md.
-	if !sameWorkspace(cb.profileWorkspace, cb.workspace) {
-		p := filepath.Join(cb.workspace, "AGENTS.md")
+	if !sameWorkspace(profileWorkspace, activeWorkspace) {
+		p := filepath.Join(activeWorkspace, "AGENTS.md")
 		if data, err := os.ReadFile(p); err == nil {
 			content := strings.TrimSpace(string(data))
 			if content != "" {
@@ -95,7 +113,7 @@ func (cb *ContextBuilder) BuildMessages(history []string, currentMessage string,
 	// Channel context and tool availability
 	sysParts = append(sysParts, fmt.Sprintf(
 		"You are operating on channel=%q chatID=%q with workspace=%q. You have full access to all registered tools regardless of the channel. Always use your tools when the user asks you to perform actions (file operations, shell commands, web fetches, etc.).",
-		channel, chatID, cb.workspace))
+		channel, chatID, activeWorkspace))
 
 	// Telegram-specific formatting instructions
 	if channel == "telegram" {
