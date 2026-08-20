@@ -14,9 +14,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/wltechblog/gino/internal/brain"
 	"github.com/wltechblog/gino/internal/agent/memory"
 	"github.com/wltechblog/gino/internal/agent/tools"
+	"github.com/wltechblog/gino/internal/brain"
 	"github.com/wltechblog/gino/internal/chat"
 	"github.com/wltechblog/gino/internal/config"
 	"github.com/wltechblog/gino/internal/cron"
@@ -103,7 +103,7 @@ func trimTurnMessages(messages []providers.Message, userMsgIdx int, maxMsgs int)
 	// --- Normal path: we have session history to preserve ---
 
 	result := make([]providers.Message, 0, maxMsgs)
-	result = append(result, messages[0])         // system
+	result = append(result, messages[0])          // system
 	result = append(result, messages[userMsgIdx]) // user
 	used := 2
 
@@ -340,8 +340,8 @@ Output one fact per line starting with "- ". If nothing is worth remembering, ou
 				Title:    text,
 				Content:  fmt.Sprintf("[%s] %s", now, text),
 				Metadata: map[string]string{
-					"channel":  channel,
-					"sender":   senderID,
+					"channel":   channel,
+					"sender":    senderID,
 					"extracted": "true",
 				},
 			}
@@ -399,33 +399,37 @@ func isSystemChannel(channel string) bool {
 
 // AgentLoop is the core processing loop; it holds an LLM provider, tools, sessions and context builder.
 type AgentLoop struct {
-	hub                    *chat.Hub
-	provider               providers.LLMProvider
-	tools                  *tools.Registry
-	sessions               *session.SessionManager
-	checkpoints            *CheckpointManager
-	context                *ContextBuilder
-	memory                 *memory.MemoryStore
-	brain                  *brain.Brain
-	model                  string
-	maxIterations          int
-	maxTurnMessages        int
-	maxToolResultChars     int
-	running                bool
-	mcpClients             []*mcp.Client
-	mcpConfigs             map[string]config.MCPServerConfig
-	tokenStore             *mcp.TokenStore
-	enableToolActivity     bool
-	enableToolCallMessages bool
-	enableToolErrorMessages bool // default true — surface tool failures to user
-	signalSocketPath       string // GINO_SIGNAL_SOCKET injected into MCP child processes
-	signalListener         SignalTargetRecorder // optional: records last real channel for signal routing
-	compactor              *compactor           // nil = use legacy trimTurnMessages
+	hub                     *chat.Hub
+	provider                providers.LLMProvider
+	tools                   *tools.Registry
+	sessions                *session.SessionManager
+	checkpoints             *CheckpointManager
+	context                 *ContextBuilder
+	memory                  *memory.MemoryStore
+	brain                   *brain.Brain
+	model                   string
+	maxIterations           int
+	maxTurnMessages         int
+	maxToolResultChars      int
+	running                 bool
+	mcpClients              []*mcp.Client
+	mcpConfigs              map[string]config.MCPServerConfig
+	tokenStore              *mcp.TokenStore
+	enableToolActivity      bool
+	enableToolCallMessages  bool
+	enableToolErrorMessages bool                 // default true — surface tool failures to user
+	signalSocketPath        string               // GINO_SIGNAL_SOCKET injected into MCP child processes
+	signalListener          SignalTargetRecorder // optional: records last real channel for signal routing
+	compactor               *compactor           // nil = use legacy trimTurnMessages
+	projects                *ProjectRegistry     // nil = runtime project switching unavailable
+	fsTool                  *tools.FilesystemTool
+	execTool                *tools.ExecTool
+	profileWorkspace        string
 
 	// Per-session turn management for async processing and cancellation.
-	mu       sync.Mutex
-	active   map[string]*activeTurn // sessionKey -> active turn (nil = idle)
-	pending  map[string][]pendingMsg // sessionKey -> queued messages for active turn
+	mu      sync.Mutex
+	active  map[string]*activeTurn  // sessionKey -> active turn (nil = idle)
+	pending map[string][]pendingMsg // sessionKey -> queued messages for active turn
 
 	// bgWG tracks background goroutines (e.g. turn memory extraction) so
 	// tests can wait for them to finish before cleaning up temp dirs.
@@ -476,7 +480,7 @@ type pendingMsg struct {
 type activeTurn struct {
 	cancel  context.CancelFunc
 	done    chan struct{} // closed when turn completes
-	stopped bool         // true if cancelled by /stop
+	stopped bool          // true if cancelled by /stop
 }
 
 // SignalTargetRecorder is implemented by signal.Listener to record the last
@@ -531,7 +535,8 @@ func NewAgentLoopWithProfileWorkspace(b *chat.Hub, provider providers.LLMProvide
 		log.Fatalf("failed to create filesystem tool: %v", err)
 	}
 	register(fsTool)
-	register(tools.NewExecToolWithSandbox(60, workspace, allDirs, sandbox))
+	execTool := tools.NewExecToolWithSandbox(60, workspace, allDirs, sandbox)
+	register(execTool)
 	register(tools.NewWebToolWithConfig(webCfg.TimeoutS, webCfg.MaxResponseBytes, webCfg.UserAgent))
 
 	// Web search: use Brave if configured, otherwise fall back to DuckDuckGo
@@ -681,27 +686,30 @@ func NewAgentLoopWithProfileWorkspace(b *chat.Hub, provider providers.LLMProvide
 	}
 
 	al := &AgentLoop{
-		hub:                    b,
-		provider:               provider,
-		tools:                  reg,
-		sessions:               sm,
-		checkpoints:            checkpoints,
-		context:                ctx,
-		memory:                 mem,
-		brain:                  brainInst,
-		model:                  model,
-		maxIterations:          maxIterations,
-		maxTurnMessages:        maxTurnMessages,
-		maxToolResultChars:     maxToolResultChars,
-		mcpClients:             mcpClients,
-		mcpConfigs:             mcpServers,
-		tokenStore:             tokenStore,
+		hub:                     b,
+		provider:                provider,
+		tools:                   reg,
+		sessions:                sm,
+		checkpoints:             checkpoints,
+		context:                 ctx,
+		memory:                  mem,
+		brain:                   brainInst,
+		model:                   model,
+		maxIterations:           maxIterations,
+		maxTurnMessages:         maxTurnMessages,
+		maxToolResultChars:      maxToolResultChars,
+		mcpClients:              mcpClients,
+		mcpConfigs:              mcpServers,
+		tokenStore:              tokenStore,
 		enableToolActivity:      true,
 		enableToolCallMessages:  false,
 		enableToolErrorMessages: true,
-		active:                 make(map[string]*activeTurn),
-		pending:                make(map[string][]pendingMsg),
-		compactor:              comp,
+		active:                  make(map[string]*activeTurn),
+		pending:                 make(map[string][]pendingMsg),
+		compactor:               comp,
+		fsTool:                  fsTool,
+		execTool:                execTool,
+		profileWorkspace:        profileWorkspace,
 	}
 	if ownedSkillRoot != nil {
 		al.ownedRoots = []*os.Root{ownedSkillRoot}
@@ -714,6 +722,40 @@ func NewAgentLoopWithProfileWorkspace(b *chat.Hub, provider providers.LLMProvide
 
 	// Wire OAuth notifications into the context builder so pending auth is surfaced
 	ctx.SetOAuthNotifier(al.ListPendingOAuth)
+
+	// Load the project registry so workspaces can be switched at runtime
+	// (/project) and so the persisted active project survives restarts.
+	if reg, err := LoadProjectRegistry(homeDir); err != nil {
+		log.Printf("projects: registry unavailable: %v", err)
+	} else {
+		al.projects = reg
+		if !sameWorkspace(workspace, profileWorkspace) {
+			// Booted with an explicit -project flag: associate it with a
+			// registered project by path so sessions are namespaced. If the
+			// path is not registered, no association (sessions use bare keys).
+			matched := ""
+			for _, pr := range reg.List() {
+				if sameWorkspace(pr.Path, workspace) {
+					matched = pr.Name
+					break
+				}
+			}
+			if err := reg.SetActive(matched); err != nil {
+				log.Printf("projects: set active: %v", err)
+			} else if matched != "" {
+				log.Printf("projects: active project %q (from -project flag)", matched)
+			}
+		} else if n := reg.ActiveProject(); n != "" {
+			// No flag: restore the persisted active project.
+			if pr, ok := reg.Get(n); ok {
+				if err := al.applyWorkspace(pr.Path); err != nil {
+					log.Printf("projects: restore active %q: %v", n, err)
+				} else {
+					log.Printf("projects: restored active project %q → %s", n, pr.Path)
+				}
+			}
+		}
+	}
 
 	log.Printf("Sandbox mode: %s", sandbox.GetMode())
 
@@ -871,7 +913,9 @@ func (a *AgentLoop) SwitchToArchivedSession(sessionKey string, index int) string
 
 // archiveSession saves the current session's content under an archive key
 // so it can be restored later with /session <N>. The archive key format is:
-//   <sessionKey>:archive:<timestamp>
+//
+//	<sessionKey>:archive:<timestamp>
+//
 // After archiving, the original session is deleted so the next message starts fresh.
 func (a *AgentLoop) archiveSession(sessionKey string) {
 	current := a.sessions.Get(sessionKey)
@@ -1211,7 +1255,6 @@ func (a *AgentLoop) Run(ctx context.Context) {
 			}
 			a.dispatchMessage(ctx, msg)
 
-
 		default:
 			// idle tick
 			time.Sleep(100 * time.Millisecond)
@@ -1228,6 +1271,13 @@ func (a *AgentLoop) dispatchMessage(ctx context.Context, msg chat.Inbound) {
 	if msg.Metadata != nil {
 		if sk, ok := msg.Metadata["session_key"].(string); ok && sk != "" {
 			sessionKey = sk
+		}
+	}
+	// Namespace sessions by active project so each project keeps its own
+	// conversation history per chat (mirrors the -project CLI flag).
+	if a.projects != nil {
+		if n := a.projects.ActiveProject(); n != "" {
+			sessionKey = "proj:" + n + ":" + sessionKey
 		}
 	}
 
@@ -1330,7 +1380,28 @@ func (a *AgentLoop) dispatchMessage(ctx context.Context, msg chat.Inbound) {
 				sendChannelNotification(a.hub, msg.Channel, msg.ChatID, fmt.Sprintf("✅ Switched to session: *%s* (%d messages)", title, len(target.History)))
 				return
 			}
+			// Project switch callback: prj:<name> or prj:none
+			if strings.HasPrefix(cd, "prj:") {
+				name := strings.TrimPrefix(cd, "prj:")
+				if name == "none" {
+					name = ""
+				}
+				a.handleProjectSwitch(msg, name)
+				return
+			}
 		}
+	}
+
+	// Handle /project — runtime workspace switching (mirrors -project CLI flag).
+	//   /project                status + picker
+	//   /project list           list registered projects
+	//   /project <name>         switch active project
+	//   /project none           back to profile workspace
+	//   /project add <name> <path>   register a project directory
+	//   /project remove <name>  unregister (active project cannot be removed)
+	if projRest, ok := strings.CutPrefix(strings.TrimSpace(msg.Content), "/project"); ok && (projRest == "" || projRest[0] == ' ') {
+		a.handleProjectCommand(msg, strings.TrimSpace(projRest))
+		return
 	}
 
 	// Handle /sessions — list all archived sessions for this chat.
@@ -1514,7 +1585,9 @@ func (a *AgentLoop) dispatchMessage(ctx context.Context, msg chat.Inbound) {
 
 	// Set tool context (so message tool knows channel+chat+metadata)
 	if mt := a.tools.Get("message"); mt != nil {
-		if mtool, ok := mt.(interface{ SetContext(string, string, map[string]interface{}) }); ok {
+		if mtool, ok := mt.(interface {
+			SetContext(string, string, map[string]interface{})
+		}); ok {
 			mtool.SetContext(msg.Channel, msg.ChatID, msg.Metadata)
 		}
 	}
@@ -1972,7 +2045,9 @@ func (a *AgentLoop) ProcessDirectWithSessionAndSystemPrompt(content string, time
 	// Set tool context so message/cron tools know the originating channel,
 	// matching what Run() does for hub-based messages.
 	if mt := a.tools.Get("message"); mt != nil {
-		if mtool, ok := mt.(interface{ SetContext(string, string, map[string]interface{}) }); ok {
+		if mtool, ok := mt.(interface {
+			SetContext(string, string, map[string]interface{})
+		}); ok {
 			mtool.SetContext("cli", "direct", nil)
 		}
 	}
@@ -2079,6 +2154,7 @@ func (a *AgentLoop) ProcessDirectWithSessionAndSystemPrompt(content string, time
 	}
 	return maxIterReply, nil
 }
+
 // Tries Ollama first, falls back to remote API, then FTS5-only mode.
 // memorySlug creates a URL-safe slug from text for use as a brain page slug.
 func memorySlug(s string) string {

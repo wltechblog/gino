@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/wltechblog/gino/internal/config"
@@ -21,6 +23,7 @@ import (
 //   - "yolo":       no restrictions — string commands allowed, no path validation, no blacklist
 
 type ExecTool struct {
+	mu          sync.RWMutex
 	timeout     time.Duration
 	allowedDir  string
 	allowedDirs []string
@@ -366,8 +369,29 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]interface{}) (st
 	return t.runCmd(ctx, "sh", []string{"-c", shellCmd}, workDir)
 }
 
+// SetWorkspace atomically updates the default working directory (used when
+// no cwd argument is provided). The allowed-dirs list is left untouched —
+// previously allowed directories remain executable-in. Used by runtime
+// project switching.
+func (t *ExecTool) SetWorkspace(dir string) error {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return fmt.Errorf("exec: resolve workspace path: %w", err)
+	}
+	info, err := os.Stat(abs)
+	if err != nil || !info.IsDir() {
+		return fmt.Errorf("exec: workspace %q is not an accessible directory", abs)
+	}
+	t.mu.Lock()
+	t.allowedDir = abs
+	t.mu.Unlock()
+	return nil
+}
+
 func (t *ExecTool) resolveWorkDir(args map[string]interface{}) (string, error) {
+	t.mu.RLock()
 	workDir := t.allowedDir
+	t.mu.RUnlock()
 	if cwdRaw, ok := args["cwd"]; ok {
 		cwd, ok := cwdRaw.(string)
 		if !ok {
