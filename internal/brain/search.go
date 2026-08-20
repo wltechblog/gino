@@ -6,18 +6,20 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"time"
 	"unicode"
 )
 
 // rankedResult is an internal intermediate result used by the search pipeline.
 // Not exported — consumers use SearchResult.
 type rankedResult struct {
-	PageID int64
-	Slug   string
-	Title  string
-	Score  float64
-	Source string
-	Type   string
+	PageID    int64
+	Slug      string
+	Title     string
+	Score     float64
+	Source    string
+	Type      string
+	UpdatedAt time.Time
 }
 
 // sanitizeFTSQuery cleans a raw query string for safe use with SQLite FTS5 MATCH.
@@ -100,14 +102,19 @@ func (b *Brain) Search(ctx context.Context, query string, opts SearchOpts) ([]Se
 		return []SearchResult{}, nil
 	}
 	if len(ftsResults) == 0 {
-		return b.rankToResults(vecResults, opts.Limit), nil
+		ranked := b.rrfRank(vecResults)
+		ranked = b.applyRecency(ranked, opts)
+		return b.rankToResults(ranked, opts.Limit), nil
 	}
 	if len(vecResults) == 0 {
-		return b.rankToResults(ftsResults, opts.Limit), nil
+		ranked := b.rrfRank(ftsResults)
+		ranked = b.applyRecency(ranked, opts)
+		return b.rankToResults(ranked, opts.Limit), nil
 	}
 
-	// Reciprocal Rank Fusion
+	// Reciprocal Rank Fusion, then recency decay
 	merged := b.rrfFuse(ftsResults, vecResults)
+	merged = b.applyRecency(merged, opts)
 	return b.rankToResults(merged, opts.Limit), nil
 }
 
@@ -124,7 +131,7 @@ func (b *Brain) searchFTS(ctx context.Context, query string, opts SearchOpts) ([
 
 	rows, err := b.db.Query(`
 		SELECT p.id, p.slug, p.title, p.source_id, p.type,
-			bm25(pages_fts) AS score
+			bm25(pages_fts) AS score, p.updated_at
 		FROM pages_fts fts
 		JOIN pages p ON p.id = fts.rowid
 		WHERE pages_fts MATCH ?
@@ -138,9 +145,11 @@ func (b *Brain) searchFTS(ctx context.Context, query string, opts SearchOpts) ([
 	var results []rankedResult
 	for rows.Next() {
 		var r rankedResult
-		if err := rows.Scan(&r.PageID, &r.Slug, &r.Title, &r.Source, &r.Type, &r.Score); err != nil {
+		var ts string
+		if err := rows.Scan(&r.PageID, &r.Slug, &r.Title, &r.Source, &r.Type, &r.Score, &ts); err != nil {
 			continue
 		}
+		r.UpdatedAt = parseTimeField(ts)
 		// Apply source filter
 		if len(opts.Sources) > 0 && !contains(opts.Sources, r.Source) {
 			continue
@@ -174,7 +183,7 @@ func (b *Brain) searchVector(ctx context.Context, query string, opts SearchOpts)
 	// Load all stored vectors and compute cosine similarity
 	// For large brains, this should be replaced with sqlite-vec or an HNSW index
 	rows, err := b.db.Query(`
-		SELECT e.page_id, e.vector, p.slug, p.title, p.source_id, p.type
+		SELECT e.page_id, e.vector, p.slug, p.title, p.source_id, p.type, p.updated_at
 		FROM embeddings e
 		JOIN pages p ON p.id = e.page_id`)
 	if err != nil {
@@ -183,20 +192,21 @@ func (b *Brain) searchVector(ctx context.Context, query string, opts SearchOpts)
 	defer func() { _ = rows.Close() }()
 
 	type vecEntry struct {
-		PageID int64
-		Slug   string
-		Title  string
-		Source string
-		Type   string
-		Score  float64
+		PageID    int64
+		Slug      string
+		Title     string
+		Source    string
+		Type      string
+		Score     float64
+		UpdatedAt time.Time
 	}
 
 	entries := make([]vecEntry, 0, 64)
 	for rows.Next() {
 		var pageID int64
 		var vecBlob []byte
-		var slug, title, source, ptype string
-		if err := rows.Scan(&pageID, &vecBlob, &slug, &title, &source, &ptype); err != nil {
+		var slug, title, source, ptype, ts string
+		if err := rows.Scan(&pageID, &vecBlob, &slug, &title, &source, &ptype, &ts); err != nil {
 			continue
 		}
 		// Apply filters before computing similarity
@@ -212,6 +222,7 @@ func (b *Brain) searchVector(ctx context.Context, query string, opts SearchOpts)
 		entries = append(entries, vecEntry{
 			PageID: pageID, Slug: slug, Title: title,
 			Source: source, Type: ptype, Score: score,
+			UpdatedAt: parseTimeField(ts),
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -231,12 +242,13 @@ func (b *Brain) searchVector(ctx context.Context, query string, opts SearchOpts)
 	results := make([]rankedResult, 0, limit)
 	for i := 0; i < limit; i++ {
 		results = append(results, rankedResult{
-			PageID: entries[i].PageID,
-			Slug:   entries[i].Slug,
-			Title:  entries[i].Title,
-			Score:  entries[i].Score,
-			Source: entries[i].Source,
-			Type:   entries[i].Type,
+			PageID:    entries[i].PageID,
+			Slug:      entries[i].Slug,
+			Title:     entries[i].Title,
+			Score:     entries[i].Score,
+			Source:    entries[i].Source,
+			Type:      entries[i].Type,
+			UpdatedAt: entries[i].UpdatedAt,
 		})
 	}
 	return results, nil
@@ -313,6 +325,57 @@ func (b *Brain) rankToResults(ranked []rankedResult, limit int) []SearchResult {
 		})
 	}
 	return results
+}
+
+// rrfRank converts a single ranked list into RRF scores (k=60).
+// Used when only one retrieval method produced results, so recency decay
+// operates on the same scale as fused results.
+func (b *Brain) rrfRank(results []rankedResult) []rankedResult {
+	const k = 60.0
+	out := make([]rankedResult, len(results))
+	for i, r := range results {
+		r.Score = 1.0 / (k + float64(i) + 1)
+		out[i] = r
+	}
+	return out
+}
+
+// applyRecency multiplies each score by an age-based decay factor.
+// factor = recencyWeight^ageDays (exponential decay; recencyWeight <= 0 or >= 1 disables).
+// Default recencyWeight = 0.985 → a page loses ~50% of its score after ~46 days.
+func (b *Brain) applyRecency(results []rankedResult, opts SearchOpts) []rankedResult {
+	w := b.opts.RecencyWeight
+	if w <= 0 || w >= 1 {
+		return results
+	}
+	now := time.Now()
+	for i := range results {
+		if results[i].UpdatedAt.IsZero() {
+			continue
+		}
+		ageDays := now.Sub(results[i].UpdatedAt).Hours() / 24
+		factor := math.Pow(w, ageDays)
+		results[i].Score *= factor
+	}
+	sort.SliceStable(results, func(i, j int) bool {
+		return results[i].Score > results[j].Score
+	})
+	return results
+}
+
+// parseTimeField parses updated_at columns which may be RFC3339 strings
+// (written by IngestPage) or SQLite CURRENT_TIMESTAMP format (2006-01-02 15:04:05).
+func parseTimeField(s string) time.Time {
+	if s == "" {
+		return time.Time{}
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t
+	}
+	if t, err := time.Parse("2006-01-02 15:04:05", s); err == nil {
+		return t
+	}
+	return time.Time{}
 }
 
 // --- Vector utilities ---

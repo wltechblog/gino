@@ -30,6 +30,10 @@ type Options struct {
 	// DefaultSourceID is the source for pages ingested without an explicit source.
 	// Default: "default"
 	DefaultSourceID string
+
+	// RecencyWeight controls time-decay ranking: score *= RecencyWeight^ageDays.
+	// 0.985 default halves a page's score every ~46 days. Values <= 0 or >= 1 disable decay.
+	RecencyWeight float64
 }
 
 // DefaultOptions returns sensible defaults for a Pi-scale brain.
@@ -38,6 +42,7 @@ func DefaultOptions() Options {
 		EmbeddingModel:  "nomic-embed-text",
 		EmbeddingDims:   768,
 		DefaultSourceID: "default",
+		RecencyWeight:   0.985,
 	}
 }
 

@@ -88,7 +88,8 @@
     "ollamaBaseURL": "http://localhost:11434",
     "remoteApiBase": "",
     "remoteApiKey": "",
-    "remoteModel": ""
+    "remoteModel": "",
+    "recencyWeight": 0.985
   },
   "signal": {
     "enabled": false,

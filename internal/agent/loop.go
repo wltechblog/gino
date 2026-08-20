@@ -2219,6 +2219,9 @@ func initBrain(homeDir, workspace string, cfg *config.BrainConfig, provider prov
 	if cfg.EmbeddingDims > 0 {
 		opts.EmbeddingDims = cfg.EmbeddingDims
 	}
+	if cfg.RecencyWeight > 0 && cfg.RecencyWeight < 1 {
+		opts.RecencyWeight = cfg.RecencyWeight
+	}
 
 	brainInst, err := brain.Init(dbPath, embedder, opts)
 	if err != nil {

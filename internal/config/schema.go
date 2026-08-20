@@ -20,6 +20,8 @@ type BrainConfig struct {
 	RemoteAPIBase  string `json:"remoteApiBase,omitempty"`  // fallback remote API base URL
 	RemoteAPIKey   string `json:"remoteApiKey,omitempty"`   // fallback remote API key
 	RemoteModel    string `json:"remoteModel,omitempty"`    // fallback remote model name
+
+	RecencyWeight float64 `json:"recencyWeight,omitempty"` // search ranking time-decay: score *= w^ageDays; 0 disables (default 0.985)
 }
 
 // MCPServerConfig describes a single MCP server connection.
