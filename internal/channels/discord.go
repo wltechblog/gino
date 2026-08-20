@@ -526,6 +526,12 @@ func (c *discordClient) createThreadAndForward(m *discordgo.MessageCreate, paren
 	c.forwardMessage(m, thread.ID, false)
 }
 
+// isAllowlisted reports whether the Discord user ID is in the allowlist.
+func (c *discordClient) isAllowlisted(userID string) bool {
+	_, ok := c.allowed[userID]
+	return ok
+}
+
 func (c *discordClient) forwardMessage(m *discordgo.MessageCreate, chatID string, isDM bool) {
 	// Strip bot @-mentions from the message text.
 	content := m.Content
@@ -563,6 +569,10 @@ func (c *discordClient) forwardMessage(m *discordgo.MessageCreate, chatID string
 			"guild_id":    m.GuildID,
 			"channel_id":  m.ChannelID,
 			"is_dm":       isDM,
+			// PRIVACY: a sender is privileged only if allowFrom is unset (owner-only
+			// bot) or the sender is allowlisted. Otherwise treat as unprivileged so
+			// memory/brain gating applies.
+			"privileged": len(c.allowed) == 0 || c.isAllowlisted(m.Author.ID),
 		},
 	}
 }

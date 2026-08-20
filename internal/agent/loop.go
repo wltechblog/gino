@@ -228,8 +228,14 @@ func summarizeToolCalls(records []toolCallRecord) string {
 // has relevant context for future queries. Not all tool results are worth
 // storing — we focus on high-signal tools like filesystem reads, web fetches,
 // and exec outputs.
-func (a *AgentLoop) captureToolMemory(toolName, result string) {
+func (a *AgentLoop) captureToolMemory(toolName, result string, privileged bool) {
 	if a.memory == nil || result == "" || strings.HasPrefix(result, "(tool error)") {
+		return
+	}
+	// PRIVACY: shared short-term memory is injected into every prompt (Top-K
+	// ranked memories). Only privileged turns may write to it; unprivileged
+	// tool outputs would leak into the owner's prompts and other users'.
+	if !privileged {
 		return
 	}
 
@@ -247,9 +253,20 @@ func (a *AgentLoop) captureToolMemory(toolName, result string) {
 
 // extractTurnMemory runs a background LLM call to extract facts worth remembering
 // from the completed turn. It runs in a goroutine so it doesn't delay the response.
-func (a *AgentLoop) extractTurnMemory(userMsg, assistantReply string, toolCalls []toolCallRecord, channel, senderID string) {
+func (a *AgentLoop) extractTurnMemory(userMsg, assistantReply string, toolCalls []toolCallRecord, channel, senderID string, metadata map[string]interface{}) {
 	if a.memory == nil || a.provider == nil {
 		return
+	}
+
+	// PRIVACY: derive privilege from metadata. Unprivileged turns must not
+	// write to the shared daily note or shared short-term memory — those are
+	// injected into every prompt. Their facts go to the per-user brain source
+	// only (below).
+	isPrivileged := true
+	if metadata != nil {
+		if p, ok := metadata["privileged"].(bool); ok {
+			isPrivileged = p
+		}
 	}
 
 	// Build a compact summary of what happened in this turn
@@ -310,17 +327,25 @@ Output one fact per line starting with "- ". If nothing is worth remembering, ou
 		return
 	}
 
-	// Save to today's notes with a turn-extraction marker (global memory)
-	entry := fmt.Sprintf("[turn-extract] %s", facts)
-	if err := a.memory.AppendToday(entry); err != nil {
-		log.Printf("Failed to save turn-extracted facts: %v", err)
-	} else {
-		log.Printf("Turn memory: extracted facts from turn (%d chars)", len(facts))
+	// Save to today's notes with a turn-extraction marker (global memory).
+	// PRIVACY: only for privileged turns. Unprivileged facts go ONLY to the
+	// per-user brain source (below) so they never appear in other prompts.
+	if isPrivileged {
+		entry := fmt.Sprintf("[turn-extract] %s", facts)
+		if err := a.memory.AppendToday(entry); err != nil {
+			log.Printf("Failed to save turn-extracted facts: %v", err)
+		} else {
+			log.Printf("Privileged turn memory: extracted facts (%d chars)", len(facts))
+		}
 	}
 
-	// For non-owner channels (Discord), also ingest into per-user brain source
-	// so each user's memories are isolated and searchable independently.
-	if a.brain != nil && senderID != "" && channel != "cli" && channel != "telegram" {
+	// Per-user brain ingest. Two paths:
+	//   - Unprivileged turns (Discord, Telegram groups, any channel marking
+	//     privileged=false): their ONLY landing spot — keeps user facts in the
+	//     user-scoped source, out of shared prompt-injected memory.
+	//   - Privileged turns on multi-user channels: also stored per-user for
+	//     personalization, in addition to the global daily note.
+	if a.brain != nil && senderID != "" && channel != "cli" && (channel != "telegram" || !isPrivileged) {
 		userSource := fmt.Sprintf("user:%s:%s", channel, senderID)
 		lines := strings.Split(facts, "\n")
 		for _, line := range lines {
@@ -1714,6 +1739,15 @@ func isSignalMessage(msg chat.Inbound) bool {
 }
 
 func (a *AgentLoop) processTurn(ctx context.Context, at *activeTurn, sessionKey string, msg chat.Inbound, sess *session.Session, messages []providers.Message) string {
+	// Privilege for this turn: derived from message metadata. Controls whether
+	// tool outputs enter shared short-term memory.
+	privileged := true
+	if msg.Metadata != nil {
+		if p, ok := msg.Metadata["privileged"].(bool); ok {
+			privileged = p
+		}
+	}
+
 	iteration := 0
 	finalContent := ""
 	lastToolResult := ""
@@ -1900,7 +1934,7 @@ func (a *AgentLoop) processTurn(ctx context.Context, at *activeTurn, sessionKey 
 
 				// Auto-populate short-term memory with tool results so the ranker
 				// has useful context for future queries.
-				a.captureToolMemory(tc.Name, toolResultForLLM)
+				a.captureToolMemory(tc.Name, toolResultForLLM, privileged)
 
 				toolMsg := providers.Message{Role: "tool", Content: toolResultForLLM, ToolCallID: tc.ID}
 				messages = append(messages, toolMsg)
@@ -1953,7 +1987,7 @@ done:
 					log.Printf("extractTurnMemory panic recovered: %v", r)
 				}
 			}()
-			a.extractTurnMemory(msg.Content, finalContent, toolCallLog, msg.Channel, msg.SenderID)
+			a.extractTurnMemory(msg.Content, finalContent, toolCallLog, msg.Channel, msg.SenderID, msg.Metadata)
 		}()
 	}
 

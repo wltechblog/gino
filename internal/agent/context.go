@@ -172,6 +172,16 @@ Do NOT use: # headings, --- rulers, *-bullet-lists, --dash-lists, 1.-numbered-li
 		}
 	}
 
+	// Privilege: computed once, used by memory gating below and brain scoping.
+	// Default is privileged (owner-operated channels: cli, owner DMs) unless the
+	// channel explicitly marks the sender unprivileged via metadata.
+	isPrivileged := true
+	if metadata != nil {
+		if p, ok := metadata["privileged"].(bool); ok {
+			isPrivileged = p
+		}
+	}
+
 	// Memory tool instruction
 	sysParts = append(sysParts, "If you decide something should be remembered, call the tool 'write_memory' with JSON arguments: {\"target\": \"today\"|\"long\", \"content\": \"...\", \"append\": true|false}. Use a tool call rather than plain chat text when writing memory.")
 
@@ -189,15 +199,22 @@ Do NOT use: # headings, --- rulers, *-bullet-lists, --dash-lists, 1.-numbered-li
 		sysParts = append(sysParts, sb.String())
 	}
 
-	// File-based memory context (long-term + today's notes)
-	if memoryContext != "" {
+	// File-based memory context (long-term + today's notes).
+	// PRIVACY: gated by privilege. Unprivileged users (Discord/Telegram-group)
+	// must not see MEMORY.md or the daily note — those hold owner/admin facts.
+	if memoryContext != "" && isPrivileged {
 		sysParts = append(sysParts, "Memory:\n"+memoryContext)
 	}
 
-	// Top-K ranked memories
-	selected := memories
-	if cb.ranker != nil && len(memories) > 0 {
-		selected = cb.ranker.Rank(currentMessage, memories, cb.topK)
+	// Top-K ranked memories. PRIVACY: gated by privilege — these include
+	// tool outputs (exec/filesystem/web) from owner sessions, which must not
+	// leak into unprivileged prompts.
+	selected := []memory.MemoryItem{}
+	if isPrivileged {
+		selected = memories
+		if cb.ranker != nil && len(memories) > 0 {
+			selected = cb.ranker.Rank(currentMessage, memories, cb.topK)
+		}
 	}
 	if len(selected) > 0 {
 		var sb strings.Builder
@@ -214,13 +231,7 @@ Do NOT use: # headings, --- rulers, *-bullet-lists, --dash-lists, 1.-numbered-li
 	if cb.brain != nil {
 		searchOpts := brain.SearchOpts{Limit: 5}
 
-		// Determine if this is an unprivileged user that needs user-scoped memory
-		isPrivileged := true
-		if metadata != nil {
-			if p, ok := metadata["privileged"].(bool); ok {
-				isPrivileged = p
-			}
-		}
+		// Unprivileged users are scoped to their per-user brain source.
 		if senderID != "" && channel != "cli" && !isPrivileged {
 			userSource := fmt.Sprintf("user:%s:%s", channel, senderID)
 			searchOpts.Sources = []string{userSource}

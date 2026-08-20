@@ -292,8 +292,17 @@ func StartTelegramWithBase(ctx context.Context, hub *chat.Hub, token, base strin
 					}
 
 					if cq.Data != "" && chatID != "" {
+						// PRIVACY: callbacks inherit the sender's privilege, not a blanket true.
+						// A group member tapping an inline keyboard button must not
+						// open a privileged session. Same logic as regular messages:
+						// privileged only for owner DMs (allowlist) or when no
+						// allowlist is configured.
+						cbPriv := len(allowed) == 0
+						if !cbPriv {
+							_, cbPriv = allowed[fromID]
+						}
 						meta := map[string]interface{}{
-							"privileged":   true,
+							"privileged":   cbPriv,
 							"session_key":  "telegram:" + chatID,
 							"group":        false,
 							"sender_name":  cq.From.FirstName,
