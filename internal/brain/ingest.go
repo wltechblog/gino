@@ -168,19 +168,22 @@ func (b *Brain) Maintain(ctx context.Context) (*MaintainReport, error) {
 	start := time.Now()
 	report := &MaintainReport{}
 
-	// Phase 1: Backfill missing embeddings
+	// Phase 1: Backfill missing embeddings.
+	// Drain the rows fully and Close() them BEFORE any write: sqliteRows holds
+	// the store RLock until Close, so calling db.Exec (write lock) with the
+	// rows still open deadlocks.
 	if b.embedder != nil && b.opts.EmbeddingDims > 0 {
+		type pendingPage struct {
+			ID      int64
+			Content string
+		}
+		var pending []pendingPage
 		rows, err := b.db.Query(`
 			SELECT p.id, p.content FROM pages p
 			LEFT JOIN embeddings e ON e.page_id = p.id
 			WHERE e.page_id IS NULL AND p.content != ''
 			LIMIT 100`)
 		if err == nil {
-			type pendingPage struct {
-				ID      int64
-				Content string
-			}
-			var pending []pendingPage
 			for rows.Next() {
 				var pp pendingPage
 				if rows.Scan(&pp.ID, &pp.Content) == nil {
@@ -189,7 +192,7 @@ func (b *Brain) Maintain(ctx context.Context) (*MaintainReport, error) {
 			}
 			_ = rows.Close()
 
-			// Batch embed
+			// Batch embed (rows are closed; writes below are safe)
 			if len(pending) > 0 {
 				texts := make([]string, len(pending))
 				for i, pp := range pending {
@@ -214,26 +217,29 @@ func (b *Brain) Maintain(ctx context.Context) (*MaintainReport, error) {
 		}
 	}
 
-	// Phase 2: Extract entities from unprocessed pages
+	// Phase 2: Extract entities from unprocessed pages.
+	// The page IDs must be fully drained and the rows Closed BEFORE calling
+	// ExtractEntities: it writes via db.Exec (write lock) while the open rows
+	// hold the RLock — executing writes with rows open deadlocks the store.
+	pageIDs := []int64{}
 	entityRows, err := b.db.Query(`
 		SELECT p.id FROM pages p
 		WHERE p.content != ''
 		ORDER BY p.id`)
 	if err == nil {
-		var pageIDs []int64
 		for entityRows.Next() {
 			var pid int64
 			if entityRows.Scan(&pid) == nil {
 				pageIDs = append(pageIDs, pid)
 			}
 		}
-		defer func() { _ = entityRows.Close() }()
+		_ = entityRows.Close()
+	}
 
-		for _, pid := range pageIDs {
-			n, err := b.ExtractEntities(ctx, pid)
-			if err == nil {
-				report.EntitiesExtracted += n
-			}
+	for _, pid := range pageIDs {
+		n, err := b.ExtractEntities(ctx, pid)
+		if err == nil {
+			report.EntitiesExtracted += n
 		}
 	}
 

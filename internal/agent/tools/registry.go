@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -89,7 +90,21 @@ func (r *Registry) Execute(ctx context.Context, name string, args map[string]int
 	log.Printf("[tool] → %s %s", name, argsJSON)
 	start := time.Now()
 
-	result, err := t.Execute(ctx, args)
+	// Recover from tool panics so a single buggy tool cannot take down the
+	// entire gateway process. The panic is converted into a tool error that
+	// the LLM can see and react to.
+	var result string
+	var err error
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[tool] ✗ %s PANICKED after %s: %v\n%s", name, time.Since(start).Round(time.Millisecond), r, debug.Stack())
+				result = ""
+				err = fmt.Errorf("tool panicked: %v", r)
+			}
+		}()
+		result, err = t.Execute(ctx, args)
+	}()
 	elapsed := time.Since(start).Round(time.Millisecond)
 
 	if err != nil {
