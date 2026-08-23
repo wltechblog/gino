@@ -283,9 +283,9 @@ func (sm *SessionManager) PurgeOlderThan(days int, excludeKey string) int {
 			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 				log.Printf("Session: purge file %s: %v", path, err)
 			}
-			// Also remove checkpoint file if present.
+			// Also remove checkpoint file if present (best-effort; may not exist).
 			cpPath := filepath.Join(sm.workspace, "sessions", key+".active.json")
-			os.Remove(cpPath)
+			_ = os.Remove(cpPath)
 			deleted++
 		}
 	}

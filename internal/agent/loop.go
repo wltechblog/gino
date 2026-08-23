@@ -40,13 +40,13 @@ var stopCommands = []string{"/stop", "/cancel", "/abort"}
 //
 //	[0]              stable system prompt
 //	[1..userMsgIdx)  session history (alternating user/assistant)
-//	                  + volatile system context immediately before the user message
-//	[userMsgIdx]     current user message
+//	[userMsgIdx]     current user message (content + <turn_context> wrap)
 //	[userMsgIdx+1..] tool-call exchanges from this turn
 //
 // Trimming strategy:
-//  1. Always keep system[0], the volatile system message directly preceding
-//     the user message (if any), and user[userMsgIdx].
+//  1. Always keep system[0] and user[userMsgIdx] (the volatile context now
+//     lives inside the user message as a <turn_context> wrap, so there is no
+//     separate system message to preserve).
 //  2. Protect the last assistant text response (non-tool-call) so the LLM
 //     remembers what it just told the user — this prevents "I forgot the list".
 //  3. Reserve up to 20% of the budget for recent session history.
@@ -55,7 +55,7 @@ var stopCommands = []string{"/stop", "/cancel", "/abort"}
 //     preceding assistant tool_calls message to be valid).
 //
 // It returns the trimmed chain and the new index of the current user message
-// within it (the index shifts when the volatile system message is preserved).
+// within it.
 func trimTurnMessages(messages []providers.Message, userMsgIdx int, maxMsgs int) ([]providers.Message, int) {
 	if len(messages) <= maxMsgs {
 		return messages, userMsgIdx
@@ -85,16 +85,8 @@ func trimTurnMessages(messages []providers.Message, userMsgIdx int, maxMsgs int)
 	if userMsgIdx <= 1 {
 		result := make([]providers.Message, 0, maxMsgs)
 		result = append(result, messages[0])
-		// Preserve the volatile system context (memory/brain/current-user)
-		// that sits directly before the user message when present. The >=2
-		// guard avoids re-appending the stable system message at index 0.
-		newUserIdx := 1
-		if userMsgIdx >= 2 && messages[userMsgIdx-1].Role == "system" {
-			result = append(result, messages[userMsgIdx-1])
-			newUserIdx = 2
-		}
 		result = append(result, messages[userMsgIdx])
-		used := len(result)
+		used := 2
 
 		// Preserve last assistant text if found after userMsgIdx (shouldn't happen in fast path, but safe).
 		tailBudget := maxMsgs - used
@@ -110,25 +102,16 @@ func trimTurnMessages(messages []providers.Message, userMsgIdx int, maxMsgs int)
 		result = append(result, tail[skip:]...)
 		trimmed := len(messages) - len(result)
 		log.Printf("Turn context: trimmed %d messages (was %d, now %d)", trimmed, len(messages), len(result))
-		return result, newUserIdx
+		return result, 1
 	}
 
 	// --- Normal path: we have session history to preserve ---
 
 	result := make([]providers.Message, 0, maxMsgs)
-	result = append(result, messages[0]) // stable system
-	// Preserve the volatile system context (memory/brain/current-user)
-	// that sits directly before the user message when present. The >=2
-	// guard avoids re-appending the stable system message at index 0.
-	volatileIdx := -1
+	result = append(result, messages[0])          // stable system
+	result = append(result, messages[userMsgIdx]) // user (with turn_context wrap)
 	newUserIdx := 1
-	if userMsgIdx >= 2 && messages[userMsgIdx-1].Role == "system" {
-		volatileIdx = userMsgIdx - 1
-		result = append(result, messages[volatileIdx])
-		newUserIdx = 2
-	}
-	result = append(result, messages[userMsgIdx]) // user
-	used := len(result)
+	used := 2
 
 	// Always preserve the last assistant text response.
 	if lastAssistantTextIdx >= 0 {
@@ -148,8 +131,8 @@ func trimTurnMessages(messages []providers.Message, userMsgIdx int, maxMsgs int)
 	var historyWindow []providers.Message
 	historyCount := 0
 	for i := userMsgIdx - 1; i >= 1 && historyCount < historyBudget; i-- {
-		if i == lastAssistantTextIdx || i == volatileIdx {
-			continue // already preserved / not history
+		if i == lastAssistantTextIdx {
+			continue // already preserved
 		}
 		if messages[i].Role == "user" || messages[i].Role == "assistant" {
 			historyWindow = append(historyWindow, messages[i])
@@ -514,6 +497,23 @@ func labelSharedContent(channel string, metadata map[string]interface{}, content
 		return fmt.Sprintf("[from %s] %s", senderName, content)
 	}
 	return content
+}
+
+// stripTurnContextWrap removes a trailing <turn_context>...</turn_context>
+// block from a user message. BuildMessages folds the volatile context
+// (memory/brain/current-user) into the live user message; this helper strips
+// it for paths that need the bare user content (benchmark system-prompt
+// override).
+func stripTurnContextWrap(content string) string {
+	const marker = "\n\n<turn_context>\n"
+	idx := strings.LastIndex(content, marker)
+	if idx < 0 {
+		return content
+	}
+	if !strings.HasSuffix(content, "\n</turn_context>") {
+		return content
+	}
+	return content[:idx]
 }
 
 // pendingMsg holds a user message that arrived while a turn was in progress.
@@ -2153,9 +2153,9 @@ func (a *AgentLoop) ProcessDirectWithSessionAndSystemPrompt(content string, time
 	memories := a.memory.Recent(5)
 	messages := a.context.BuildMessages(history, content, "cli", "direct", "", memCtx, memories, nil)
 
-	// Override system prompt if provided (used by benchmarks). The volatile
-	// system message (memory/brain context) is dropped too, so benchmarks run
-	// with exactly the injected prompt.
+	// Override system prompt if provided (used by benchmarks). The
+	// <turn_context> wrap is stripped from the current user message too, so
+	// benchmarks run with exactly the injected prompt.
 	if systemPromptOverride != "" && len(messages) > 0 && messages[0].Role == "system" {
 		messages[0].Content = systemPromptOverride
 		filtered := make([]providers.Message, 0, len(messages))
@@ -2165,6 +2165,10 @@ func (a *AgentLoop) ProcessDirectWithSessionAndSystemPrompt(content string, time
 				continue
 			}
 			filtered = append(filtered, m)
+		}
+		// Strip the turn_context wrap from the (last) user message.
+		if n := len(filtered); n > 0 && filtered[n-1].Role == "user" {
+			filtered[n-1].Content = stripTurnContextWrap(filtered[n-1].Content)
 		}
 		messages = filtered
 	}

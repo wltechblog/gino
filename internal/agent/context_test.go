@@ -21,16 +21,26 @@ func TestBuildMessagesIncludesMemories(t *testing.T) {
 	if msgs[0].Role != "system" {
 		t.Fatalf("expected first message to be system prompt, got %s", msgs[0].Role)
 	}
-	// find a system message containing the memory context
+	// Memory context and ranked memories now live in the <turn_context> wrap
+	// folded into the current user message (cache-friendly layout), not in a
+	// separate system message.
 	foundMemCtx := false
 	foundSummary := false
-	for _, m := range msgs {
-		if m.Role == "system" && strings.Contains(m.Content, "Long-term memory: important fact") {
-			foundMemCtx = true
-		}
-		if m.Role == "system" && strings.Contains(m.Content, "remember this") && strings.Contains(m.Content, "big fact") {
-			foundSummary = true
-		}
+	last := msgs[len(msgs)-1]
+	if last.Role != "user" {
+		t.Fatalf("expected last message to be the current user message, got %s", last.Role)
+	}
+	if !strings.Contains(last.Content, "<turn_context>") || !strings.Contains(last.Content, "</turn_context>") {
+		t.Fatalf("expected <turn_context> wrap in current user message")
+	}
+	if strings.Contains(last.Content, "Long-term memory: important fact") {
+		foundMemCtx = true
+	}
+	if strings.Contains(last.Content, "remember this") && strings.Contains(last.Content, "big fact") {
+		foundSummary = true
+	}
+	if last := msgs[len(msgs)-1].Content; strings.Contains(last, "user: hi") {
+		t.Fatalf("history leaked into current message")
 	}
 	if !foundMemCtx {
 		t.Fatalf("expected memory context system message to be present in messages: %v", msgs)

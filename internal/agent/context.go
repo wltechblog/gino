@@ -69,17 +69,21 @@ func (cb *ContextBuilder) SetWorkspace(dir string) {
 // BuildMessages assembles the LLM message chain in a prompt-cache-friendly
 // layout:
 //
-//	[0]             stable system prompt (identical across turns of a session)
-//	[1..n)          session history (append-only)
-//	[n]             volatile system context (rebuilt every turn)
-//	[n+1]           current user message
+//	[0]     stable system prompt (identical across turns of a session)
+//	[1..n)  session history (append-only; stored user messages never carry the wrap)
+//	[n]     current user message = user content + <turn_context> volatile wrap
 //
 // Provider-side prompt caching (z.ai context caching, OpenAI prompt caching,
 // DeepSeek) reuses computation only when the token prefix matches byte-for-byte
 // from token 0. Anything that changes between turns (current-user line,
-// ranked memories, brain search results, OAuth notices) therefore lives in
-// the trailing system message, so the stable prefix + history remain a valid
-// cache key and each turn only pays full price for its new tail.
+// ranked memories, brain search results, OAuth notices) therefore lives in a
+// <turn_context> wrap folded into the trailing end of the CURRENT user
+// message — never as a separate message before it. Session history stores the
+// user message without the wrap, so the next turn replays every stored message
+// byte-identically: the cache prefix covers the stable system prompt plus the
+// entire history, and only the new wrap + reply are uncached. (A volatile
+// system message inserted before the user message, as in earlier revisions,
+// broke the prefix at exactly that point on every new turn.)
 func (cb *ContextBuilder) BuildMessages(history []string, currentMessage string, channel, chatID, senderID string, memoryContext string, memories []memory.MemoryItem, metadata map[string]interface{}) []providers.Message {
 	msgs := make([]providers.Message, 0, len(history)+3)
 
@@ -192,13 +196,13 @@ Do NOT use: # headings, --- rulers, *-bullet-lists, --dash-lists, 1.-numbered-li
 		msgs = append(msgs, providers.Message{Role: role, Content: content})
 	}
 
-	// ---- Volatile system parts (rebuilt every turn) ----
-	// These are placed AFTER history and immediately BEFORE the current user
-	// message so per-turn changes never invalidate the cached stable prefix
-	// or the cached history. Providers that support mid-conversation system
-	// messages (all OpenAI-compatible endpoints) handle this fine.
+	// ---- Volatile context parts (rebuilt every turn) ----
+	// These are folded into the trailing end of the CURRENT user message
+	// (inside a <turn_context> wrap) so per-turn changes never invalidate the
+	// cached stable prefix or the cached history.
 
 	var volatileParts []string
+	volatileCtx := ""
 
 	// User identity — include sender info for non-system channels so the LLM
 	// can personalize responses and distinguish between users. In shared
@@ -310,12 +314,22 @@ Do NOT use: # headings, --- rulers, *-bullet-lists, --dash-lists, 1.-numbered-li
 	}
 
 	if len(volatileParts) > 0 {
-		msgs = append(msgs, providers.Message{Role: "system", Content: strings.Join(volatileParts, "\n\n")})
+		volatileCtx = strings.Join(volatileParts, "\n\n")
 	}
 
 	// Current user message. In shared sessions (Discord threads) the loop has
 	// already prefixed the content with a "[from X]" speaker label; history
 	// entries carry their own labels from when they were stored.
-	msgs = append(msgs, providers.Message{Role: "user", Content: currentMessage})
+	//
+	// The volatile context is wrapped into the TRAILING END of this user
+	// message (not stored in history) so the previous turn's cached prefix —
+	// stable system + full history — remains a byte-identical prefix of this
+	// request. The wrap is delimited so the LLM can distinguish the user's
+	// words from injected context.
+	current := currentMessage
+	if volatileCtx != "" {
+		current = currentMessage + "\n\n<turn_context>\n" + volatileCtx + "\n</turn_context>"
+	}
+	msgs = append(msgs, providers.Message{Role: "user", Content: current})
 	return msgs
 }
