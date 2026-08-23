@@ -37,10 +37,10 @@ func TestVerboseLogsRequestResponse(t *testing.T) {
 	if !strings.Contains(out, "LLM REQUEST") || !strings.Contains(out, "LLM RESPONSE") {
 		t.Fatalf("verbose labels missing:\n%s", out)
 	}
-	if !strings.Contains(out, `"model": "test-model"`) {
+	if !strings.Contains(out, `"model":"test-model"`) {
 		t.Fatalf("request JSON missing model:\n%s", out)
 	}
-	if !strings.Contains(out, `"cached_tokens": 50`) {
+	if !strings.Contains(out, `"cached_tokens":50`) {
 		t.Fatalf("response JSON missing usage details:\n%s", out)
 	}
 }

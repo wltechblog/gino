@@ -2363,10 +2363,11 @@ func initBrain(homeDir, workspace string, cfg *config.BrainConfig, provider prov
 	return brainInst
 }
 
-// logVerboseJSON pretty-prints a labeled JSON payload to the log. Used by
-// verbose mode at the agent layer (final reply, turn stats).
+// logVerboseJSON emits a labeled single-line JSON payload to the log. Used by
+// verbose and analytics modes at the agent layer (final reply, turn stats).
+// Single-line output keeps log lines extractable via grep/jq.
 func logVerboseJSON(label string, payload interface{}) {
-	b, err := json.MarshalIndent(payload, "", "  ")
+	b, err := json.Marshal(payload)
 	if err != nil {
 		log.Printf("%s: <marshal error: %v>", label, err)
 		return

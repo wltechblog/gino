@@ -104,10 +104,12 @@ type LLMProvider interface {
 	GetModelContext(ctx context.Context, model string) (int, error)
 }
 
-// logVerboseJSON pretty-prints a labeled JSON payload to the log. Used by
-// verbose mode to dump LLM traffic (requests, responses, analytics).
+// logVerboseJSON emits a labeled single-line JSON payload to the log. Used by
+// verbose and analytics modes to dump LLM traffic (requests, responses,
+// usage stats). Single-line output keeps log lines extractable with tools
+// like grep/jq without needing multi-line record assembly.
 func logVerboseJSON(label string, payload interface{}) {
-	b, err := json.MarshalIndent(payload, "", "  ")
+	b, err := json.Marshal(payload)
 	if err != nil {
 		log.Printf("%s: <marshal error: %v>", label, err)
 		return
