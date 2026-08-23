@@ -286,6 +286,9 @@ func runAgent(homeFlag string, args []string) {
 	if cfg.Agents.Defaults.EnableToolErrorMessages != nil {
 		ag.SetToolErrorMessages(*cfg.Agents.Defaults.EnableToolErrorMessages)
 	}
+	if cfg.Agents.Defaults.Verbose {
+		ag.SetVerbose(true)
+	}
 
 	// Use requestTimeoutS from config, fallback to 300s
 	cliTimeout := 300 * time.Second
@@ -420,6 +423,9 @@ func runGateway(homeFlag string, args []string) {
 	}
 	if cfg.Agents.Defaults.EnableToolErrorMessages != nil {
 		ag.SetToolErrorMessages(*cfg.Agents.Defaults.EnableToolErrorMessages)
+	}
+	if cfg.Agents.Defaults.Verbose {
+		ag.SetVerbose(true)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

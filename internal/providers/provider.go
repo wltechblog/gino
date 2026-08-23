@@ -2,6 +2,8 @@ package providers
 
 import (
 	"context"
+	"encoding/json"
+	"log"
 	"strings"
 )
 
@@ -100,4 +102,15 @@ type LLMProvider interface {
 	// GetModelContext queries the provider for the model's context window size
 	// in tokens. Returns 0 and a nil error if unknown (caller applies defaults).
 	GetModelContext(ctx context.Context, model string) (int, error)
+}
+
+// logVerboseJSON pretty-prints a labeled JSON payload to the log. Used by
+// verbose mode to dump LLM traffic (requests, responses, analytics).
+func logVerboseJSON(label string, payload interface{}) {
+	b, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		log.Printf("%s: <marshal error: %v>", label, err)
+		return
+	}
+	log.Printf("%s: %s", label, b)
 }

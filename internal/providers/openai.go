@@ -25,7 +25,10 @@ type OpenAIProvider struct {
 	ReasoningEffort   string
 	PerAttemptTimeout time.Duration // timeout per individual API call attempt
 	Client            *http.Client
+	Verbose           bool // log full request/response JSON when true
 }
+
+func (p *OpenAIProvider) SetVerbose(v bool) { p.Verbose = v }
 
 func NewOpenAIProvider(apiKey, apiBase string, timeoutSecs, maxTokens int) *OpenAIProvider {
 	return NewOpenAIProviderWithRetry(apiKey, apiBase, timeoutSecs, maxTokens, 2, 2*time.Second)
@@ -353,6 +356,14 @@ func (p *OpenAIProvider) Chat(ctx context.Context, messages []Message, tools []T
 		}
 
 		log.Println("LLM request started")
+		if p.Verbose {
+			logVerboseJSON("LLM REQUEST", map[string]interface{}{
+				"url":     url,
+				"model":   model,
+				"attempt": attempt + 1,
+				"body":    json.RawMessage(b),
+			})
+		}
 		resp, err := p.Client.Do(req)
 		if err != nil {
 			cancel()
@@ -389,6 +400,17 @@ func (p *OpenAIProvider) Chat(ctx context.Context, messages []Message, tools []T
 		}
 		resp.Body.Close()
 		cancel()
+
+		if p.Verbose {
+			// Re-serialize the decoded response so verbose output shows exactly
+			// what the API returned (including usage details).
+			if rb, err := json.Marshal(out); err == nil {
+				logVerboseJSON("LLM RESPONSE", map[string]interface{}{
+					"status":   resp.Status,
+					"response": json.RawMessage(rb),
+				})
+			}
+		}
 
 		if u := out.Usage.toUsage(); u != nil && u.TotalTokens > 0 {
 			if u.CachedPromptTokens > 0 {

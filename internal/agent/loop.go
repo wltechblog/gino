@@ -466,6 +466,7 @@ type AgentLoop struct {
 	enableToolActivity      bool
 	enableToolCallMessages  bool
 	enableToolErrorMessages bool                 // default true — surface tool failures to user
+	verbose                 bool                 // dump final reply + stats as JSON
 	signalSocketPath        string               // GINO_SIGNAL_SOCKET injected into MCP child processes
 	signalListener          SignalTargetRecorder // optional: records last real channel for signal routing
 	compactor               *compactor           // nil = use legacy trimTurnMessages
@@ -812,6 +813,13 @@ func NewAgentLoopWithProfileWorkspace(b *chat.Hub, provider providers.LLMProvide
 
 func (a *AgentLoop) SetToolActivityIndicator(enabled bool) {
 	a.enableToolActivity = enabled
+}
+
+// SetVerbose enables verbose turn logging (dumps the final response sent to
+// the user as JSON). LLM request/response dumps are handled at the provider
+// layer; this covers the agent-level output.
+func (a *AgentLoop) SetVerbose(enabled bool) {
+	a.verbose = enabled
 }
 
 func (a *AgentLoop) SetToolCallMessages(enabled bool) {
@@ -1773,6 +1781,7 @@ func (a *AgentLoop) processTurn(ctx context.Context, at *activeTurn, sessionKey 
 
 	iteration := 0
 	var turnPrompt, turnCompletion, turnCached int
+	var lastUsage *providers.Usage
 	finalContent := ""
 	lastToolResult := ""
 	toolDefs := a.tools.Definitions()
@@ -1860,6 +1869,7 @@ func (a *AgentLoop) processTurn(ctx context.Context, at *activeTurn, sessionKey 
 			turnPrompt += resp.Usage.PromptTokens
 			turnCompletion += resp.Usage.CompletionTokens
 			turnCached += resp.Usage.CachedPromptTokens
+			lastUsage = resp.Usage
 		}
 		if err != nil {
 			// Check if it was cancelled
@@ -2028,6 +2038,19 @@ done:
 	}
 
 	log.Printf("Turn done: sending reply to %s/%s (%d chars, %d iterations, tokens: %d prompt / %d completion / %d cached)", msg.Channel, msg.ChatID, len(finalContent), iteration, turnPrompt, turnCompletion, turnCached)
+	if a.verbose {
+		var turnUsage any
+		if lastUsage != nil {
+			turnUsage = lastUsage
+		}
+		logVerboseJSON("LLM REPLY TO USER", map[string]interface{}{
+			"channel":    msg.Channel,
+			"chatID":     msg.ChatID,
+			"iterations": iteration,
+			"usage":      turnUsage,
+			"reply":      finalContent,
+		})
+	}
 	out := chat.Outbound{Channel: msg.Channel, ChatID: msg.ChatID, Content: finalContent}
 	if msg.Metadata != nil {
 		out.Metadata = map[string]interface{}{}
@@ -2314,4 +2337,15 @@ func initBrain(homeDir, workspace string, cfg *config.BrainConfig, provider prov
 	}
 
 	return brainInst
+}
+
+// logVerboseJSON pretty-prints a labeled JSON payload to the log. Used by
+// verbose mode at the agent layer (final reply, turn stats).
+func logVerboseJSON(label string, payload interface{}) {
+	b, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		log.Printf("%s: <marshal error: %v>", label, err)
+		return
+	}
+	log.Printf("%s: %s", label, b)
 }

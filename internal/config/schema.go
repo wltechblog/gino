@@ -113,6 +113,11 @@ type AgentDefaults struct {
 	MaxTurnMessages             int           `json:"maxTurnMessages,omitempty"`
 	MaxToolResultChars          int           `json:"maxToolResultChars,omitempty"`
 
+	// Verbose enables full LLM traffic logging: the sent prompt (request body),
+	// the raw received response, usage analytics, and the final response sent
+	// to the user — all as JSON. Intended for debugging; very noisy.
+	Verbose bool `json:"verbose,omitempty"`
+
 	// Web controls the built-in web fetch tool.
 	Web WebConfig `json:"web"`
 

@@ -16,6 +16,7 @@
       "enableToolErrorMessages": true,
       "maxTurnMessages": 0,
       "maxToolResultChars": 0,
+      "verbose": false,
       "allowedDirs": [],
       "disableTools": [],
       "sandbox": {

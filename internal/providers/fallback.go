@@ -68,6 +68,21 @@ func (f *FallbackProvider) SetReasoningEffort(effort string) {
 	}
 }
 
+// SetVerbose enables verbose LLM traffic logging on the whole chain.
+func SetVerbose(p LLMProvider, v bool) {
+	if s, ok := p.(interface{ SetVerbose(bool) }); ok {
+		s.SetVerbose(v)
+	}
+}
+
+// SetVerbose applies verbose logging to the primary and all fallbacks.
+func (f *FallbackProvider) SetVerbose(v bool) {
+	SetVerbose(f.primary, v)
+	for _, entry := range f.entries {
+		SetVerbose(entry.Provider, v)
+	}
+}
+
 // GetReasoningEffort reports the primary provider's current reasoning setting.
 func (f *FallbackProvider) GetReasoningEffort() string {
 	effort, _ := GetReasoningEffort(f.primary)
