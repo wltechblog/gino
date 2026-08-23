@@ -792,7 +792,7 @@ func tgEscapeText(s string) string {
 	b.Grow(len(s) + len(s)/4)
 	for i := 0; i < len(s); i++ {
 		switch s[i] {
-		case '_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!':
+		case '_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!', '\\':
 			b.WriteByte('\\')
 		}
 		b.WriteByte(s[i])
@@ -813,18 +813,26 @@ func tgEscapeReserved(s string) string {
 	n := len(s)
 
 	for i < n {
-		// Code block ```...``` — preserve verbatim (no escaping inside)
+		// Code block ```...``` — preserve verbatim (no escaping inside).
+		// An unterminated fence is escaped as literal text instead of
+		// emitting an unclosed Pre entity, which Telegram rejects with
+		// "Can't find end of Pre entity" (the old code also truncated
+		// the trailing content when no closer existed).
 		if i+2 < n && s[i] == '`' && s[i+1] == '`' && s[i+2] == '`' {
-			b.WriteString("```")
-			i += 3
-			for i+2 < n && !(s[i] == '`' && s[i+1] == '`' && s[i+2] == '`') {
-				b.WriteByte(s[i])
-				i++
+			end := -1
+			for j := i + 3; j+2 < n; j++ {
+				if s[j] == '`' && s[j+1] == '`' && s[j+2] == '`' {
+					end = j
+					break
+				}
 			}
-			if i+2 < n {
-				b.WriteString("```")
+			if end == -1 {
+				b.WriteString("\\`\\`\\`")
 				i += 3
+				continue
 			}
+			b.WriteString(s[i : end+3])
+			i = end + 3
 			continue
 		}
 
@@ -842,6 +850,23 @@ func tgEscapeReserved(s string) string {
 		}
 
 		// Bold *...* — escape content inside
+		// Standard markdown **bold** is converted to Telegram's single-asterisk
+		// bold. An unterminated ** is escaped as literal text; otherwise the
+		// first * would be dropped and the second would open a bogus bold span
+		// that swallows everything up to the next stray * (corrupting fences).
+		if s[i] == '*' && i+1 < n && s[i+1] == '*' {
+			closeIdx := findCloseMarkerStr(s, i, "**")
+			if closeIdx > i {
+				b.WriteByte('*')
+				b.WriteString(tgEscapeText(s[i+2 : closeIdx]))
+				b.WriteByte('*')
+				i = closeIdx + 2
+				continue
+			}
+			b.WriteString("\\*\\*")
+			i += 2
+			continue
+		}
 		if s[i] == '*' && (i+1 >= n || s[i+1] != '*') {
 			if i > 0 && isWordChar(s[i-1]) && i+1 < n && isWordChar(s[i+1]) {
 				b.WriteString("\\*")
@@ -998,7 +1023,7 @@ func tgEscapeReserved(s string) string {
 
 		// Escape reserved character
 		switch s[i] {
-		case '_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!':
+		case '_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!', '\\':
 			b.WriteByte('\\')
 			b.WriteByte(s[i])
 		default:
