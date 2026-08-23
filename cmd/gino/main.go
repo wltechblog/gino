@@ -289,6 +289,9 @@ func runAgent(homeFlag string, args []string) {
 	if cfg.Agents.Defaults.Verbose {
 		ag.SetVerbose(true)
 	}
+	if cfg.Agents.Defaults.Analytics {
+		ag.SetAnalytics(true)
+	}
 
 	// Use requestTimeoutS from config, fallback to 300s
 	cliTimeout := 300 * time.Second
@@ -426,6 +429,9 @@ func runGateway(homeFlag string, args []string) {
 	}
 	if cfg.Agents.Defaults.Verbose {
 		ag.SetVerbose(true)
+	}
+	if cfg.Agents.Defaults.Analytics {
+		ag.SetAnalytics(true)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

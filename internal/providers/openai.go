@@ -26,9 +26,13 @@ type OpenAIProvider struct {
 	PerAttemptTimeout time.Duration // timeout per individual API call attempt
 	Client            *http.Client
 	Verbose           bool // log full request/response JSON when true
+	Analytics         bool // log per-request token usage as JSON when true
 }
 
 func (p *OpenAIProvider) SetVerbose(v bool) { p.Verbose = v }
+
+// SetAnalytics enables per-request token usage logging as JSON.
+func (p *OpenAIProvider) SetAnalytics(v bool) { p.Analytics = v }
 
 func NewOpenAIProvider(apiKey, apiBase string, timeoutSecs, maxTokens int) *OpenAIProvider {
 	return NewOpenAIProviderWithRetry(apiKey, apiBase, timeoutSecs, maxTokens, 2, 2*time.Second)
@@ -413,10 +417,12 @@ func (p *OpenAIProvider) Chat(ctx context.Context, messages []Message, tools []T
 		}
 
 		if u := out.Usage.toUsage(); u != nil && u.TotalTokens > 0 {
-			if u.CachedPromptTokens > 0 {
-				log.Printf("LLM usage: %d prompt (%d cached), %d completion, %d total", u.PromptTokens, u.CachedPromptTokens, u.CompletionTokens, u.TotalTokens)
-			} else {
-				log.Printf("LLM usage: %d prompt, %d completion, %d total (0 cached — cache MISS)", u.PromptTokens, u.CompletionTokens, u.TotalTokens)
+			if p.Analytics {
+				logVerboseJSON("LLM USAGE", map[string]interface{}{
+					"model":  model,
+					"cached": u.CachedPromptTokens > 0,
+					"usage":  u,
+				})
 			}
 		}
 

@@ -118,6 +118,11 @@ type AgentDefaults struct {
 	// to the user — all as JSON. Intended for debugging; very noisy.
 	Verbose bool `json:"verbose,omitempty"`
 
+	// Analytics enables token usage analytics as JSON: per-request usage
+	// (LLM USAGE) and per-turn aggregate usage (TURN USAGE). Includes
+	// prompt/completion/total/cached/reasoning token counts.
+	Analytics bool `json:"analytics,omitempty"`
+
 	// Web controls the built-in web fetch tool.
 	Web WebConfig `json:"web"`
 

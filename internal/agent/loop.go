@@ -450,6 +450,7 @@ type AgentLoop struct {
 	enableToolCallMessages  bool
 	enableToolErrorMessages bool                 // default true — surface tool failures to user
 	verbose                 bool                 // dump final reply + stats as JSON
+	analytics               bool                 // dump per-turn token usage as JSON
 	signalSocketPath        string               // GINO_SIGNAL_SOCKET injected into MCP child processes
 	signalListener          SignalTargetRecorder // optional: records last real channel for signal routing
 	compactor               *compactor           // nil = use legacy trimTurnMessages
@@ -820,6 +821,13 @@ func (a *AgentLoop) SetToolActivityIndicator(enabled bool) {
 // layer; this covers the agent-level output.
 func (a *AgentLoop) SetVerbose(enabled bool) {
 	a.verbose = enabled
+}
+
+// SetAnalytics enables per-turn token usage logging as JSON. Per-request
+// usage logging is handled at the provider layer (LLM USAGE); this covers
+// the turn-level aggregate.
+func (a *AgentLoop) SetAnalytics(enabled bool) {
+	a.analytics = enabled
 }
 
 func (a *AgentLoop) SetToolCallMessages(enabled bool) {
@@ -2037,7 +2045,19 @@ done:
 		return finalContent
 	}
 
-	log.Printf("Turn done: sending reply to %s/%s (%d chars, %d iterations, tokens: %d prompt / %d completion / %d cached)", msg.Channel, msg.ChatID, len(finalContent), iteration, turnPrompt, turnCompletion, turnCached)
+	log.Printf("Turn done: sending reply to %s/%s (%d chars, %d iterations)", msg.Channel, msg.ChatID, len(finalContent), iteration)
+	if a.analytics {
+		logVerboseJSON("TURN USAGE", map[string]interface{}{
+			"channel":    msg.Channel,
+			"chatID":     msg.ChatID,
+			"iterations": iteration,
+			"usage": map[string]interface{}{
+				"promptTokens":       turnPrompt,
+				"completionTokens":   turnCompletion,
+				"cachedPromptTokens": turnCached,
+			},
+		})
+	}
 	if a.verbose {
 		var turnUsage any
 		if lastUsage != nil {

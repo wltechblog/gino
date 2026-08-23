@@ -17,6 +17,7 @@
       "maxTurnMessages": 0,
       "maxToolResultChars": 0,
       "verbose": false,
+      "analytics": false,
       "allowedDirs": [],
       "disableTools": [],
       "sandbox": {

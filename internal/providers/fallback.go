@@ -75,11 +75,26 @@ func SetVerbose(p LLMProvider, v bool) {
 	}
 }
 
+// SetAnalytics enables token usage analytics logging on the whole chain.
+func SetAnalytics(p LLMProvider, v bool) {
+	if s, ok := p.(interface{ SetAnalytics(bool) }); ok {
+		s.SetAnalytics(v)
+	}
+}
+
 // SetVerbose applies verbose logging to the primary and all fallbacks.
 func (f *FallbackProvider) SetVerbose(v bool) {
 	SetVerbose(f.primary, v)
 	for _, entry := range f.entries {
 		SetVerbose(entry.Provider, v)
+	}
+}
+
+// SetAnalytics applies usage analytics logging to the primary and all fallbacks.
+func (f *FallbackProvider) SetAnalytics(v bool) {
+	SetAnalytics(f.primary, v)
+	for _, entry := range f.entries {
+		SetAnalytics(entry.Provider, v)
 	}
 }
 

@@ -28,6 +28,9 @@ func NewProviderFromConfig(cfg config.Config) LLMProvider {
 	if cfg.Agents.Defaults.Verbose {
 		primary.SetVerbose(true)
 	}
+	if cfg.Agents.Defaults.Analytics {
+		primary.SetAnalytics(true)
+	}
 
 	if len(cfg.Providers.Fallbacks) == 0 {
 		return primary
@@ -69,6 +72,9 @@ func NewProviderFromConfig(cfg config.Config) LLMProvider {
 		provider.SetReasoningEffort(fb.ReasoningEffort)
 		if cfg.Agents.Defaults.Verbose {
 			provider.SetVerbose(true)
+		}
+		if cfg.Agents.Defaults.Analytics {
+			provider.SetAnalytics(true)
 		}
 
 		name := fb.Name
