@@ -66,10 +66,23 @@ func (cb *ContextBuilder) SetWorkspace(dir string) {
 	cb.mu.Unlock()
 }
 
+// BuildMessages assembles the LLM message chain in a prompt-cache-friendly
+// layout:
+//
+//	[0]             stable system prompt (identical across turns of a session)
+//	[1..n)          session history (append-only)
+//	[n]             volatile system context (rebuilt every turn)
+//	[n+1]           current user message
+//
+// Provider-side prompt caching (z.ai context caching, OpenAI prompt caching,
+// DeepSeek) reuses computation only when the token prefix matches byte-for-byte
+// from token 0. Anything that changes between turns (current-user line,
+// ranked memories, brain search results, OAuth notices) therefore lives in
+// the trailing system message, so the stable prefix + history remain a valid
+// cache key and each turn only pays full price for its new tail.
 func (cb *ContextBuilder) BuildMessages(history []string, currentMessage string, channel, chatID, senderID string, memoryContext string, memories []memory.MemoryItem, metadata map[string]interface{}) []providers.Message {
-	msgs := make([]providers.Message, 0, len(history)+2)
+	msgs := make([]providers.Message, 0, len(history)+3)
 
-	// Combine all system instructions into one message at position 0 to avoid errors in strict chat templates (e.g. llama.cpp)
 	// Snapshot the active workspace under RLock so a concurrent project
 	// switch cannot tear the system prompt mid-build.
 	cb.mu.RLock()
@@ -77,6 +90,7 @@ func (cb *ContextBuilder) BuildMessages(history []string, currentMessage string,
 	profileWorkspace := cb.profileWorkspace
 	cb.mu.RUnlock()
 
+	// ---- Stable system parts (must not vary between turns) ----
 	var sysParts []string
 
 	sysParts = append(sysParts, "You are Gino, a helpful assistant.")
@@ -130,48 +144,6 @@ code block
 Do NOT use: # headings, --- rulers, *-bullet-lists, --dash-lists, 1.-numbered-lists — Telegram does not support them. Avoid underscores inside words (like 'some_var') — Telegram interprets `+"`"+`_`+"`"+` as italic markers and will break. Do NOT escape special characters with backslashes — the system handles MarkdownV2 escaping for you. Keep responses clean and readable.`)
 	}
 
-	// User identity — include sender info for non-system channels so the LLM
-	// can personalize responses and distinguish between users. In shared
-	// sessions (Discord threads), each message may come from a different user,
-	// so "[from X]" speaker labels on user messages are the source of truth
-	// for who said what; this line only identifies the current turn's starter.
-	if senderID != "" && channel != "cli" {
-		discordName := ""
-		if channel == "discord" && metadata != nil {
-			if name, ok := metadata["sender_name"].(string); ok {
-				discordName = name
-			}
-		}
-		if discordName != "" {
-			sysParts = append(sysParts, fmt.Sprintf(
-				"Current user: %s (ID: %s, channel: %s). This session may have multiple participants; each user message carries a [from X] label identifying its actual speaker — attribute actions and replies to that label, not to this line.",
-				discordName, senderID, channel))
-		} else {
-			sysParts = append(sysParts, fmt.Sprintf("Current user ID: %s (channel: %s)", senderID, channel))
-		}
-	}
-
-	// Privilege level — if metadata marks the user as unprivileged, inject
-	// restrictions. This applies to Telegram group users and any other
-	// channel that sets privileged=false.
-	if metadata != nil {
-		if privileged, ok := metadata["privileged"].(bool); ok && !privileged {
-			senderName := ""
-			if name, ok := metadata["sender_name"].(string); ok {
-				senderName = name
-			}
-			parts := []string{
-				"⚠️ UNPRIVILEGED USER: This user is not the owner. You must NOT execute shell commands, file operations, or any system-modifying tools on their behalf.",
-				"You may answer questions, explain concepts, search the web, and provide helpful information.",
-				"Do NOT read or expose sensitive files, API keys, credentials, or internal system configuration.",
-			}
-			if senderName != "" {
-				parts = append(parts, fmt.Sprintf("The user's name is %s. Be friendly and helpful.", senderName))
-			}
-			sysParts = append(sysParts, strings.Join(parts, " "))
-		}
-	}
-
 	// Privilege: computed once, used by memory gating below and brain scoping.
 	// Default is privileged (owner-operated channels: cli, owner DMs) unless the
 	// channel explicitly marks the sender unprivileged via metadata.
@@ -199,16 +171,89 @@ Do NOT use: # headings, --- rulers, *-bullet-lists, --dash-lists, 1.-numbered-li
 		sysParts = append(sysParts, sb.String())
 	}
 
+	// Emit the stable system message (position 0).
+	msgs = append(msgs, providers.Message{Role: "system", Content: strings.Join(sysParts, "\n\n")})
+
+	// Replay history, preserving each message's original role (user/assistant).
+	// Items are stored in "role: content" format by session.AddMessage.
+	for _, h := range history {
+		if len(h) == 0 {
+			continue
+		}
+		role := "user"
+		content := h
+		if idx := strings.Index(h, ": "); idx > 0 {
+			r := h[:idx]
+			if r == "user" || r == "assistant" || r == "system" {
+				role = r
+				content = h[idx+2:]
+			}
+		}
+		msgs = append(msgs, providers.Message{Role: role, Content: content})
+	}
+
+	// ---- Volatile system parts (rebuilt every turn) ----
+	// These are placed AFTER history and immediately BEFORE the current user
+	// message so per-turn changes never invalidate the cached stable prefix
+	// or the cached history. Providers that support mid-conversation system
+	// messages (all OpenAI-compatible endpoints) handle this fine.
+
+	var volatileParts []string
+
+	// User identity — include sender info for non-system channels so the LLM
+	// can personalize responses and distinguish between users. In shared
+	// sessions (Discord threads), each message may come from a different user,
+	// so "[from X]" speaker labels on user messages are the source of truth
+	// for who said what; this line only identifies the current turn's starter.
+	if senderID != "" && channel != "cli" {
+		discordName := ""
+		if channel == "discord" && metadata != nil {
+			if name, ok := metadata["sender_name"].(string); ok {
+				discordName = name
+			}
+		}
+		if discordName != "" {
+			volatileParts = append(volatileParts, fmt.Sprintf(
+				"Current user: %s (ID: %s, channel: %s). This session may have multiple participants; each user message carries a [from X] label identifying its actual speaker — attribute actions and replies to that label, not to this line.",
+				discordName, senderID, channel))
+		} else {
+			volatileParts = append(volatileParts, fmt.Sprintf("Current user ID: %s (channel: %s)", senderID, channel))
+		}
+	}
+
+	// Privilege level — if metadata marks the user as unprivileged, inject
+	// restrictions. This applies to Telegram group users and any other
+	// channel that sets privileged=false.
+	if metadata != nil {
+		if privileged, ok := metadata["privileged"].(bool); ok && !privileged {
+			senderName := ""
+			if name, ok := metadata["sender_name"].(string); ok {
+				senderName = name
+			}
+			parts := []string{
+				"⚠️ UNPRIVILEGED USER: This user is not the owner. You must NOT execute shell commands, file operations, or any system-modifying tools on their behalf.",
+				"You may answer questions, explain concepts, search the web, and provide helpful information.",
+				"Do NOT read or expose sensitive files, API keys, credentials, or internal system configuration.",
+			}
+			if senderName != "" {
+				parts = append(parts, fmt.Sprintf("The user's name is %s. Be friendly and helpful.", senderName))
+			}
+			volatileParts = append(volatileParts, strings.Join(parts, " "))
+		}
+	}
+
 	// File-based memory context (long-term + today's notes).
 	// PRIVACY: gated by privilege. Unprivileged users (Discord/Telegram-group)
 	// must not see MEMORY.md or the daily note — those hold owner/admin facts.
+	// (Volatile placement: write_memory during a turn must not invalidate the
+	// cached stable prefix.)
 	if memoryContext != "" && isPrivileged {
-		sysParts = append(sysParts, "Memory:\n"+memoryContext)
+		volatileParts = append(volatileParts, "Memory:\n"+memoryContext)
 	}
 
 	// Top-K ranked memories. PRIVACY: gated by privilege — these include
 	// tool outputs (exec/filesystem/web) from owner sessions, which must not
-	// leak into unprivileged prompts.
+	// leak into unprivileged prompts. (Volatile: ranking is query-dependent.)
 	selected := []memory.MemoryItem{}
 	if isPrivileged {
 		selected = memories
@@ -222,12 +267,12 @@ Do NOT use: # headings, --- rulers, *-bullet-lists, --dash-lists, 1.-numbered-li
 		for _, m := range selected {
 			fmt.Fprintf(&sb, "- %s (%s)\n", m.Text, m.Kind)
 		}
-		sysParts = append(sysParts, sb.String())
+		volatileParts = append(volatileParts, sb.String())
 	}
 
 	// Brain context enrichment — search the knowledge brain for relevant info.
 	// For non-owner channels (e.g. Discord), scope search to the user's personal
-	// source first, then fall back to global.
+	// source first, then fall back to global. (Volatile: query-dependent.)
 	if cb.brain != nil {
 		searchOpts := brain.SearchOpts{Limit: 5}
 
@@ -244,7 +289,7 @@ Do NOT use: # headings, --- rulers, *-bullet-lists, --dash-lists, 1.-numbered-li
 			for _, r := range results {
 				fmt.Fprintf(&brainSb, "- [%s] %s: %s\n", r.Type, r.Title, r.Snippet)
 			}
-			sysParts = append(sysParts, brainSb.String())
+			volatileParts = append(volatileParts, brainSb.String())
 		}
 	}
 
@@ -260,29 +305,12 @@ Do NOT use: # headings, --- rulers, *-bullet-lists, --dash-lists, 1.-numbered-li
 				fmt.Fprintf(&sb, "• Server: %s\n  URL: %s\n", name, authURL)
 			}
 			sb.WriteString("\nTell the user to open the URL, authenticate, then paste the full redirect URL (from their browser address bar after the page fails to load) back to you. Then use the mcp_auth tool with action='complete' to finish authentication.\n")
-			sysParts = append(sysParts, sb.String())
+			volatileParts = append(volatileParts, sb.String())
 		}
 	}
 
-	// Emit the single consolidated system message
-	msgs = append(msgs, providers.Message{Role: "system", Content: strings.Join(sysParts, "\n\n")})
-
-	// Replay history, preserving each message's original role (user/assistant).
-	// Items are stored in "role: content" format by session.AddMessage.
-	for _, h := range history {
-		if len(h) == 0 {
-			continue
-		}
-		role := "user"
-		content := h
-		if idx := strings.Index(h, ": "); idx > 0 {
-			r := h[:idx]
-			if r == "user" || r == "assistant" {
-				role = r
-				content = h[idx+2:]
-			}
-		}
-		msgs = append(msgs, providers.Message{Role: role, Content: content})
+	if len(volatileParts) > 0 {
+		msgs = append(msgs, providers.Message{Role: "system", Content: strings.Join(volatileParts, "\n\n")})
 	}
 
 	// Current user message. In shared sessions (Discord threads) the loop has

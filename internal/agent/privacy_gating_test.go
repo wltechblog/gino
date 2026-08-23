@@ -30,6 +30,20 @@ func (m *mockExtractProvider) GetModelContext(ctx context.Context, model string)
 // BuildMessages: unprivileged users must NOT receive the file-based memory
 // context (MEMORY.md + daily note) or the ranked short-term memories —
 // both hold owner facts and admin DM content.
+// allSystemContent joins every system message in the chain. BuildMessages
+// emits a stable leading system prompt plus a volatile trailing one
+// (cache-friendly layout); privacy assertions must cover both.
+func allSystemContent(msgs []providers.Message) string {
+	var sb strings.Builder
+	for _, m := range msgs {
+		if m.Role == "system" {
+			sb.WriteString(m.Content)
+			sb.WriteString("\n")
+		}
+	}
+	return sb.String()
+}
+
 func TestUnprivilegedPromptExcludesMemory(t *testing.T) {
 	cb := NewContextBuilder(t.TempDir(), nil, 5)
 
@@ -44,7 +58,7 @@ func TestUnprivilegedPromptExcludesMemory(t *testing.T) {
 		"privileged":  false,
 		"sender_name": "RandomUser",
 	})
-	sys := msgs[0].Content
+	sys := allSystemContent(msgs)
 
 	if strings.Contains(sys, "admin's secret") {
 		t.Error("unprivileged prompt contains MEMORY.md content (daily note leak)")
@@ -63,7 +77,7 @@ func TestUnprivilegedPromptExcludesMemory(t *testing.T) {
 	msgs = cb.BuildMessages(nil, "hello", "telegram", "123", "owner", memCtx, memories, map[string]interface{}{
 		"privileged": true,
 	})
-	sys = msgs[0].Content
+	sys = allSystemContent(msgs)
 	if !strings.Contains(sys, "admin's secret") {
 		t.Error("privileged prompt lost MEMORY.md content — regression in owner path")
 	}
@@ -101,7 +115,7 @@ func TestUnprivilegedBrainScoped(t *testing.T) {
 	msgs := cb.BuildMessages(nil, "concise codename", "discord", "999", "u1", "", nil, map[string]interface{}{
 		"privileged": false,
 	})
-	sys := msgs[0].Content
+	sys := allSystemContent(msgs)
 	if strings.Contains(sys, "Xylophone") {
 		t.Error("unprivileged prompt contains global brain page (leak via brain context)")
 	}
@@ -192,14 +206,14 @@ func TestUnprivilegedSystemNotice(t *testing.T) {
 		"group":       true,
 		"sender_name": "GroupMember",
 	})
-	if !strings.Contains(msgs[0].Content, "UNPRIVILEGED USER") {
+	if !strings.Contains(allSystemContent(msgs), "UNPRIVILEGED USER") {
 		t.Error("group user missing unprivileged system notice")
 	}
 
 	msgs = cb.BuildMessages(nil, "hi", "telegram", "123", "owner", "", nil, map[string]interface{}{
 		"privileged": true,
 	})
-	if strings.Contains(msgs[0].Content, "UNPRIVILEGED USER") {
+	if strings.Contains(allSystemContent(msgs), "UNPRIVILEGED USER") {
 		t.Error("owner DM got unprivileged notice — privilege regression")
 	}
 }

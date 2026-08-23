@@ -139,7 +139,10 @@ func (c *compactor) shouldCompact(messages []providers.Message) bool {
 // compact performs LLM-based summarization of older messages.
 // It keeps the system prompt, a summary of old messages, and the recent tail intact.
 // Returns the compacted message slice and any error.
-func (c *compactor) compact(ctx context.Context, messages []providers.Message, userMsgIdx int) ([]providers.Message, error) {
+// compact summarizes old messages and returns the compacted chain together
+// with the new index of the current user message within it. When there is
+// nothing to summarize it returns the chain unchanged (same index).
+func (c *compactor) compact(ctx context.Context, messages []providers.Message, userMsgIdx int) ([]providers.Message, int, error) {
 	if userMsgIdx < 0 {
 		userMsgIdx = 0
 	}
@@ -167,7 +170,7 @@ func (c *compactor) compact(ctx context.Context, messages []providers.Message, u
 	// If there's nothing old to summarize, return unchanged.
 	if cutIdx <= 1 {
 		log.Printf("Compaction: nothing to summarize (cutIdx=%d), skipping", cutIdx)
-		return messages, nil
+		return messages, userMsgIdx, nil
 	}
 
 	oldMessages := messages[1:cutIdx] // exclude system[0]
@@ -187,7 +190,8 @@ func (c *compactor) compact(ctx context.Context, messages []providers.Message, u
 	summary, err := c.summarizeMessages(ctx, oldMessages)
 	if err != nil {
 		log.Printf("Compaction: LLM summarization failed (%v), falling back to trim", err)
-		return trimTurnMessages(messages, userMsgIdx, c.fallbackMaxMsgs), nil
+		trimmed, idx := trimTurnMessages(messages, userMsgIdx, c.fallbackMaxMsgs)
+		return trimmed, idx, nil
 	}
 
 	// Build the compacted message chain:
@@ -211,7 +215,21 @@ func (c *compactor) compact(ctx context.Context, messages []providers.Message, u
 	log.Printf("Compaction: %d messages → %d messages (summary %d tokens)",
 		len(messages), len(result), estimateTokens([]providers.Message{{Content: summaryContent}}))
 
-	return result, nil
+	// Locate the preserved current user message in the compacted chain: it
+	// moved to the end of the "recent" slice (summary is inserted before it
+	// as a user-role message, recent tail keeps original order).
+	newUserIdx := -1
+	for i := len(result) - 1; i >= 1; i-- {
+		if result[i].Role == "user" && result[i].Content == messages[userMsgIdx].Content {
+			newUserIdx = i
+			break
+		}
+	}
+	if newUserIdx == -1 {
+		newUserIdx = 1
+	}
+
+	return result, newUserIdx, nil
 }
 
 // findCleanCutPoint adjusts the cut index so we don't split a tool call from its result.

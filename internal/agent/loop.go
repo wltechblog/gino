@@ -38,22 +38,27 @@ var stopCommands = []string{"/stop", "/cancel", "/abort"}
 //
 // Message chain layout (built by BuildMessages + processTurn):
 //
-//	[0]              system prompt
+//	[0]              stable system prompt
 //	[1..userMsgIdx)  session history (alternating user/assistant)
+//	                  + volatile system context immediately before the user message
 //	[userMsgIdx]     current user message
 //	[userMsgIdx+1..] tool-call exchanges from this turn
 //
 // Trimming strategy:
-//  1. Always keep system[0] and user[userMsgIdx].
+//  1. Always keep system[0], the volatile system message directly preceding
+//     the user message (if any), and user[userMsgIdx].
 //  2. Protect the last assistant text response (non-tool-call) so the LLM
 //     remembers what it just told the user — this prevents "I forgot the list".
 //  3. Reserve up to 20% of the budget for recent session history.
 //  4. Fill the rest with the most recent tool exchanges from the tail.
 //  5. Drop orphaned "tool" role messages at any seam (they require a
 //     preceding assistant tool_calls message to be valid).
-func trimTurnMessages(messages []providers.Message, userMsgIdx int, maxMsgs int) []providers.Message {
+//
+// It returns the trimmed chain and the new index of the current user message
+// within it (the index shifts when the volatile system message is preserved).
+func trimTurnMessages(messages []providers.Message, userMsgIdx int, maxMsgs int) ([]providers.Message, int) {
 	if len(messages) <= maxMsgs {
-		return messages
+		return messages, userMsgIdx
 	}
 
 	// Defensive: clamp userMsgIdx to valid range.
@@ -80,8 +85,16 @@ func trimTurnMessages(messages []providers.Message, userMsgIdx int, maxMsgs int)
 	if userMsgIdx <= 1 {
 		result := make([]providers.Message, 0, maxMsgs)
 		result = append(result, messages[0])
+		// Preserve the volatile system context (memory/brain/current-user)
+		// that sits directly before the user message when present. The >=2
+		// guard avoids re-appending the stable system message at index 0.
+		newUserIdx := 1
+		if userMsgIdx >= 2 && messages[userMsgIdx-1].Role == "system" {
+			result = append(result, messages[userMsgIdx-1])
+			newUserIdx = 2
+		}
 		result = append(result, messages[userMsgIdx])
-		used := 2
+		used := len(result)
 
 		// Preserve last assistant text if found after userMsgIdx (shouldn't happen in fast path, but safe).
 		tailBudget := maxMsgs - used
@@ -97,15 +110,25 @@ func trimTurnMessages(messages []providers.Message, userMsgIdx int, maxMsgs int)
 		result = append(result, tail[skip:]...)
 		trimmed := len(messages) - len(result)
 		log.Printf("Turn context: trimmed %d messages (was %d, now %d)", trimmed, len(messages), len(result))
-		return result
+		return result, newUserIdx
 	}
 
 	// --- Normal path: we have session history to preserve ---
 
 	result := make([]providers.Message, 0, maxMsgs)
-	result = append(result, messages[0])          // system
+	result = append(result, messages[0]) // stable system
+	// Preserve the volatile system context (memory/brain/current-user)
+	// that sits directly before the user message when present. The >=2
+	// guard avoids re-appending the stable system message at index 0.
+	volatileIdx := -1
+	newUserIdx := 1
+	if userMsgIdx >= 2 && messages[userMsgIdx-1].Role == "system" {
+		volatileIdx = userMsgIdx - 1
+		result = append(result, messages[volatileIdx])
+		newUserIdx = 2
+	}
 	result = append(result, messages[userMsgIdx]) // user
-	used := 2
+	used := len(result)
 
 	// Always preserve the last assistant text response.
 	if lastAssistantTextIdx >= 0 {
@@ -125,8 +148,8 @@ func trimTurnMessages(messages []providers.Message, userMsgIdx int, maxMsgs int)
 	var historyWindow []providers.Message
 	historyCount := 0
 	for i := userMsgIdx - 1; i >= 1 && historyCount < historyBudget; i-- {
-		if i == lastAssistantTextIdx {
-			continue // already preserved
+		if i == lastAssistantTextIdx || i == volatileIdx {
+			continue // already preserved / not history
 		}
 		if messages[i].Role == "user" || messages[i].Role == "assistant" {
 			historyWindow = append(historyWindow, messages[i])
@@ -159,7 +182,7 @@ func trimTurnMessages(messages []providers.Message, userMsgIdx int, maxMsgs int)
 	trimmed := len(messages) - len(result)
 	log.Printf("Turn context: trimmed %d messages (was %d, now %d, kept %d history entries, protected last assistant at idx %d)",
 		trimmed, len(messages), len(result), len(historyWindow), lastAssistantTextIdx)
-	return result
+	return result, newUserIdx
 }
 
 // truncateToolResult caps a tool result string to maxChars.
@@ -1793,7 +1816,7 @@ func (a *AgentLoop) processTurn(ctx context.Context, at *activeTurn, sessionKey 
 			if a.compactor != nil && a.compactor.shouldCompact(messages) {
 				// LLM-based compaction: summarize old messages, keep recent tail.
 				var compactErr error
-				messages, compactErr = a.compactor.compact(ctx, messages, userMsgIdx)
+				messages, userMsgIdx, compactErr = a.compactor.compact(ctx, messages, userMsgIdx)
 				if compactErr != nil {
 					log.Printf("Compaction failed, falling back to trim: %v", compactErr)
 					// Inject tool call summary before trimming
@@ -1803,7 +1826,7 @@ func (a *AgentLoop) processTurn(ctx context.Context, at *activeTurn, sessionKey 
 							Content: summary,
 						})
 					}
-					messages = trimTurnMessages(messages, userMsgIdx, a.maxTurnMessages)
+					messages, userMsgIdx = trimTurnMessages(messages, userMsgIdx, a.maxTurnMessages)
 				}
 			} else {
 				// Legacy trim: inject tool call summary, then slice.
@@ -1813,10 +1836,8 @@ func (a *AgentLoop) processTurn(ctx context.Context, at *activeTurn, sessionKey 
 						Content: summary,
 					})
 				}
-				messages = trimTurnMessages(messages, userMsgIdx, a.maxTurnMessages)
+				messages, userMsgIdx = trimTurnMessages(messages, userMsgIdx, a.maxTurnMessages)
 			}
-			// Both compact and trim preserve system[0] and user[1]; update index.
-			userMsgIdx = 1
 		}
 
 		// Checkpoint the current turn state before each LLM invocation.
@@ -2103,9 +2124,20 @@ func (a *AgentLoop) ProcessDirectWithSessionAndSystemPrompt(content string, time
 	memories := a.memory.Recent(5)
 	messages := a.context.BuildMessages(history, content, "cli", "direct", "", memCtx, memories, nil)
 
-	// Override system prompt if provided (used by benchmarks)
+	// Override system prompt if provided (used by benchmarks). The volatile
+	// system message (memory/brain context) is dropped too, so benchmarks run
+	// with exactly the injected prompt.
 	if systemPromptOverride != "" && len(messages) > 0 && messages[0].Role == "system" {
 		messages[0].Content = systemPromptOverride
+		filtered := make([]providers.Message, 0, len(messages))
+		filtered = append(filtered, messages[0])
+		for _, m := range messages[1:] {
+			if m.Role == "system" {
+				continue
+			}
+			filtered = append(filtered, m)
+		}
+		messages = filtered
 	}
 
 	// Support tool calling iterations (similar to main loop)
@@ -2116,15 +2148,14 @@ func (a *AgentLoop) ProcessDirectWithSessionAndSystemPrompt(content string, time
 		if len(messages) > a.maxTurnMessages {
 			if a.compactor != nil && a.compactor.shouldCompact(messages) {
 				var compactErr error
-				messages, compactErr = a.compactor.compact(ctx, messages, userMsgIdx)
+				messages, userMsgIdx, compactErr = a.compactor.compact(ctx, messages, userMsgIdx)
 				if compactErr != nil {
 					log.Printf("Compaction failed, falling back to trim: %v", compactErr)
-					messages = trimTurnMessages(messages, userMsgIdx, a.maxTurnMessages)
+					messages, userMsgIdx = trimTurnMessages(messages, userMsgIdx, a.maxTurnMessages)
 				}
 			} else {
-				messages = trimTurnMessages(messages, userMsgIdx, a.maxTurnMessages)
+				messages, userMsgIdx = trimTurnMessages(messages, userMsgIdx, a.maxTurnMessages)
 			}
-			userMsgIdx = 1
 		}
 
 		resp, err := a.provider.Chat(ctx, messages, a.tools.Definitions(), a.model)

@@ -188,7 +188,7 @@ func TestCompactBasicSummarization(t *testing.T) {
 	// Create enough messages to trigger compaction
 	msgs := makeMessages(60) // ~60 messages of ~50 chars each = ~750 tokens
 
-	result, err := c.compact(context.Background(), msgs, len(msgs)-1)
+	result, _, err := c.compact(context.Background(), msgs, len(msgs)-1)
 	if err != nil {
 		t.Fatalf("compact failed: %v", err)
 	}
@@ -236,7 +236,7 @@ func TestCompactPreservesRecentMessages(t *testing.T) {
 
 	msgs := makeMessages(60)
 
-	result, err := c.compact(context.Background(), msgs, len(msgs)-1)
+	result, _, err := c.compact(context.Background(), msgs, len(msgs)-1)
 	if err != nil {
 		t.Fatalf("compact failed: %v", err)
 	}
@@ -286,7 +286,7 @@ func TestCompactWithToolCalls(t *testing.T) {
 	msgs = append(msgs, providers.Message{Role: "user", Content: "final question"})
 	msgs = append(msgs, providers.Message{Role: "assistant", Content: "final answer"})
 
-	result, err := c.compact(context.Background(), msgs, len(msgs)-2)
+	result, _, err := c.compact(context.Background(), msgs, len(msgs)-2)
 	if err != nil {
 		t.Fatalf("compact failed: %v", err)
 	}
@@ -386,7 +386,7 @@ func TestCompactFallsBackOnLLMError(t *testing.T) {
 
 	msgs := makeMessages(30)
 
-	result, err := c.compact(context.Background(), msgs, len(msgs)-1)
+	result, _, err := c.compact(context.Background(), msgs, len(msgs)-1)
 	if err != nil {
 		t.Fatalf("compact should not error even on LLM failure: %v", err)
 	}
@@ -422,7 +422,7 @@ func TestCompactNothingToSummarize(t *testing.T) {
 
 	msgs := makeMessages(10)
 
-	result, err := c.compact(context.Background(), msgs, len(msgs)-1)
+	result, _, err := c.compact(context.Background(), msgs, len(msgs)-1)
 	if err != nil {
 		t.Fatalf("compact failed: %v", err)
 	}
@@ -453,7 +453,7 @@ func TestCompactDoesNotBreakToolCallPairs(t *testing.T) {
 		msgs = append(msgs, makeMessagesWithToolCalls()[1:]...)
 	}
 
-	result, err := c.compact(context.Background(), msgs, len(msgs)-1)
+	result, _, err := c.compact(context.Background(), msgs, len(msgs)-1)
 	if err != nil {
 		t.Fatalf("compact failed: %v", err)
 	}
@@ -507,7 +507,7 @@ func TestCompactSummaryMaxLength(t *testing.T) {
 	}, 60, nil)
 
 	msgs := makeMessages(40)
-	result, err := c.compact(context.Background(), msgs, len(msgs)-1)
+	result, _, err := c.compact(context.Background(), msgs, len(msgs)-1)
 	if err != nil {
 		t.Fatalf("compact failed: %v", err)
 	}

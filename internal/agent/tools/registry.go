@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"runtime/debug"
+	"sort"
 	"sync"
 	"time"
 
@@ -59,6 +60,10 @@ func (r *Registry) Get(name string) Tool {
 }
 
 // Definitions returns the list of tool definitions to expose to the model.
+// Tools are sorted by name so the serialized request is deterministic.
+// Random map iteration order would reshuffle the tools array on every
+// request, defeating provider-side prompt caching (which requires a
+// byte-for-byte identical token prefix).
 func (r *Registry) Definitions() []providers.ToolDefinition {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -70,6 +75,7 @@ func (r *Registry) Definitions() []providers.ToolDefinition {
 			Parameters:  t.Parameters(),
 		})
 	}
+	sort.Slice(defs, func(i, j int) bool { return defs[i].Name < defs[j].Name })
 	return defs
 }
 
