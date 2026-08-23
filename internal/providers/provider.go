@@ -35,6 +35,18 @@ type LLMResponse struct {
 	ToolCalls     []ToolCall `json:"toolCalls,omitempty"`
 	HadParseError bool       `json:"hadParseError,omitempty"` // tool calls were present but all failed to parse
 	FinishReason  string     `json:"finishReason,omitempty"`  // "stop", "length", "content_filter", etc.
+	Usage         *Usage     `json:"usage,omitempty"`         // token usage reported by the provider (may be nil)
+}
+
+// Usage holds token accounting as reported by OpenAI-compatible APIs.
+// CachedTokens counts prompt tokens served from the provider's prompt cache
+// (billed at a discount or free depending on the host).
+type Usage struct {
+	PromptTokens       int `json:"promptTokens"`
+	CompletionTokens   int `json:"completionTokens"`
+	TotalTokens        int `json:"totalTokens"`
+	CachedPromptTokens int `json:"cachedPromptTokens"` // subset of PromptTokens served from cache
+	ReasoningTokens    int `json:"reasoningTokens"`    // subset of CompletionTokens spent on reasoning
 }
 
 // ReasoningEffortController is optionally implemented by providers that

@@ -208,6 +208,40 @@ type chatResponse struct {
 		Message      messageResponseJSON `json:"message"`
 		FinishReason string              `json:"finish_reason"`
 	} `json:"choices"`
+	Usage *usageJSON `json:"usage"`
+}
+
+// usageJSON mirrors the OpenAI-compatible usage object. Details fields may be
+// absent depending on the host; they default to zero.
+type usageJSON struct {
+	PromptTokens        int `json:"prompt_tokens"`
+	CompletionTokens    int `json:"completion_tokens"`
+	TotalTokens         int `json:"total_tokens"`
+	PromptTokensDetails *struct {
+		CachedTokens int `json:"cached_tokens"`
+	} `json:"prompt_tokens_details"`
+	CompletionTokensDetails *struct {
+		ReasoningTokens int `json:"reasoning_tokens"`
+	} `json:"completion_tokens_details"`
+}
+
+// toUsage converts the wire format into the public Usage type.
+func (u *usageJSON) toUsage() *Usage {
+	if u == nil {
+		return nil
+	}
+	out := &Usage{
+		PromptTokens:     u.PromptTokens,
+		CompletionTokens: u.CompletionTokens,
+		TotalTokens:      u.TotalTokens,
+	}
+	if u.PromptTokensDetails != nil {
+		out.CachedPromptTokens = u.PromptTokensDetails.CachedTokens
+	}
+	if u.CompletionTokensDetails != nil {
+		out.ReasoningTokens = u.CompletionTokensDetails.ReasoningTokens
+	}
+	return out
 }
 
 // Chat calls an OpenAI-compatible chat completion endpoint and returns a simplified response.
@@ -356,6 +390,14 @@ func (p *OpenAIProvider) Chat(ctx context.Context, messages []Message, tools []T
 		resp.Body.Close()
 		cancel()
 
+		if u := out.Usage.toUsage(); u != nil && u.TotalTokens > 0 {
+			if u.CachedPromptTokens > 0 {
+				log.Printf("LLM usage: %d prompt (%d cached), %d completion, %d total", u.PromptTokens, u.CachedPromptTokens, u.CompletionTokens, u.TotalTokens)
+			} else {
+				log.Printf("LLM usage: %d prompt, %d completion, %d total (0 cached — cache MISS)", u.PromptTokens, u.CompletionTokens, u.TotalTokens)
+			}
+		}
+
 		if len(out.Choices) == 0 {
 			return LLMResponse{}, errors.New("OpenAI API returned no choices")
 		}
@@ -386,7 +428,7 @@ func (p *OpenAIProvider) Chat(ctx context.Context, messages []Message, tools []T
 				if skipped > 0 {
 					log.Printf("WARNING: %d/%d tool calls were unparseable and dropped", skipped, len(msg.ToolCalls))
 				}
-				return LLMResponse{Content: strings.TrimSpace(msg.Content), HasToolCalls: true, ToolCalls: tcs, FinishReason: finishReason}, nil
+				return LLMResponse{Content: strings.TrimSpace(msg.Content), HasToolCalls: true, ToolCalls: tcs, FinishReason: finishReason, Usage: out.Usage.toUsage()}, nil
 			}
 			// All tool calls were unparseable — don't silently end the turn.
 			// Signal the parse error so the loop can inject feedback to the LLM.
@@ -397,12 +439,13 @@ func (p *OpenAIProvider) Chat(ctx context.Context, messages []Message, tools []T
 					HasToolCalls:  false,
 					HadParseError: true,
 					FinishReason:  finishReason,
+					Usage:         out.Usage.toUsage(),
 				}, nil
 			}
 		}
 
 		// No tool calls
-		return LLMResponse{Content: strings.TrimSpace(msg.Content), HasToolCalls: false, FinishReason: finishReason}, nil
+		return LLMResponse{Content: strings.TrimSpace(msg.Content), HasToolCalls: false, FinishReason: finishReason, Usage: out.Usage.toUsage()}, nil
 	}
 
 	// All retries exhausted

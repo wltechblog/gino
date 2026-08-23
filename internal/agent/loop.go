@@ -1772,6 +1772,7 @@ func (a *AgentLoop) processTurn(ctx context.Context, at *activeTurn, sessionKey 
 	}
 
 	iteration := 0
+	var turnPrompt, turnCompletion, turnCached int
 	finalContent := ""
 	lastToolResult := ""
 	toolDefs := a.tools.Definitions()
@@ -1855,6 +1856,11 @@ func (a *AgentLoop) processTurn(ctx context.Context, at *activeTurn, sessionKey 
 
 		// Use vision model if images are present (from user message or tool results)
 		resp, err := a.provider.Chat(ctx, messages, toolDefs, a.model)
+		if err == nil && resp.Usage != nil {
+			turnPrompt += resp.Usage.PromptTokens
+			turnCompletion += resp.Usage.CompletionTokens
+			turnCached += resp.Usage.CachedPromptTokens
+		}
 		if err != nil {
 			// Check if it was cancelled
 			select {
@@ -2021,7 +2027,7 @@ done:
 		return finalContent
 	}
 
-	log.Printf("Turn done: sending reply to %s/%s (%d chars, %d iterations)", msg.Channel, msg.ChatID, len(finalContent), iteration)
+	log.Printf("Turn done: sending reply to %s/%s (%d chars, %d iterations, tokens: %d prompt / %d completion / %d cached)", msg.Channel, msg.ChatID, len(finalContent), iteration, turnPrompt, turnCompletion, turnCached)
 	out := chat.Outbound{Channel: msg.Channel, ChatID: msg.ChatID, Content: finalContent}
 	if msg.Metadata != nil {
 		out.Metadata = map[string]interface{}{}
