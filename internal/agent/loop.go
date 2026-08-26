@@ -585,6 +585,9 @@ func NewAgentLoopWithProfileWorkspace(b *chat.Hub, provider providers.LLMProvide
 		log.Fatalf("failed to create filesystem tool: %v", err)
 	}
 	register(fsTool)
+	// MCP image results are saved under the active workspace so the agent
+	// (and the filesystem tool) can reach them for vision analysis.
+	tools.SetMCPImageDir(filepath.Join(workspace, "uploads", "mcp"))
 	execTool := tools.NewExecToolWithSandbox(60, workspace, allDirs, sandbox)
 	register(execTool)
 	register(tools.NewWebToolWithConfig(webCfg.TimeoutS, webCfg.MaxResponseBytes, webCfg.UserAgent))

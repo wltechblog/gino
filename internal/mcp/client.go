@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -159,39 +160,138 @@ func (c *Client) Name() string { return c.name }
 func (c *Client) Tools() []Tool { return c.tools }
 
 // CallTool: invokes a tool on the MCP server and returns the text result.
-func (c *Client) CallTool(_ context.Context, toolName string, arguments map[string]interface{}) (string, error) {
+// Image content blocks are decoded but discarded; use CallToolWithImages to
+// receive them.
+func (c *Client) CallTool(ctx context.Context, toolName string, arguments map[string]interface{}) (string, error) {
+	text, _, err := c.CallToolWithImages(ctx, toolName, arguments)
+	return text, err
+}
+
+// CallToolWithImages invokes a tool and returns both the concatenated text
+// result and any image content blocks, base64-decoded and format-sniffed.
+func (c *Client) CallToolWithImages(_ context.Context, toolName string, arguments map[string]interface{}) (string, []ToolImage, error) {
 	params := map[string]interface{}{
 		"name":      toolName,
 		"arguments": arguments,
 	}
 	result, err := c.request("tools/call", params)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	var resp struct {
 		Content []struct {
-			Type string `json:"type"`
-			Text string `json:"text,omitempty"`
+			Type     string `json:"type"`
+			Text     string `json:"text,omitempty"`
+			Data     string `json:"data,omitempty"`
+			MimeType string `json:"mimeType,omitempty"`
 		} `json:"content"`
 		IsError bool `json:"isError,omitempty"`
 	}
 	if err := json.Unmarshal(result, &resp); err != nil {
-		return "", fmt.Errorf("parse tools/call: %w", err)
+		return "", nil, fmt.Errorf("parse tools/call: %w", err)
 	}
 	var sb strings.Builder
+	var images []ToolImage
 	for _, item := range resp.Content {
-		if item.Type == "text" {
+		switch item.Type {
+		case "text":
 			if sb.Len() > 0 {
 				sb.WriteString("\n")
 			}
 			sb.WriteString(item.Text)
+		case "image":
+			if item.Data == "" {
+				log.Printf("[mcp] %s: image content block has empty data field, skipping", c.name)
+				continue
+			}
+			img, err := decodeToolImage(item.Data, item.MimeType)
+			if err != nil {
+				log.Printf("[mcp] %s: failed to decode image content block: %v", c.name, err)
+				if sb.Len() > 0 {
+					sb.WriteString("\n")
+				}
+				fmt.Fprintf(&sb, "[image result could not be decoded: %v]", err)
+				continue
+			}
+			images = append(images, img)
+		default:
+			// Unknown content types (audio, resource, embedded_resource) are
+			// skipped rather than dropped silently: mention them so the agent
+			// knows non-text output existed.
+			if sb.Len() > 0 {
+				sb.WriteString("\n")
+			}
+			fmt.Fprintf(&sb, "[unsupported content type: %s]", item.Type)
 		}
 	}
 	text := sb.String()
 	if resp.IsError {
-		return "", fmt.Errorf("tool error: %s", text)
+		return "", nil, fmt.Errorf("tool error: %s", text)
 	}
-	return text, nil
+	return text, images, nil
+}
+
+// ToolImage is an image returned by an MCP tool call.
+type ToolImage struct {
+	Data     []byte
+	MimeType string
+	Ext      string
+}
+
+// mimeToExt maps common MIME types to file extensions for saving images.
+var mimeToExt = map[string]string{
+	"image/png":  ".png",
+	"image/jpeg": ".jpg",
+	"image/gif":  ".gif",
+	"image/webp": ".webp",
+	"image/bmp":  ".bmp",
+}
+
+// extFromMime derives a file extension from a MIME type, with fallbacks.
+func extFromMime(mime string) string {
+	if mime == "" {
+		return ".png"
+	}
+	if ext, ok := mimeToExt[strings.ToLower(mime)]; ok {
+		return ext
+	}
+	// Fallback: image/xyz -> .xyz
+	return "." + strings.TrimPrefix(strings.ToLower(mime), "image/")
+}
+
+// decodeToolImage base64-decodes an image content block's data. It sniffs the
+// magic bytes to validate the payload and refine the extension when the MIME
+// type is missing or lies.
+func decodeToolImage(data, mime string) (ToolImage, error) {
+	raw, err := base64.StdEncoding.DecodeString(data)
+	if err != nil {
+		return ToolImage{}, fmt.Errorf("base64 decode: %w", err)
+	}
+	if len(raw) < 8 {
+		return ToolImage{}, fmt.Errorf("decoded payload too small (%d bytes)", len(raw))
+	}
+	ext := extFromMime(mime)
+	// Magic-byte sniffing to validate/correct the format
+	switch {
+	case bytes.HasPrefix(raw, []byte{0x89, 'P', 'N', 'G'}):
+		if ext != ".png" {
+			log.Printf("[mcp] mimeType %q but payload is PNG, using .png", mime)
+		}
+		return ToolImage{Data: raw, MimeType: "image/png", Ext: ".png"}, nil
+	case bytes.HasPrefix(raw, []byte{0xFF, 0xD8, 0xFF}):
+		if ext != ".jpg" {
+			log.Printf("[mcp] mimeType %q but payload is JPEG, using .jpg", mime)
+		}
+		return ToolImage{Data: raw, MimeType: "image/jpeg", Ext: ".jpg"}, nil
+	case bytes.HasPrefix(raw, []byte("GIF8")):
+		return ToolImage{Data: raw, MimeType: "image/gif", Ext: ".gif"}, nil
+	case bytes.HasPrefix(raw, []byte("RIFF")) && len(raw) > 11 && string(raw[8:12]) == "WEBP":
+		return ToolImage{Data: raw, MimeType: "image/webp", Ext: ".webp"}, nil
+	case bytes.HasPrefix(raw, []byte("BM")):
+		return ToolImage{Data: raw, MimeType: "image/bmp", Ext: ".bmp"}, nil
+	}
+	log.Printf("[mcp] unrecognized image magic bytes (mimeType %q), saving with %s", mime, ext)
+	return ToolImage{Data: raw, MimeType: mime, Ext: ext}, nil
 }
 
 // Close shuts down the MCP server connection.
@@ -447,9 +547,9 @@ func (t *httpTransport) doPost(body []byte) ([]byte, error) {
 		// Return an oauthError to signal that OAuth is needed.
 		// The caller (Client) can check for this and initiate the OAuth flow.
 		return nil, &oauthHTTPError{
-			StatusCode:    resp.StatusCode,
+			StatusCode:      resp.StatusCode,
 			WWWAuthenticate: resp.Header.Get("WWW-Authenticate"),
-			Body:          string(b),
+			Body:            string(b),
 		}
 	}
 	if resp.StatusCode != http.StatusOK {
