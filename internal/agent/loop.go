@@ -1995,6 +1995,19 @@ func (a *AgentLoop) processTurn(ctx context.Context, at *activeTurn, sessionKey 
 		}
 	}
 
+	// Loop exhausted maxIterations without a final text response: the turn is
+	// stopped by a limit, not finished. Tell the LLM (so session context stays
+	// accurate) and the user (so they know to reply "continue").
+	if iteration >= a.maxIterations && finalContent == "" {
+		log.Printf("Turn hit iteration limit for %s (%d iterations) — notifying user", sessionKey, iteration)
+		messages = append(messages, providers.Message{
+			Role:    "user",
+			Content: "[System: The tool-call limit was reached before you produced a final reply. Your turn is paused here. If the user sends another message, pick up where you left off and do not re-read files you already processed.]",
+		})
+		limitNote := fmt.Sprintf("⏳ I've hit my tool-call limit for this turn (%d steps) without finishing. Reply **continue** and I'll pick up where I left off.", a.maxIterations)
+		finalContent = limitNote
+	}
+
 done:
 	// Turn completed — clear the checkpoint so it won't be recovered.
 	if err := a.checkpoints.MarkCompleted(sessionKey); err != nil {
@@ -2263,7 +2276,7 @@ func (a *AgentLoop) ProcessDirectWithSessionAndSystemPrompt(content string, time
 		}
 	}
 
-	maxIterReply := "Max iterations reached without final response"
+	maxIterReply := fmt.Sprintf("⏳ Max tool iterations reached (%d) without a final response. Send another message (e.g. 'continue') and I'll pick up where I left off.", a.maxIterations)
 	// Persist even on max-iterations so the session reflects the exchange.
 	if sessionKey != "" && a.sessions != nil {
 		sess := a.sessions.GetOrCreate(sessionKey)
