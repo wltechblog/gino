@@ -258,6 +258,42 @@ func (t *ExecTool) isDirAllowed(dir string) bool {
 	return false
 }
 
+// Validate applies this tool's full sandbox policy (blocklist, whitelist,
+// shell-builtin check, arg safety, cwd containment) to a command that will be
+// executed by another component (e.g. the background tool). It performs no
+// execution — commands that pass are subject to the same restrictions as a
+// direct exec call.
+func (t *ExecTool) Validate(argv []string, cwd string) error {
+	if len(argv) == 0 {
+		return fmt.Errorf("empty command")
+	}
+	prog := argv[0]
+
+	if t.isBlocked(prog) {
+		return fmt.Errorf("program %q is disallowed", prog)
+	}
+	if !t.isAllowed(prog) {
+		return fmt.Errorf("program %q is not in the allowed list", prog)
+	}
+	if !t.sandbox.IsYolo() {
+		if hint, ok := isShellBuiltin(prog); ok {
+			if hint != "" {
+				return fmt.Errorf("%s", hint)
+			}
+			return fmt.Errorf("shell builtin %q cannot be validated for background execution", prog)
+		}
+	}
+	for _, a := range argv[1:] {
+		if t.isArgUnsafe(a) {
+			return fmt.Errorf("argument %q looks unsafe", a)
+		}
+	}
+	if cwd != "" && !t.isDirAllowed(cwd) {
+		return fmt.Errorf("cwd %q is outside the allowed directories", cwd)
+	}
+	return nil
+}
+
 func (t *ExecTool) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
 	cmdRaw, ok := args["cmd"]
 	log.Printf("[DEBUG-EXEC] cmdRaw type: %T, value: %v", cmdRaw, cmdRaw)

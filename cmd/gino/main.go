@@ -418,6 +418,10 @@ func runGateway(homeFlag string, args []string) {
 	ag := agent.NewAgentLoop(hub, provider, model, maxIter, ws, scheduler, cfg.MCPServers, cfg.Agents.Defaults.AllowedDirs, cfg.Agents.Defaults.DisableTools, cfg.Brain, homeDir, cfg.Agents.Defaults.Sandbox, signalSocketPath, cfg.Agents.Defaults.MaxTurnMessages, cfg.Agents.Defaults.MaxToolResultChars, cfg.Agents.Defaults.Compaction, cfg.Agents.Defaults.Web, cfg.Agents.Defaults.Search, cfg.Agents.Defaults.VisionModel)
 	defer ag.Close()
 
+	// Persist background jobs (pollers survive restarts; interrupted one-shots
+	// are reported unless marked rerunOnRestart).
+	ag.SetBackgroundPersistencePath(filepath.Join(homeDir, "background_jobs.json"))
+
 	if cfg.Agents.Defaults.EnableToolActivityIndicator != nil {
 		ag.SetToolActivityIndicator(*cfg.Agents.Defaults.EnableToolActivityIndicator)
 	}

@@ -457,6 +457,7 @@ type AgentLoop struct {
 	projects                *ProjectRegistry     // nil = runtime project switching unavailable
 	fsTool                  *tools.FilesystemTool
 	execTool                *tools.ExecTool
+	bgTool                  *tools.BackgroundTool
 	profileWorkspace        string
 
 	// Per-session turn management for async processing and cancellation.
@@ -621,6 +622,11 @@ func NewAgentLoopWithProfileWorkspace(b *chat.Hub, provider providers.LLMProvide
 		register(tools.NewCronTool(scheduler))
 	}
 
+	// Background job manager: long-running commands + periodic pollers whose
+	// results arrive as signal-routed messages. Shares the exec sandbox.
+	bgTool := tools.NewBackgroundTool(b, execTool)
+	register(bgTool)
+
 	sm := session.NewSessionManager(profileWorkspace)
 
 	// Restore sessions from disk on startup so conversation history survives restarts.
@@ -762,6 +768,7 @@ func NewAgentLoopWithProfileWorkspace(b *chat.Hub, provider providers.LLMProvide
 		compactor:               comp,
 		fsTool:                  fsTool,
 		execTool:                execTool,
+		bgTool:                  bgTool,
 		profileWorkspace:        profileWorkspace,
 	}
 	if ownedSkillRoot != nil {
@@ -857,6 +864,9 @@ func (a *AgentLoop) Close() {
 	for _, c := range a.mcpClients {
 		_ = c.Close()
 	}
+	if a.bgTool != nil {
+		a.bgTool.Shutdown()
+	}
 	if a.brain != nil {
 		if err := a.brain.Close(); err != nil {
 			log.Printf("agent: close brain: %v", err)
@@ -864,6 +874,17 @@ func (a *AgentLoop) Close() {
 	}
 	for _, r := range a.ownedRoots {
 		_ = r.Close()
+	}
+}
+
+// SetBackgroundPersistencePath enables background-job persistence at the given
+// path and restores prior state (relaunching pollers, rerunning or reporting
+// interrupted one-shots). Safe to call before Run.
+func (a *AgentLoop) SetBackgroundPersistencePath(path string) {
+	if a.bgTool != nil {
+		if err := a.bgTool.SetPersistencePath(path); err != nil {
+			log.Printf("background: restore from %s failed: %v", path, err)
+		}
 	}
 }
 
@@ -1661,6 +1682,11 @@ func (a *AgentLoop) dispatchMessage(ctx context.Context, msg chat.Inbound) {
 	if ct := a.tools.Get("cron"); ct != nil {
 		if ctool, ok := ct.(interface{ SetContext(string, string) }); ok {
 			ctool.SetContext(msg.Channel, msg.ChatID)
+		}
+	}
+	if bt := a.tools.Get("background"); bt != nil {
+		if btool, ok := bt.(interface{ SetContext(string, string) }); ok {
+			btool.SetContext(msg.Channel, msg.ChatID)
 		}
 	}
 
