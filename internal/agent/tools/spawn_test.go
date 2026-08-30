@@ -199,10 +199,9 @@ func TestSpawnListAndCancel(t *testing.T) {
 	if !strings.Contains(list, id) || !strings.Contains(list, "lab") {
 		t.Errorf("list missing task: %q", list)
 	}
-	cancelOut, err := tk.Execute(t.Context(), map[string]interface{}{"action": "cancel", "id": id})
-	if err != nil && cancelOut == "" {
-		// cancel returns ("", err) on failure; success path returns empty string, nil
-	}
+	// cancel returns ("", err) on failure; success returns ("", nil). Both are
+	// ignored — the poll below verifies the task was actually removed.
+	_, _ = tk.Execute(t.Context(), map[string]interface{}{"action": "cancel", "id": id})
 	// wait for the task to be removed
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {

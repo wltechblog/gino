@@ -2093,10 +2093,6 @@ func (a *AgentLoop) processTurn(ctx context.Context, at *activeTurn, sessionKey 
 	// accurate) and the user (so they know to reply "continue").
 	if iteration >= a.maxIterations && finalContent == "" {
 		log.Printf("Turn hit iteration limit for %s (%d iterations) — notifying user", sessionKey, iteration)
-		messages = append(messages, providers.Message{
-			Role:    "user",
-			Content: "[System: The tool-call limit was reached before you produced a final reply. Your turn is paused here. If the user sends another message, pick up where you left off and do not re-read files you already processed.]",
-		})
 		limitNote := fmt.Sprintf("⏳ I've hit my tool-call limit for this turn (%d steps) without finishing. Reply **continue** and I'll pick up where I left off.", a.maxIterations)
 		finalContent = limitNote
 	}
