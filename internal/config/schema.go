@@ -247,6 +247,45 @@ type SpawnConfig struct {
 	// manager always additionally disables spawn, message, and cron in
 	// children to prevent recursive spawning and side-channel messaging.
 	DisableTools []string `json:"disableTools,omitempty"`
+
+	// Agents defines named subagent profiles available to the spawn tool.
+	// Each may specify its own provider (from providers.presets), model,
+	// timeout, and description. When Agents is empty, spawning still works
+	// using the top-level defaults and the LLM picks agent names freely.
+	Agents []SpawnAgentConfig `json:"agents,omitempty"`
+}
+
+// SpawnAgentConfig is a named subagent profile for the spawn tool.
+type SpawnAgentConfig struct {
+	// Name is the identifier the spawn tool's "agent" argument refers to.
+	// Must be unique, non-empty, and match [a-zA-Z0-9_-] after sanitization.
+	Name string `json:"name"`
+
+	// Description tells the parent LLM what this agent is for and when to
+	// choose it over other agents or doing the work inline. This is the
+	// routing signal — write it as usage guidance, not just a label.
+	Description string `json:"description,omitempty"`
+
+	// Model overrides the model for this agent ("" = agent's model or
+	// spawn.model or inherited config default).
+	Model string `json:"model,omitempty"`
+
+	// Provider names a provider preset from providers.presets to use for
+	// this agent (different API endpoint/key than the main conversation).
+	// Empty = inherit the parent's provider.
+	Provider string `json:"provider,omitempty"`
+
+	// SystemPromptOverride replaces the child's bootstrap system prompt
+	// (used by benchmarks and specialized personas). Empty = default.
+	SystemPromptOverride string `json:"systemPromptOverride,omitempty"`
+
+	// TimeoutS caps this agent's runtime per task. 0 = spawn defaultTimeoutS.
+	TimeoutS int `json:"timeoutS,omitempty"`
+
+	// DisableTools adds agent-specific tools to disable on top of the
+	// manager's mandatory list (spawn/message/cron/write_memory) and the
+	// global spawn.disableTools list.
+	DisableTools []string `json:"disableTools,omitempty"`
 }
 
 // SandboxConfig controls the exec tool's security level.
@@ -359,11 +398,18 @@ type TelegramConfig struct {
 type ProvidersConfig struct {
 	OpenAI    *ProviderConfig  `json:"openai,omitempty"`
 	Fallbacks []FallbackConfig `json:"fallbacks,omitempty"`
+
+	// Presets are named reusable provider definitions (endpoint + key +
+	// optional default model) that subagent profiles can reference by name
+	// via spawn.agents[].provider. They do not participate in fallback
+	// ordering — only the primary/fallbacks chain does that.
+	Presets map[string]*ProviderConfig `json:"presets,omitempty"`
 }
 
 type ProviderConfig struct {
 	APIKey          string `json:"apiKey"`
 	APIBase         string `json:"apiBase"`
+	Model           string `json:"model,omitempty"`
 	ReasoningEffort string `json:"reasoningEffort,omitempty"`
 }
 

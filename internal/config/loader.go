@@ -28,6 +28,24 @@ func applyEnvOverrides(cfg *Config) {
 	if v := os.Getenv("GINO_MODEL"); v != "" {
 		cfg.Agents.Defaults.Model = v
 	}
+	if v := os.Getenv("GINO_API_KEY"); v != "" {
+		if cfg.Providers.OpenAI == nil {
+			cfg.Providers.OpenAI = &ProviderConfig{}
+		}
+		cfg.Providers.OpenAI.APIKey = v
+	}
+	if v := os.Getenv("GINO_API_BASE"); v != "" {
+		if cfg.Providers.OpenAI == nil {
+			cfg.Providers.OpenAI = &ProviderConfig{}
+		}
+		cfg.Providers.OpenAI.APIBase = v
+	}
+	if v := os.Getenv("GINO_REASONING_EFFORT"); v != "" {
+		if cfg.Providers.OpenAI == nil {
+			cfg.Providers.OpenAI = &ProviderConfig{}
+		}
+		cfg.Providers.OpenAI.ReasoningEffort = v
+	}
 	if v := os.Getenv("GINO_MAX_TOKENS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			cfg.Agents.Defaults.MaxTokens = n

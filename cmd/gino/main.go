@@ -15,6 +15,7 @@ import (
 
 	"github.com/wltechblog/gino/internal/agent"
 	"github.com/wltechblog/gino/internal/agent/memory"
+	"github.com/wltechblog/gino/internal/agent/tools"
 	"github.com/wltechblog/gino/internal/channels"
 	"github.com/wltechblog/gino/internal/chat"
 	"github.com/wltechblog/gino/internal/config"
@@ -290,7 +291,8 @@ func runAgent(homeFlag string, args []string) {
 
 	ag := agent.NewAgentLoopWithProfileWorkspace(hub, provider, model, maxIter, projectWS, profileWS, nil, cfg.MCPServers, cfg.Agents.Defaults.AllowedDirs, disableSet, cfg.Brain, homeDir, cfg.Agents.Defaults.Sandbox, "", cfg.Agents.Defaults.MaxTurnMessages, cfg.Agents.Defaults.MaxToolResultChars, cfg.Agents.Defaults.Compaction, cfg.Agents.Defaults.Web, cfg.Agents.Defaults.Search, cfg.Agents.Defaults.VisionModel)
 	defer ag.Close()
-	ag.SetSpawnConfig(cfg.Agents.Defaults.Spawn)
+	ag.SetSpawnCLIFlags(tools.CLIFlags{Model: *modelFlag, SystemPrompt: *systemPromptOverride})
+	ag.SetSpawnConfig(cfg.Agents.Defaults.Spawn, cfg.Providers.Presets)
 	ag.SetSessionCompaction(&cfg.Agents.Defaults.SessionCompaction)
 	if cfg.Agents.Defaults.EnableToolActivityIndicator != nil {
 		ag.SetToolActivityIndicator(*cfg.Agents.Defaults.EnableToolActivityIndicator)
@@ -435,7 +437,7 @@ func runGateway(homeFlag string, args []string) {
 
 	// Spawn tool (subagent tasks) — enabled via config; children run with
 	// spawn/message/cron/write_memory disabled so they can't recurse.
-	ag.SetSpawnConfig(cfg.Agents.Defaults.Spawn)
+	ag.SetSpawnConfig(cfg.Agents.Defaults.Spawn, cfg.Providers.Presets)
 	ag.SetSessionCompaction(&cfg.Agents.Defaults.SessionCompaction)
 
 	// Persist background jobs (pollers survive restarts; interrupted one-shots

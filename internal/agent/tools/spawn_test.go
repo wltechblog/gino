@@ -31,6 +31,11 @@ func spawnTestTool(t *testing.T, binary string, ws string) *SpawnTool {
 		Binary:          binary,
 		DefaultTimeoutS: 15,
 		MaxConcurrent:   2,
+		Agents: []config.SpawnAgentConfig{
+			{Name: "docs-research", Description: "docs lookup agent"},
+			{Name: "bg", Description: "background helper"},
+			{Name: "lab", Description: "lab assistant"},
+		},
 	}
 	hub := chat.NewHub(10)
 	return NewSpawnTool(cfg, t.TempDir(), ws, hub)
@@ -236,5 +241,142 @@ func TestSpawnValidation(t *testing.T) {
 	}
 	if _, err := tk.Execute(t.Context(), map[string]interface{}{"action": "bogus"}); err == nil {
 		t.Error("unknown action accepted")
+	}
+}
+
+// TestSpawnAgentProfileArgv verifies that a named agent profile applies its
+// model, timeout, and disable-tools to the child invocation.
+func TestSpawnAgentProfileArgv(t *testing.T) {
+	argsFile := filepath.Join(t.TempDir(), "args.txt")
+	t.Setenv("SPAWN_ARGS_FILE", argsFile)
+	binary := writeFakeGino(t, `printf '%s\n' "$@" > "$SPAWN_ARGS_FILE"; echo PROFILE-RAN`)
+	tk := spawnTestTool(t, binary, t.TempDir())
+	tk.Configure(config.SpawnConfig{
+		Enabled:         true,
+		Binary:          binary,
+		DefaultTimeoutS: 15,
+		MaxConcurrent:   2,
+		Agents: []config.SpawnAgentConfig{
+			{
+				Name:         "vision",
+				Description:  "image analysis",
+				Model:        "glm-5v-turbo",
+				TimeoutS:     42,
+				DisableTools: []string{"exec"},
+			},
+		},
+	}, "")
+
+	out, err := tk.Execute(t.Context(), map[string]interface{}{
+		"agent": "vision",
+		"task":  "describe this image",
+	})
+	if err != nil {
+		t.Fatalf("spawn failed: %v", err)
+	}
+	if !strings.Contains(out, "PROFILE-RAN") {
+		t.Errorf("child did not run: %q", out)
+	}
+	data, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("child never wrote argv: %v", err)
+	}
+	argv := strings.Split(strings.TrimSpace(string(data)), "\n")
+	joined := strings.Join(argv, " ")
+	if !strings.Contains(joined, "-M glm-5v-turbo") {
+		t.Errorf("profile model not on argv: %v", argv)
+	}
+	// Mandatory neutering + profile extras must both be present.
+	if !strings.Contains(joined, "write_memory") || !strings.Contains(joined, "exec") {
+		t.Errorf("disable list missing entries: %v", argv)
+	}
+}
+
+// TestSpawnUnknownAgentRejected verifies the registry gate and its hint.
+func TestSpawnUnknownAgentRejected(t *testing.T) {
+	binary := writeFakeGino(t, "echo NOPE\n")
+	tk := spawnTestTool(t, binary, t.TempDir())
+	_, err := tk.Execute(t.Context(), map[string]interface{}{"agent": "no-such", "task": "x"})
+	if err == nil {
+		t.Fatal("unknown agent should be rejected")
+	}
+	if !strings.Contains(err.Error(), "docs-research") || !strings.Contains(err.Error(), "available") {
+		t.Errorf("error missing agent hint: %v", err)
+	}
+}
+
+// TestSpawnProviderPresetEnv verifies that a profile referencing a provider
+// preset injects GINO_API_KEY/GINO_API_BASE/GINO_MODEL into the child env.
+func TestSpawnProviderPresetEnv(t *testing.T) {
+	envFile := filepath.Join(t.TempDir(), "env.txt")
+	t.Setenv("SPAWN_ENV_FILE", envFile)
+	binary := writeFakeGino(t, `env | grep '^GINO_' | sort > "$SPAWN_ENV_FILE"; echo ENV-DUMPED`)
+	tk := spawnTestTool(t, binary, t.TempDir())
+	tk.SetProviderPresets(map[string]*config.ProviderConfig{
+		"zai-vision": {APIKey: "sk-test", APIBase: "https://api.z.ai/paas/v4", Model: "glm-5v-turbo"},
+	})
+	tk.Configure(config.SpawnConfig{
+		Enabled:         true,
+		Binary:          binary,
+		DefaultTimeoutS: 15,
+		MaxConcurrent:   2,
+		Agents: []config.SpawnAgentConfig{
+			{Name: "vision", Provider: "zai-vision"},
+		},
+	}, "")
+
+	out, err := tk.Execute(t.Context(), map[string]interface{}{"agent": "vision", "task": "look"})
+	if err != nil {
+		t.Fatalf("spawn failed: %v", err)
+	}
+	if !strings.Contains(out, "ENV-DUMPED") {
+		t.Errorf("child did not run: %q", out)
+	}
+	data, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatalf("child never wrote env: %v", err)
+	}
+	envs := string(data)
+	for _, want := range []string{"GINO_API_KEY=sk-test", "GINO_API_BASE=https://api.z.ai/paas/v4", "GINO_MODEL=glm-5v-turbo"} {
+		if !strings.Contains(envs, want) {
+			t.Errorf("env missing %q:\n%s", want, envs)
+		}
+	}
+}
+
+// TestSpawnDescriptionListsAgents verifies the tool description surfaces
+// profiles so the parent model can route by purpose.
+func TestSpawnDescriptionListsAgents(t *testing.T) {
+	binary := writeFakeGino(t, "true\n")
+	tk := spawnTestTool(t, binary, t.TempDir())
+	tk.Configure(config.SpawnConfig{
+		Enabled: true, Binary: binary, DefaultTimeoutS: 15, MaxConcurrent: 2,
+		Agents: []config.SpawnAgentConfig{
+			{Name: "vision", Description: "analyzes images", Model: "glm-5v-turbo", Provider: "zai"},
+			{Name: "docs", Description: "searches documentation"},
+		},
+	}, "")
+	desc := tk.Description()
+	for _, want := range []string{"vision: analyzes images", "glm-5v-turbo", "docs: searches documentation", "provider=zai"} {
+		if !strings.Contains(desc, want) {
+			t.Errorf("description missing %q:\n%s", want, desc)
+		}
+	}
+}
+
+// TestSpawnProfileTimeoutUsed verifies profile.TimeoutS beats the default.
+func TestSpawnProfileTimeoutUsed(t *testing.T) {
+	binary := writeFakeGino(t, "echo SLOW-START\nsleep 30\n")
+	tk := spawnTestTool(t, binary, t.TempDir())
+	tk.Configure(config.SpawnConfig{
+		Enabled: true, Binary: binary, DefaultTimeoutS: 60, MaxConcurrent: 2,
+		Agents: []config.SpawnAgentConfig{{Name: "quick", TimeoutS: 1}},
+	}, "")
+	out, err := tk.Execute(t.Context(), map[string]interface{}{"agent": "quick", "task": "slow thing"})
+	if err != nil {
+		t.Fatalf("timeout should be reported as result: %v", err)
+	}
+	if !strings.Contains(out, "timed out") || !strings.Contains(out, "SLOW-START") {
+		t.Errorf("profile timeout not applied: %q", out)
 	}
 }

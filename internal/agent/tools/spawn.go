@@ -32,7 +32,7 @@ import (
 //   - wait=false: run in the background; the result is delivered to the
 //     originating chat as a signal when the task finishes.
 type SpawnTool struct {
-	mu            sync.Mutex
+	mu            sync.RWMutex
 	enabled       bool
 	binary        string
 	homeDir       string
@@ -41,11 +41,27 @@ type SpawnTool struct {
 	defaultTO     time.Duration
 	maxConcurrent int
 	disableTools  []string
-	tasks         map[string]*spawnTask
-	seq           int
-	hub           *chat.Hub
-	channel       string
-	chatID        string
+	// agents is the registry of named subagent profiles (config-defined).
+	agents map[string]config.SpawnAgentConfig
+	// providerPresets holds named endpoint definitions (providers.presets)
+	// that agent profiles can reference. nil entries fall back to inherit.
+	providerPresets map[string]*config.ProviderConfig
+	// cliCfg carries global CLI flag overrides (model, system-prompt,
+	// disable-tools) so they apply to spawned children too.
+	cliCfg  CLIFlags
+	tasks   map[string]*spawnTask
+	seq     int
+	hub     *chat.Hub
+	channel string
+	chatID  string
+}
+
+// CLIFlags carries the gino agent CLI flag overrides that should propagate
+// to spawned children (set once at tool creation from main.go).
+type CLIFlags struct {
+	Model        string
+	SystemPrompt string
+	DisableTools []string
 }
 
 // spawnTask tracks one spawned child agent.
@@ -85,9 +101,33 @@ func NewSpawnToolDisabled(homeDir, workspace string, hub *chat.Hub) *SpawnTool {
 
 // NewSpawnTool creates an already-configured spawn tool (used by tests).
 func NewSpawnTool(cfg config.SpawnConfig, homeDir, workspace string, hub *chat.Hub) *SpawnTool {
+	return NewSpawnToolWithFlags(cfg, homeDir, workspace, hub, CLIFlags{})
+}
+
+// NewSpawnToolWithFlags creates a configured spawn tool with CLI flag
+// overrides applied (-M, -system-prompt, -disable-tools inheritance).
+// Provider presets are supplied separately via SetProviderPresets.
+func NewSpawnToolWithFlags(cfg config.SpawnConfig, homeDir, workspace string, hub *chat.Hub, cliCfg CLIFlags) *SpawnTool {
 	t := NewSpawnToolDisabled(homeDir, workspace, hub)
+	t.SetCLIFlags(cliCfg)
 	t.Configure(cfg, cfg.Model)
 	return t
+}
+
+// SetCLIFlags stores CLI flag overrides to propagate to children. Must be
+// called before Configure (or any spawn) to take effect on argv building.
+func (t *SpawnTool) SetCLIFlags(f CLIFlags) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.cliCfg = f
+}
+
+// SetProviderPresets stores named provider presets from providers.presets
+// for resolution by agent profiles at spawn time.
+func (t *SpawnTool) SetProviderPresets(presets map[string]*config.ProviderConfig) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.providerPresets = presets
 }
 
 // Configure enables the tool and applies runtime settings.
@@ -121,12 +161,59 @@ func (t *SpawnTool) Configure(cfg config.SpawnConfig, model string) {
 	t.defaultTO = time.Duration(timeoutS) * time.Second
 	t.maxConcurrent = maxConc
 	t.disableTools = cfg.DisableTools
+	t.agents = make(map[string]config.SpawnAgentConfig, len(cfg.Agents))
+	for _, a := range cfg.Agents {
+		t.agents[a.Name] = a
+	}
 	t.enabled = true
 }
 
 func (t *SpawnTool) Name() string { return "spawn" }
+
+// spawnToolDescription composes the tool description from the static base
+// plus one line per configured agent profile, so the parent LLM can route
+// tasks to the right agent by purpose.
+func spawnToolDescription(agents map[string]config.SpawnAgentConfig) string {
+	var sb strings.Builder
+	sb.WriteString("Run a subagent task in an isolated gino process with its own session (low token cost — the task does not inherit this conversation). Pass a complete, self-contained task description. Actions: spawn (default), list (running tasks), cancel (by id).")
+	if len(agents) > 0 {
+		names := make([]string, 0, len(agents))
+		for name := range agents {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		sb.WriteString("\n\nAvailable agents (pass one as 'agent'; use its listed strengths to choose):")
+		for _, name := range names {
+			a := agents[name]
+			desc := strings.TrimSpace(a.Description)
+			if desc == "" {
+				desc = "(no description — general-purpose)"
+			}
+			fmt.Fprintf(&sb, "\n- %s: %s", name, desc)
+			var caps []string
+			if a.Model != "" {
+				caps = append(caps, "model="+a.Model)
+			}
+			if a.Provider != "" {
+				caps = append(caps, "provider="+a.Provider)
+			}
+			if a.TimeoutS > 0 {
+				caps = append(caps, fmt.Sprintf("timeout=%ds", a.TimeoutS))
+			}
+			if len(caps) > 0 {
+				fmt.Fprintf(&sb, " [%s]", strings.Join(caps, ", "))
+			}
+		}
+		sb.WriteString("\n\nIf no agent fits the task, omit 'agent' to use the default configuration. Prefer spawning a listed agent over doing equivalent work inline when its description matches.")
+	}
+	return sb.String()
+}
+
 func (t *SpawnTool) Description() string {
-	return "Run a subagent task in an isolated gino process with its own session (low token cost — the task does not inherit this conversation). Pass a complete, self-contained task description. Actions: spawn (default), list (running tasks), cancel (by id)."
+	t.mu.RLock()
+	agents := t.agents
+	t.mu.RUnlock()
+	return spawnToolDescription(agents)
 }
 
 func (t *SpawnTool) Parameters() map[string]interface{} {
@@ -135,7 +222,7 @@ func (t *SpawnTool) Parameters() map[string]interface{} {
 		"properties": map[string]interface{}{
 			"agent": map[string]interface{}{
 				"type":        "string",
-				"description": "Short label for the task (e.g. 'docs-research'). Used in reporting.",
+				"description": "Named agent profile to run the task (see description for available agents and when to use each). Omit for a general-purpose task with default settings.",
 			},
 			"task": map[string]interface{}{
 				"type":        "string",
@@ -229,12 +316,26 @@ func (t *SpawnTool) doSpawn(ctx context.Context, args map[string]interface{}) (s
 		return "", fmt.Errorf("spawn: task too long (%d bytes, max 100KB)", len(task))
 	}
 
+	// Resolve the named agent profile (if any) under the tool lock.
+	profile, known, err := t.resolveAgent(agentName)
+	if err != nil {
+		return "", err
+	}
+	_ = known // profile applies whenever non-nil
+
+	// Timeout precedence: call timeoutS > profile.TimeoutS > defaultTO.
 	timeout := t.defaultTO
+	if profile != nil && profile.TimeoutS > 0 {
+		timeout = time.Duration(profile.TimeoutS) * time.Second
+	}
 	if timeoutS > 0 {
 		if timeoutS > spMaxTimeoutS {
 			timeoutS = spMaxTimeoutS
 		}
 		timeout = time.Duration(timeoutS) * time.Second
+	}
+	if timeout > time.Duration(spMaxTimeoutS)*time.Second {
+		timeout = time.Duration(spMaxTimeoutS) * time.Second
 	}
 
 	sess := t.normalizeSession(sessionName, task)
@@ -260,20 +361,11 @@ func (t *SpawnTool) doSpawn(ctx context.Context, args map[string]interface{}) (s
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	tk.cancel = cancel
 
-	childDisable := t.childDisableTools()
-	argv := []string{
-		t.binary, "agent",
-		"-m", task,
-		"-session", "sp:" + sess,
-		"-disable-tools", strings.Join(childDisable, ","),
-	}
-	if t.model != "" {
-		argv = append(argv, "-M", t.model)
-	}
+	argv, childEnv := t.buildChildInvocation(agentName, profile, sess, task)
 
 	if wait {
 		// Synchronous: run inline, return output as the tool result.
-		output, err := t.runChild(runCtx, argv)
+		output, err := t.runChild(runCtx, argv, childEnv)
 		t.mu.Lock()
 		delete(t.tasks, id)
 		t.mu.Unlock()
@@ -292,7 +384,7 @@ func (t *SpawnTool) doSpawn(ctx context.Context, args map[string]interface{}) (s
 	channel, chatID := t.currentContext()
 	go func() {
 		defer cancel()
-		output, err := t.runChild(runCtx, argv)
+		output, err := t.runChild(runCtx, argv, childEnv)
 		elapsed := time.Since(tk.StartedAt).Round(time.Second)
 		t.mu.Lock()
 		delete(t.tasks, id)
@@ -323,10 +415,13 @@ func agentLabel(name string) string {
 
 // runChild executes the gino agent subprocess, killing the whole process
 // group on cancellation (the child may itself shell out). WaitDelay bounds
-// the wait for grandchildren to exit after the group kill.
-func (t *SpawnTool) runChild(ctx context.Context, argv []string) (string, error) {
+// the wait for grandchildren to exit after the group kill. extraEnv holds
+// additional environment entries (e.g. GINO_SYSTEM_PROMPT from an agent
+// profile's systemPromptOverride).
+func (t *SpawnTool) runChild(ctx context.Context, argv []string, extraEnv []string) (string, error) {
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Dir = t.workspace
+	cmd.Env = append(os.Environ(), extraEnv...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
 		if cmd.Process != nil {
@@ -347,17 +442,148 @@ func (t *SpawnTool) runChild(ctx context.Context, argv []string) (string, error)
 	return combined.String(), nil
 }
 
-// childDisableTools builds the disabled-tools list for children: always
-// neuter spawn (no recursion), message and cron (no side-channel messaging
-// or scheduling), and write_memory (subagent tasks must not pollute the
-// profile's long-term memory), plus any configured extras.
-func (t *SpawnTool) childDisableTools() []string {
-	seen := map[string]bool{"spawn": true, "message": true, "cron": true, "write_memory": true}
-	out := []string{"spawn", "message", "cron", "write_memory"}
-	for _, name := range t.disableTools {
-		if !seen[name] {
-			seen[name] = true
-			out = append(out, name)
+// resolveAgent looks up a named agent profile. An empty name returns
+// (nil, false, nil) — the default path with inherited settings. A non-empty
+// name that is not in the registry returns an error listing valid names,
+// so typos fail fast instead of silently running with default settings.
+func (t *SpawnTool) resolveAgent(name string) (*config.SpawnAgentConfig, bool, error) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	if name == "" {
+		return nil, false, nil
+	}
+	a, ok := t.agents[name]
+	if !ok {
+		return nil, false, fmt.Errorf("spawn: unknown agent %q %s", name, t.validAgentsHint())
+	}
+	return &a, true, nil
+}
+
+// validAgentsHint formats the registry contents for error messages. Must be
+// called with t.mu held.
+func (t *SpawnTool) validAgentsHint() string {
+	if len(t.agents) == 0 {
+		return "(no agents configured — omit 'agent' or add spawn.agents entries to config)"
+	}
+	names := make([]string, 0, len(t.agents))
+	for name := range t.agents {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return "(available: " + strings.Join(names, ", ") + ")"
+}
+
+// buildChildInvocation assembles argv and env for a child agent run,
+// applying the precedence chain for model and system prompt:
+//
+//	model:         call site > agent profile > spawn.model > CLI -M > (config default)
+//	system prompt: agent profile override > CLI -system-prompt > (default bootstrap)
+//	provider:      agent profile preset (via env vars) > inherited provider config
+func (t *SpawnTool) buildChildInvocation(agentName string, profile *config.SpawnAgentConfig, sess, task string) ([]string, []string) {
+	t.mu.RLock()
+	binary, baseModel, cfgDisable, cliCfg := t.binary, t.model, t.disableTools, t.cliCfg
+	t.mu.RUnlock()
+
+	var argv []string
+
+	if profile == nil {
+		// Un-named default path (original behavior + CLI flag propagation).
+		disable := mergeDisableTools(spMandatoryDisable, cfgDisable, nil, cliCfg.DisableTools)
+		argv = []string{
+			binary, "agent",
+			"-m", task,
+			"-session", "sp:" + sess,
+			"-disable-tools", strings.Join(disable, ","),
+		}
+		if m := firstNonEmpty(cliCfg.Model, baseModel); m != "" {
+			argv = append(argv, "-M", m)
+		}
+		if sp := firstNonEmpty(cliCfg.SystemPrompt); sp != "" {
+			argv = append(argv, "-system-prompt", sp)
+		}
+		return argv, nil
+	}
+
+	// Named profile path.
+	model := firstNonEmpty(profile.Model, baseModel, cliCfg.Model)
+	agentDisable := mergeDisableTools(spMandatoryDisable, cfgDisable, profile.DisableTools, cliCfg.DisableTools)
+	argv = []string{
+		binary, "agent",
+		"-m", task,
+		"-session", "sp:" + sess,
+		"-disable-tools", strings.Join(agentDisable, ","),
+	}
+	if model != "" {
+		argv = append(argv, "-M", model)
+	}
+	if sp := firstNonEmpty(profile.SystemPromptOverride, cliCfg.SystemPrompt); sp != "" {
+		argv = append(argv, "-system-prompt", sp)
+	}
+
+	// Provider resolution: a named preset injects endpoint + key + model via
+	// env vars (env overrides config in the loader), keeping the child's
+	// argv identical in shape to the default path.
+	var env []string
+	if profile.Provider != "" {
+		t.mu.RLock()
+		preset := t.providerPresets[profile.Provider]
+		t.mu.RUnlock()
+		if preset == nil {
+			log.Printf("spawn: agent %q references unknown provider preset %q — child will use inherited provider", agentName, profile.Provider)
+		} else {
+			if preset.APIKey != "" {
+				env = append(env, buildEnv("GINO_API_KEY", preset.APIKey))
+			}
+			if preset.APIBase != "" {
+				env = append(env, buildEnv("GINO_API_BASE", preset.APIBase))
+			}
+			if preset.Model != "" && profile.Model == "" {
+				// Profile model (explicit) beats preset default model; preset
+				// model beats config default only when profile has none.
+				env = append(env, buildEnv("GINO_MODEL", preset.Model))
+			}
+			if preset.ReasoningEffort != "" {
+				env = append(env, buildEnv("GINO_REASONING_EFFORT", preset.ReasoningEffort))
+			}
+		}
+	}
+	return argv, env
+}
+
+// firstNonEmpty returns the first non-empty argument.
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// buildEnv returns "KEY=VALUE" — a tiny helper to keep env assembly readable.
+func buildEnv(key, value string) string {
+	return key + "=" + value
+}
+
+// spMandatoryDisable lists tools always disabled in children: spawn (no
+// recursion), message and cron (no side-channel messaging or scheduling),
+// and write_memory (subagent tasks must not pollute the profile's
+// long-term memory). This list is prepended to every child's disable set,
+// regardless of profile or CLI flags — it cannot be opted out of.
+var spMandatoryDisable = []string{"spawn", "message", "cron", "write_memory"}
+
+// mergeDisableTools merges the mandatory child-neutering list, the global
+// spawn disable list, agent-specific extras, and CLI -disable-tools
+// overrides, deduplicating while preserving that order.
+func mergeDisableTools(mandatory, global, agentExtras, cli []string) []string {
+	seen := make(map[string]bool)
+	out := make([]string, 0, len(mandatory)+len(global)+len(agentExtras)+len(cli))
+	for _, group := range [][]string{mandatory, global, agentExtras, cli} {
+		for _, name := range group {
+			if name != "" && !seen[name] {
+				seen[name] = true
+				out = append(out, name)
+			}
 		}
 	}
 	return out

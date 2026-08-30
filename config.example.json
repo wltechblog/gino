@@ -22,7 +22,22 @@
         "maxConcurrent": 4,
         "binary": "",
         "model": "",
-        "disableTools": []
+        "disableTools": [],
+        "agents": [
+          {
+            "name": "vision",
+            "description": "Analyzes images and screenshots with a vision-capable model. Use for any task involving image content, charts, UI screenshots, or rendered output.",
+            "provider": "zai-vision",
+            "model": "glm-5v-turbo",
+            "timeoutS": 600,
+            "disableTools": []
+          },
+          {
+            "name": "quick-lookup",
+            "description": "Fast low-cost lookups (factual recall, short summaries, format checks). Use for trivial subtasks where a heavy model is wasted.",
+            "model": "glm-4.5-air"
+          }
+        ]
       },
       "sessionCompaction": {
         "enabled": true,
@@ -61,6 +76,13 @@
     "openai": {
       "apiKey": "YOUR_API_KEY",
       "apiBase": "https://api.z.ai/api/coding/paas/v4"
+    },
+    "presets": {
+      "zai-vision": {
+        "apiKey": "YOUR_VISION_API_KEY",
+        "apiBase": "https://api.z.ai/api/paas/v4",
+        "model": "glm-5v-turbo"
+      }
     },
     "fallbacks": [
       {

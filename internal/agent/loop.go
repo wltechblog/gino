@@ -932,12 +932,24 @@ func (a *AgentLoop) SetBackgroundPersistencePath(path string) {
 
 // SetSpawnConfig enables and configures the spawn tool. Safe to call before
 // Run; with cfg.Enabled=false the tool stays inert and reports that it is
-// disabled if invoked.
-func (a *AgentLoop) SetSpawnConfig(cfg config.SpawnConfig) {
+// disabled if invoked. providerPresets are named provider definitions from
+// providers.presets that spawn agent profiles may reference.
+func (a *AgentLoop) SetSpawnConfig(cfg config.SpawnConfig, providerPresets map[string]*config.ProviderConfig) {
 	if a.spTool == nil || !cfg.Enabled {
 		return
 	}
+	a.spTool.SetProviderPresets(providerPresets)
 	a.spTool.Configure(cfg, a.model)
+}
+
+// SetSpawnCLIFlags propagates CLI flag overrides (-M, -system-prompt,
+// -disable-tools) so spawned children inherit the parent invocation's
+// settings. No-op when the spawn tool is absent (disabled).
+func (a *AgentLoop) SetSpawnCLIFlags(flags tools.CLIFlags) {
+	if a.spTool == nil {
+		return
+	}
+	a.spTool.SetCLIFlags(flags)
 }
 
 // SetSessionCompaction enables LLM-based summarization of old persisted
