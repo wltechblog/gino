@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/wltechblog/gino/internal/agent/memory"
@@ -168,12 +169,48 @@ func trimTurnMessages(messages []providers.Message, userMsgIdx int, maxMsgs int)
 	return result, newUserIdx
 }
 
-// truncateToolResult caps a tool result string to maxChars.
+// truncateToolResult caps a tool result string to maxChars. Data past the
+// cap is lost — use AgentLoop.overflowToolResult instead so oversized
+// output is preserved on disk.
 func truncateToolResult(s string, maxChars int) string {
 	if len(s) <= maxChars {
 		return s
 	}
 	return s[:maxChars] + fmt.Sprintf("\n... [truncated %d chars]", len(s)-maxChars)
+}
+
+// toolOverflowSeq disambiguates overflow files written in the same second.
+var toolOverflowSeq atomic.Uint64
+
+// overflowToolResult returns s unchanged when it fits the configured budget.
+// Oversized output is saved verbatim to <workspace>/tool-outputs/ and the
+// returned string carries a head plus the file path, so the agent can read
+// the rest via the filesystem tool instead of the data being silently lost.
+// Falls back to plain truncation if the write fails.
+func (a *AgentLoop) overflowToolResult(s string) string {
+	if len(s) <= a.maxToolResultChars {
+		return s
+	}
+	head := s[:a.maxToolResultChars]
+	dir := ""
+	if a.fsTool != nil {
+		dir = filepath.Join(a.fsTool.WorkspaceDir(), "tool-outputs")
+	}
+	if dir == "" {
+		return truncateToolResult(s, a.maxToolResultChars)
+	}
+	name := fmt.Sprintf("overflow-%d-%d.txt", time.Now().Unix(), toolOverflowSeq.Add(1))
+	path := filepath.Join(dir, name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		log.Printf("tool overflow: mkdir %s: %v (falling back to truncation)", dir, err)
+		return truncateToolResult(s, a.maxToolResultChars)
+	}
+	if err := os.WriteFile(path, []byte(s), 0o600); err != nil {
+		log.Printf("tool overflow: write %s: %v (falling back to truncation)", path, err)
+		return truncateToolResult(s, a.maxToolResultChars)
+	}
+	log.Printf("tool overflow: %d chars saved to %s", len(s), path)
+	return fmt.Sprintf("%s\n\n[Tool output overflowed the %d-char context budget (%d chars total). Full output saved to: %s — read it with the filesystem tool if you need the rest.]", head, a.maxToolResultChars, len(s), path)
 }
 
 // toolCallRecord captures a single tool invocation for session continuity.
@@ -454,6 +491,8 @@ type AgentLoop struct {
 	signalSocketPath        string               // GINO_SIGNAL_SOCKET injected into MCP child processes
 	signalListener          SignalTargetRecorder // optional: records last real channel for signal routing
 	compactor               *compactor           // nil = use legacy trimTurnMessages
+	spTool                  *tools.SpawnTool     // subagent spawn tool (disabled until SetSpawnConfig)
+	sessComp                *sessionCompactor    // nil = session-history compaction disabled
 	projects                *ProjectRegistry     // nil = runtime project switching unavailable
 	fsTool                  *tools.FilesystemTool
 	execTool                *tools.ExecTool
@@ -610,7 +649,7 @@ func NewAgentLoopWithProfileWorkspace(b *chat.Hub, provider providers.LLMProvide
 		register(tools.NewWebSearchTool())
 		log.Println("Web search: using DuckDuckGo (no API key required)")
 	}
-	register(tools.NewSpawnTool())
+	register(tools.NewSpawnToolDisabled(homeDir, workspace, b))
 
 	// Register vision tool if a vision model is configured
 	if visionModel != "" {
@@ -867,6 +906,9 @@ func (a *AgentLoop) Close() {
 	if a.bgTool != nil {
 		a.bgTool.Shutdown()
 	}
+	if a.spTool != nil {
+		a.spTool.Shutdown()
+	}
 	if a.brain != nil {
 		if err := a.brain.Close(); err != nil {
 			log.Printf("agent: close brain: %v", err)
@@ -886,6 +928,26 @@ func (a *AgentLoop) SetBackgroundPersistencePath(path string) {
 			log.Printf("background: restore from %s failed: %v", path, err)
 		}
 	}
+}
+
+// SetSpawnConfig enables and configures the spawn tool. Safe to call before
+// Run; with cfg.Enabled=false the tool stays inert and reports that it is
+// disabled if invoked.
+func (a *AgentLoop) SetSpawnConfig(cfg config.SpawnConfig) {
+	if a.spTool == nil || !cfg.Enabled {
+		return
+	}
+	a.spTool.Configure(cfg, a.model)
+}
+
+// SetSessionCompaction enables LLM-based summarization of old persisted
+// session history. Pass nil to disable.
+func (a *AgentLoop) SetSessionCompaction(cfg *config.SessionCompactionConfig) {
+	if cfg == nil {
+		a.sessComp = nil
+		return
+	}
+	a.sessComp = newSessionCompactor(a.provider, a.model, *cfg)
 }
 
 // StopTurn cancels the active turn for a session key, if one is running.
@@ -1689,6 +1751,11 @@ func (a *AgentLoop) dispatchMessage(ctx context.Context, msg chat.Inbound) {
 			btool.SetContext(msg.Channel, msg.ChatID)
 		}
 	}
+	if st := a.tools.Get("spawn"); st != nil {
+		if stol, ok := st.(interface{ SetContext(string, string) }); ok {
+			stol.SetContext(msg.Channel, msg.ChatID)
+		}
+	}
 
 	// Record last real channel/chatID for signal routing (only for non-signal messages)
 	if a.signalListener != nil && !isSystemChannel(msg.Channel) && !isSignal {
@@ -1997,7 +2064,7 @@ func (a *AgentLoop) processTurn(ctx context.Context, at *activeTurn, sessionKey 
 				// Truncate large tool results before adding to the LLM message chain.
 				// File reads are the primary source of context bloat — a single file
 				// can be 50 KB of text, which quickly fills the context window.
-				toolResultForLLM := truncateToolResult(res, a.maxToolResultChars)
+				toolResultForLLM := a.overflowToolResult(res)
 
 				// Record for session continuity
 				toolCallLog = append(toolCallLog, toolCallRecord{
@@ -2061,6 +2128,11 @@ done:
 			log.Printf("error saving session: %v", err)
 		}
 	}
+
+	// Session-history compaction: if this session has grown past the
+	// configured threshold, summarize old entries in the background so the
+	// next turn replays a bounded context instead of the whole history.
+	a.maybeCompactSession(sessionKey)
 
 	// Turn-end memory extraction: if the turn had significant activity (tool calls,
 	// long exchanges), run a background LLM call to extract facts worth remembering.
@@ -2298,7 +2370,7 @@ func (a *AgentLoop) ProcessDirectWithSessionAndSystemPrompt(content string, time
 				result = "(tool error) " + err.Error()
 			}
 			lastToolResult = result
-			messages = append(messages, providers.Message{Role: "tool", Content: truncateToolResult(result, a.maxToolResultChars), ToolCallID: tc.ID})
+			messages = append(messages, providers.Message{Role: "tool", Content: a.overflowToolResult(result), ToolCallID: tc.ID})
 		}
 	}
 

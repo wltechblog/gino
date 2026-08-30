@@ -2,6 +2,7 @@ package session
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -163,6 +164,11 @@ func (sm *SessionManager) DeleteByPrefix(prefix string) int {
 func (sm *SessionManager) Save(s *Session) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
+	return sm.saveLocked(s)
+}
+
+// saveLocked persists a session; sm.mu must already be held.
+func (sm *SessionManager) saveLocked(s *Session) error {
 	s.trim()
 	dir := filepath.Join(sm.workspace, "sessions")
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -375,6 +381,101 @@ func extractSnippet(text, query string, radius int) string {
 
 func (s *Session) GetHistory() []string {
 	return s.History
+}
+
+// SnapshotHistory returns a copy of the session's history under the manager
+// lock, so callers can safely iterate while other turns append messages.
+// Returns (nil, false) if the session does not exist.
+func (sm *SessionManager) SnapshotHistory(key string) ([]string, bool) {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	key = sanitizeKey(key)
+	s, ok := sm.sessions[key]
+	if !ok {
+		return nil, false
+	}
+	out := make([]string, len(s.History))
+	copy(out, s.History)
+	return out, true
+}
+
+// CheckHistoryLength reports whether the session exists and how many
+// history entries it currently holds. Used as a cheap pre-check before
+// scheduling session compaction.
+func (sm *SessionManager) CheckHistoryLength(key string) (int, bool) {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	key = sanitizeKey(key)
+	s, ok := sm.sessions[key]
+	if !ok {
+		return 0, false
+	}
+	return len(s.History), true
+}
+
+// CompactSession replaces all history entries older than the newest keep
+// entries with a single summary entry produced by summarizeFn. It is safe
+// against concurrent turns: entries appended while summarizeFn runs (an
+// LLM call, potentially slow) are preserved verbatim at commit time —
+// they land after the summary, unsanitized, as the freshest context.
+//
+// Returns the number of entries summarized (0 if there was nothing to do,
+// including when another compaction rewrote history mid-flight) and persists
+// the rewritten session. Returns os.ErrNotExist for unknown sessions.
+func (sm *SessionManager) CompactSession(key string, keep int, summarizeFn func(old []string) (string, error)) (int, error) {
+	if summarizeFn == nil {
+		return 0, fmt.Errorf("summarizeFn must not be nil")
+	}
+	key = sanitizeKey(key)
+
+	// Read the to-be-summarized prefix outside the lock (summarizeFn may be slow).
+	sm.mu.RLock()
+	s, ok := sm.sessions[key]
+	origLen := 0
+	var old []string
+	if ok {
+		origLen = len(s.History)
+		if origLen > keep {
+			old = make([]string, origLen-keep)
+			copy(old, s.History[:origLen-keep])
+		}
+	}
+	sm.mu.RUnlock()
+	if !ok {
+		return 0, os.ErrNotExist
+	}
+	if len(old) == 0 {
+		return 0, nil
+	}
+
+	summary, err := summarizeFn(old)
+	if err != nil {
+		return 0, err
+	}
+	if strings.TrimSpace(summary) == "" {
+		return 0, fmt.Errorf("summarizer returned empty summary; aborting compaction")
+	}
+
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if len(s.History) < origLen {
+		// Another compaction (or /purge) rewrote history mid-flight; abort
+		// rather than clobbering its result.
+		return 0, nil
+	}
+	// Keep the original preserved window plus anything appended since.
+	start := origLen - keep
+	if start < 0 {
+		start = 0
+	}
+	tail := s.History[start:]
+	newHist := make([]string, 0, len(tail)+1)
+	newHist = append(newHist, "assistant: [Earlier conversation summary (auto-compacted)] "+summary)
+	newHist = append(newHist, tail...)
+	s.History = newHist
+	s.trim()
+	s.UpdatedAt = time.Now()
+	return len(old), sm.saveLocked(s)
 }
 
 func (s *Session) trim() {

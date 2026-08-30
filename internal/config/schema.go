@@ -134,9 +134,35 @@ type AgentDefaults struct {
 	// Valid values: none, low, medium, high.
 	ReasoningEffort string `json:"reasoningEffort,omitempty"`
 
+	// Spawn configures the spawn tool for subagent task execution.
+	Spawn SpawnConfig `json:"spawn,omitempty"`
+
+	// SessionCompaction summarizes old persisted session history with the LLM
+	// when it grows past a threshold, instead of silently dropping the oldest
+	// entries at MaxHistorySize.
+	SessionCompaction SessionCompactionConfig `json:"sessionCompaction,omitempty"`
+
 	// Compaction controls LLM-based context summarization.
 	// When enabled, old messages are summarized by the LLM instead of dropped.
 	Compaction *CompactionConfig `json:"compaction,omitempty"`
+}
+
+// SessionCompactionConfig controls LLM-based summarization of persisted
+// session history (distinct from in-context CompactionConfig, which trims the
+// live LLM message chain mid-turn).
+type SessionCompactionConfig struct {
+	// Enabled turns on LLM summarization of old session history. Default true.
+	// When false, sessions fall back to the legacy behavior: oldest entries
+	// are silently dropped at MaxHistorySize.
+	Enabled *bool `json:"enabled,omitempty"`
+
+	// CompactAt is the history entry count that triggers summarization.
+	// Default 40 (MaxHistorySize is 50, leaving headroom before hard trim).
+	CompactAt int `json:"compactAt,omitempty"`
+
+	// KeepRecent is the number of newest entries preserved verbatim through
+	// compaction. Default 16.
+	KeepRecent int `json:"keepRecent,omitempty"`
 }
 
 // WebConfig configures the web fetch tool.
@@ -196,6 +222,31 @@ type CompactionConfig struct {
 	// it from growing unboundedly across iterative compactions.
 	// If left as 0, defaults to 5% of the context window (min 2000).
 	MaxSummaryTokens int `json:"maxSummaryTokens,omitempty"`
+}
+
+// SpawnConfig controls the spawn tool, which runs named subagent tasks as
+// isolated `gino agent` subprocesses.
+type SpawnConfig struct {
+	// Enabled turns the spawn tool on. Default false (stub no-op kept).
+	Enabled bool `json:"enabled"`
+
+	// DefaultTimeoutS caps each spawned task's runtime. Default 300.
+	DefaultTimeoutS int `json:"defaultTimeoutS,omitempty"`
+
+	// MaxConcurrent limits simultaneously running spawned tasks. Default 4.
+	MaxConcurrent int `json:"maxConcurrent,omitempty"`
+
+	// Binary is the gino binary to execute for child agents. Empty resolves
+	// to the current executable (os.Executable()).
+	Binary string `json:"binary,omitempty"`
+
+	// Model overrides the model for spawned children ("" = inherit config).
+	Model string `json:"model,omitempty"`
+
+	// DisableTools is prepended to the child's disabled-tools list. The
+	// manager always additionally disables spawn, message, and cron in
+	// children to prevent recursive spawning and side-channel messaging.
+	DisableTools []string `json:"disableTools,omitempty"`
 }
 
 // SandboxConfig controls the exec tool's security level.

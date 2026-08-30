@@ -228,6 +228,7 @@ func runAgent(homeFlag string, args []string) {
 	projectFlag := fs.String("project", "", "Project working directory while retaining the configured Gino profile")
 	sessionKey := fs.String("session", "", "Session key for multi-turn context persistence")
 	systemPromptOverride := fs.String("system-prompt", "", "Override the system prompt (used by benchmarks)")
+	disableToolsFlag := fs.String("disable-tools", "", "Comma-separated tool names to disable (e.g. spawn,message)")
 	_ = fs.Parse(args)
 
 	if *msg == "" {
@@ -275,8 +276,22 @@ func runAgent(homeFlag string, args []string) {
 		fmt.Fprintf(os.Stderr, "failed to chdir to project %q: %v\n", projectWS, err)
 		os.Exit(1)
 	}
-	ag := agent.NewAgentLoopWithProfileWorkspace(hub, provider, model, maxIter, projectWS, profileWS, nil, cfg.MCPServers, cfg.Agents.Defaults.AllowedDirs, cfg.Agents.Defaults.DisableTools, cfg.Brain, homeDir, cfg.Agents.Defaults.Sandbox, "", cfg.Agents.Defaults.MaxTurnMessages, cfg.Agents.Defaults.MaxToolResultChars, cfg.Agents.Defaults.Compaction, cfg.Agents.Defaults.Web, cfg.Agents.Defaults.Search, cfg.Agents.Defaults.VisionModel)
+	// Merge CLI-disabled tools into the config disable list so hosts (e.g.
+	// the spawn tool's subagents) can neuter specific tools at launch.
+	disableSet := cfg.Agents.Defaults.DisableTools
+	if *disableToolsFlag != "" {
+		for _, name := range strings.Split(*disableToolsFlag, ",") {
+			name = strings.TrimSpace(name)
+			if name != "" {
+				disableSet = append(disableSet, name)
+			}
+		}
+	}
+
+	ag := agent.NewAgentLoopWithProfileWorkspace(hub, provider, model, maxIter, projectWS, profileWS, nil, cfg.MCPServers, cfg.Agents.Defaults.AllowedDirs, disableSet, cfg.Brain, homeDir, cfg.Agents.Defaults.Sandbox, "", cfg.Agents.Defaults.MaxTurnMessages, cfg.Agents.Defaults.MaxToolResultChars, cfg.Agents.Defaults.Compaction, cfg.Agents.Defaults.Web, cfg.Agents.Defaults.Search, cfg.Agents.Defaults.VisionModel)
 	defer ag.Close()
+	ag.SetSpawnConfig(cfg.Agents.Defaults.Spawn)
+	ag.SetSessionCompaction(&cfg.Agents.Defaults.SessionCompaction)
 	if cfg.Agents.Defaults.EnableToolActivityIndicator != nil {
 		ag.SetToolActivityIndicator(*cfg.Agents.Defaults.EnableToolActivityIndicator)
 	}
@@ -417,6 +432,11 @@ func runGateway(homeFlag string, args []string) {
 
 	ag := agent.NewAgentLoop(hub, provider, model, maxIter, ws, scheduler, cfg.MCPServers, cfg.Agents.Defaults.AllowedDirs, cfg.Agents.Defaults.DisableTools, cfg.Brain, homeDir, cfg.Agents.Defaults.Sandbox, signalSocketPath, cfg.Agents.Defaults.MaxTurnMessages, cfg.Agents.Defaults.MaxToolResultChars, cfg.Agents.Defaults.Compaction, cfg.Agents.Defaults.Web, cfg.Agents.Defaults.Search, cfg.Agents.Defaults.VisionModel)
 	defer ag.Close()
+
+	// Spawn tool (subagent tasks) — enabled via config; children run with
+	// spawn/message/cron/write_memory disabled so they can't recurse.
+	ag.SetSpawnConfig(cfg.Agents.Defaults.Spawn)
+	ag.SetSessionCompaction(&cfg.Agents.Defaults.SessionCompaction)
 
 	// Persist background jobs (pollers survive restarts; interrupted one-shots
 	// are reported unless marked rerunOnRestart).

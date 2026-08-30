@@ -16,6 +16,19 @@
       "enableToolErrorMessages": true,
       "maxTurnMessages": 0,
       "maxToolResultChars": 0,
+      "spawn": {
+        "enabled": false,
+        "defaultTimeoutS": 300,
+        "maxConcurrent": 4,
+        "binary": "",
+        "model": "",
+        "disableTools": []
+      },
+      "sessionCompaction": {
+        "enabled": true,
+        "compactAt": 40,
+        "keepRecent": 16
+      },
       "verbose": false,
       "analytics": false,
       "allowedDirs": [],
