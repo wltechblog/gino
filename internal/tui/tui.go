@@ -109,6 +109,23 @@ type Readline struct {
 	buf    []byte
 	cursor int // byte offset within buf
 
+	// Wrapping state. rows is how many visual rows the last render of the
+	// input area occupies; cursorRow is the visual row the cursor was left
+	// on. cleared means the input area has already been erased (e.g. by
+	// clearLine) and the physical cursor sits at its top-left, so the next
+	// render must not issue clear sequences.
+	rows      int
+	cursorRow int
+	cleared   bool
+
+	// lastEsc records when a standalone Esc key was last seen, for the
+	// double-Esc interrupt gesture.
+	lastEsc time.Time
+
+	// onInterrupt, when non-nil, is invoked when the double-Esc interrupt
+	// gesture fires while a line is being edited.
+	onInterrupt func()
+
 	// Input source.
 	bytes <-chan byte
 }
@@ -131,40 +148,97 @@ func (rl *Readline) SetPrompt(p string) {
 	rl.prompt = p
 }
 
-// render redraws the current input line.
+// escInterrupt is called when the user presses Esc. It returns true when two
+// Esc presses arrived within escInterval, signaling an interrupt request.
+func (rl *Readline) escInterrupt() bool {
+	now := time.Now()
+	if now.Sub(rl.lastEsc) <= escInterval {
+		rl.lastEsc = time.Time{}
+		return true
+	}
+	rl.lastEsc = now
+	return false
+}
+
+// render redraws the input area, correctly handling wrapped input.
+//
+// Strategy: compute the visual rows the prompt+buffer occupy, erase exactly
+// that many rows (moving the cursor to the top of the input area first),
+// print the rows, then position the cursor at its computed row/col.
 func (rl *Readline) render() {
-	// Clear line, move to start, print prompt + buffer.
-	wprint(rl.out, "\r\033[K%s%s", rl.prompt, string(rl.buf))
-	// Move cursor to correct position.
-	total := len(rl.buf)
-	if rl.cursor < total {
-		// Move back by (total - cursor) characters.
-		back := total - rl.cursor
-		wprint(rl.out, "\033[%dD", back)
+	width := termWidth(syscall.Stdin)
+	lines := visualLines(rl.prompt, string(rl.buf), width)
+	rows := len(lines)
+
+	if !rl.cleared {
+		// Move to the top of the input area and erase each row it occupies.
+		if rl.rows > 1 {
+			wprint(rl.out, "\r\033[%dA", rl.rows-1)
+		} else {
+			wprint(rl.out, "\r")
+		}
+		for i := 0; i < rl.rows; i++ {
+			wprint(rl.out, "\033[K")
+			if i < rl.rows-1 {
+				wprint(rl.out, "\033[B")
+			}
+		}
+		// Return to the top row of the input area.
+		if rl.rows > 1 {
+			wprint(rl.out, "\r\033[%dA", rl.rows-1)
+		}
+	} else {
+		rl.cleared = false
 	}
+
+	// Print the wrapped rows.
+	for _, l := range lines {
+		wprint(rl.out, "%s\r\n", l)
+	}
+	// We are now one row BELOW the input area (each row printed with \r\n).
+	wprint(rl.out, "\033[A") // step back up onto the last input row
+
+	row, col := cursorRowCol(rl.prompt, string(rl.buf), rl.cursor, width)
+	if row < rows-1 {
+		wprint(rl.out, "\r\033[%dA", rows-1-row) // up to cursor row
+	}
+	wprint(rl.out, "\r")
+	if col > 0 {
+		wprint(rl.out, "\033[%dC", col)
+	}
+
+	rl.rows = rows
+	rl.cursorRow = row
 }
 
-// clearLine clears the input line (for output above it).
+// clearLine erases the entire input area (all wrapped rows) and leaves the
+// physical cursor at the top-left of where the area used to be.
 func (rl *Readline) clearLine() {
-	wprint(rl.out, "\r\033[K")
+	if rl.rows > 0 && !rl.cleared {
+		if rl.rows > 1 {
+			wprint(rl.out, "\r\033[%dA", rl.rows-1)
+		} else {
+			wprint(rl.out, "\r")
+		}
+		for i := 0; i < rl.rows; i++ {
+			wprint(rl.out, "\033[K")
+			if i < rl.rows-1 {
+				wprint(rl.out, "\033[B")
+			}
+		}
+		if rl.rows > 1 {
+			wprint(rl.out, "\r\033[%dA", rl.rows-1)
+		}
+	}
+	rl.cleared = true
 }
 
-// readEsc reads a 2-byte escape sequence from the byte channel.
-// Returns the two bytes, or zero values if the channel closed.
-func (rl *Readline) readEsc() (byte, byte) {
-	b1, ok := <-rl.bytes
-	if !ok {
-		return 0, 0
-	}
-	b2, ok := <-rl.bytes
-	if !ok {
-		return b1, 0
-	}
-	return b1, b2
-}
+// escInterval is the window for the double-Esc interrupt gesture.
+const escInterval = time.Second
 
 // ReadLine blocks until the user enters a complete line (Enter key).
-// Handles arrow keys, backspace, Ctrl+A/E/W/K, up/down history.
+// Handles arrow keys, backspace, Ctrl+A/E/W/K, up/down history, and the
+// double-Esc interrupt gesture.
 func (rl *Readline) ReadLine() (string, error) {
 	for {
 		c, ok := <-rl.bytes
@@ -181,6 +255,8 @@ func (rl *Readline) ReadLine() (string, error) {
 			rl.histIdx = len(rl.history)
 			rl.buf = nil
 			rl.cursor = 0
+			rl.rows = 0 // cursor is already below the input area after \r\n
+			rl.cleared = false
 			wprintln(rl.out) // move to next line
 			return line, nil
 
@@ -218,64 +294,119 @@ func (rl *Readline) ReadLine() (string, error) {
 
 		case c == 0x7F || c == 0x08: // Backspace / Ctrl+H
 			if rl.cursor > 0 {
-				rl.buf = append(rl.buf[:rl.cursor-1], rl.buf[rl.cursor:]...)
-				rl.cursor--
+				// Walk back over a full UTF-8 rune, not just one byte.
+				start := rl.cursor - 1
+				for start > 0 && rl.buf[start]&0xC0 == 0x80 {
+					start--
+				}
+				rl.buf = append(rl.buf[:start], rl.buf[rl.cursor:]...)
+				rl.cursor = start
 				rl.render()
 			}
 
-		case c == 0x1B: // Escape sequence
-			b1, b2 := rl.readEsc()
-			if b1 == '[' {
-				switch b2 {
-				case 'A': // Up — previous history
-					if rl.histIdx > 0 {
-						rl.histIdx--
-						rl.buf = []byte(rl.history[rl.histIdx])
-						rl.cursor = len(rl.buf)
-						rl.render()
-					}
-				case 'B': // Down — next history
-					if rl.histIdx < len(rl.history) {
-						rl.histIdx++
-						if rl.histIdx == len(rl.history) {
-							rl.buf = nil
-						} else {
-							rl.buf = []byte(rl.history[rl.histIdx])
-						}
-						rl.cursor = len(rl.buf)
-						rl.render()
-					}
-				case 'C': // Right — move cursor right
-					if rl.cursor < len(rl.buf) {
-						rl.cursor++
-						rl.render()
-					}
-				case 'D': // Left — move cursor left
-					if rl.cursor > 0 {
-						rl.cursor--
-						rl.render()
-					}
-				case 'H': // Home
-					rl.cursor = 0
-					rl.render()
-				case 'F': // End
+		case c == 0x1B: // Escape sequence or lone Esc key
+			// Peek at the next byte with a short grace period to
+			// distinguish CSI sequences (ESC [ ...) from a standalone
+			// Esc keypress. A lone Esc is the interrupt gesture.
+			b1, gotSeq, closed := peekByte(rl.bytes, 40*time.Millisecond)
+			if closed {
+				// Channel closed.
+				continue
+			}
+			if !gotSeq {
+				// No follow-up byte arrived quickly: treat as a
+				// standalone Esc press. Two within escInterval
+				// signal an interrupt.
+				if rl.escInterrupt() && rl.onInterrupt != nil {
+					rl.onInterrupt()
+				}
+				continue
+			}
+			if b1 != '[' && b1 != 'O' {
+				// Not a sequence we handle (e.g. Alt+key); treat
+				// the Esc as standalone and deliver the key as
+				// typed input.
+				if rl.escInterrupt() && rl.onInterrupt != nil {
+					rl.onInterrupt()
+				}
+				// Re-inject the byte so it is not lost.
+				rl.handlePrintable(b1)
+				continue
+			}
+			b2, ok := <-rl.bytes
+			if !ok {
+				continue
+			}
+			switch b2 {
+			case 'A': // Up — previous history
+				if rl.histIdx > 0 {
+					rl.histIdx--
+					rl.buf = []byte(rl.history[rl.histIdx])
 					rl.cursor = len(rl.buf)
 					rl.render()
-				case '3': // Delete — read one more byte (~)
-					tilde, ok := <-rl.bytes
-					if !ok {
-						continue
+				}
+			case 'B': // Down — next history
+				if rl.histIdx < len(rl.history) {
+					rl.histIdx++
+					if rl.histIdx == len(rl.history) {
+						rl.buf = nil
+					} else {
+						rl.buf = []byte(rl.history[rl.histIdx])
 					}
-					if tilde == '~' && rl.cursor < len(rl.buf) {
-						rl.buf = append(rl.buf[:rl.cursor], rl.buf[rl.cursor+1:]...)
-						rl.render()
-					}
+					rl.cursor = len(rl.buf)
+					rl.render()
+				}
+			case 'C': // Right — move cursor right
+				if rl.cursor < len(rl.buf) {
+					rl.cursor += runeLenAt(rl.buf, rl.cursor)
+					rl.render()
+				}
+			case 'D': // Left — move cursor left
+				if rl.cursor > 0 {
+					rl.cursor -= runeLenBefore(rl.buf, rl.cursor)
+					rl.render()
+				}
+			case 'H': // Home
+				rl.cursor = 0
+				rl.render()
+			case 'F': // End
+				rl.cursor = len(rl.buf)
+				rl.render()
+			case '3': // Delete — read one more byte (~)
+				tilde, ok := <-rl.bytes
+				if !ok {
+					continue
+				}
+				if tilde == '~' && rl.cursor < len(rl.buf) {
+					rl.buf = append(rl.buf[:rl.cursor], rl.buf[rl.cursor+runeLenAt(rl.buf, rl.cursor):]...)
+					rl.render()
 				}
 			}
 
 		case c >= 0x20 && c < 0x7F: // Printable ASCII
-			rl.buf = append(rl.buf[:rl.cursor], append([]byte{c}, rl.buf[rl.cursor:]...)...)
-			rl.cursor++
+			rl.handlePrintable(c)
+
+		case c >= 0xC2 && c <= 0xF4: // UTF-8 multibyte rune start
+			// Collect the continuation bytes to complete the rune.
+			r := []byte{c}
+			need := 0
+			switch {
+			case c < 0xE0:
+				need = 1
+			case c < 0xF0:
+				need = 2
+			default:
+				need = 3
+			}
+			for i := 0; i < need; i++ {
+				cb, ok := <-rl.bytes
+				if !ok {
+					break
+				}
+				r = append(r, cb)
+			}
+			rl.buf = append(rl.buf[:rl.cursor], append(r, rl.buf[rl.cursor:]...)...)
+			rl.cursor += len(r)
 			rl.render()
 
 		default:
@@ -468,6 +599,9 @@ func (s *ChatSession) Run(ctx context.Context) error {
 
 	prompt := fmt.Sprintf("%syou%s ❯ ", cyan+bold, reset)
 	s.rl = NewReadline(s.out, prompt, s.rawBytes)
+	// Double-Esc while idle does nothing (nothing to interrupt); it is
+	// handled inside sendMessage while a turn is running.
+	s.rl.onInterrupt = nil
 
 	for {
 		line, err := s.rl.ReadLine()
@@ -550,6 +684,30 @@ func (s *ChatSession) sendMessage(ctx context.Context, cliOut <-chan chat.Outbou
 	// are intentionally consumed.
 	var lineBuf []byte
 
+	// lastBusyEsc tracks the previous standalone Esc press for the
+	// double-Esc interrupt gesture while a turn is running.
+	var lastBusyEsc time.Time
+
+	abort := func() {
+		s.agent.StopTurn(s.sessionKey())
+		stopSpinner()
+		// Drain remaining messages.
+		drainTimer := time.NewTimer(2 * time.Second)
+	drainLoop:
+		for {
+			select {
+			case out, ok := <-cliOut:
+				if !ok || !isActivityNotification(out.Content) {
+					break drainLoop
+				}
+			case <-drainTimer.C:
+				break drainLoop
+			}
+		}
+		drainTimer.Stop()
+		s.writeAbove(fmt.Sprintf("%s✓ Interrupted.%s\n", yellow, reset))
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -565,30 +723,46 @@ func (s *ChatSession) sendMessage(ctx context.Context, cliOut <-chan chat.Outbou
 				stopSpinner()
 				return
 			}
+			if c == 0x1B { // Esc — maybe an arrow key, maybe lone Esc
+				b1, gotSeq, chClosed := peekByte(s.rawBytes, 40*time.Millisecond)
+				if chClosed {
+					continue
+				}
+				if !gotSeq {
+					// Standalone Esc: two within escInterval interrupts.
+					now := time.Now()
+					if now.Sub(lastBusyEsc) <= escInterval {
+						abort()
+						return
+					}
+					lastBusyEsc = now
+					continue
+				}
+				// It's a sequence (e.g. ESC [ A). Consume the rest
+				// of it so arrows don't leak into /stop detection.
+				if b1 == '[' || b1 == 'O' {
+					next, ok := <-s.rawBytes
+					if !ok {
+						continue
+					}
+					// CSI parameters are digits; the final byte
+					// follows (e.g. ESC [ 3 ~ for Delete).
+					if next >= '0' && next <= '9' {
+						if fin, ok := <-s.rawBytes; ok && fin != '~' {
+							_ = fin
+						}
+					}
+				}
+				continue
+			}
 			if c == '\n' || c == '\r' {
 				cmd := strings.TrimSpace(string(lineBuf))
 				lineBuf = lineBuf[:0]
 				if cmd == "/stop" || cmd == "/abort" || cmd == "/cancel" {
-					s.agent.StopTurn(s.sessionKey())
-					stopSpinner()
-					// Drain remaining messages.
-					drainTimer := time.NewTimer(2 * time.Second)
-				drainLoop:
-					for {
-						select {
-						case out, ok := <-cliOut:
-							if !ok || !isActivityNotification(out.Content) {
-								break drainLoop
-							}
-						case <-drainTimer.C:
-							break drainLoop
-						}
-					}
-					drainTimer.Stop()
-					s.writeAbove(fmt.Sprintf("%s✓ Aborted.%s\n", yellow, reset))
+					abort()
 					return
 				}
-			} else {
+			} else if c >= 0x20 {
 				lineBuf = append(lineBuf, c)
 			}
 
@@ -832,6 +1006,7 @@ func (s *ChatSession) printHelp() {
 	s.writeAbove(fmt.Sprintf("  %s/search text%s  Search saved sessions\n", cyan, reset))
 	s.writeAbove(fmt.Sprintf("  %s/purge days%s  Delete sessions older than N days\n", cyan, reset))
 	s.writeAbove(fmt.Sprintf("  %s/stop%s       Abort the current response\n", cyan, reset))
+	s.writeAbove(fmt.Sprintf("  %sEsc Esc%s     Abort the current response (press Esc twice within 1s)\n", cyan, reset))
 	s.writeAbove(fmt.Sprintf("  %s/clear%s      Clear the terminal screen\n", cyan, reset))
 	s.writeAbove(fmt.Sprintf("  %s/model%s      Show or set model (/model gpt-4o)\n", cyan, reset))
 	s.writeAbove(fmt.Sprintf("  %s/reasoning%s  Show or set reasoning (none|low|medium|high)\n", cyan, reset))
