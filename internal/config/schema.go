@@ -112,6 +112,7 @@ type AgentDefaults struct {
 	Sandbox                     SandboxConfig `json:"sandbox"`
 	MaxTurnMessages             int           `json:"maxTurnMessages,omitempty"`
 	MaxToolResultChars          int           `json:"maxToolResultChars,omitempty"`
+	TuiResponseWaitS            int           `json:"tuiResponseWaitS,omitempty"` // TUI: seconds to wait for a turn's final reply (default 900)
 
 	// Verbose enables full LLM traffic logging: the sent prompt (request body),
 	// the raw received response, usage analytics, and the final response sent

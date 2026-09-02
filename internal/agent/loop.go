@@ -435,14 +435,21 @@ func isStopCommand(content string) bool {
 // sendChannelNotification delivers a non-blocking status message back to the
 // originating channel so the user can see tool progress in real time.
 // It is a no-op for system channels (heartbeat, cron) that have no user-facing chat.
+// The message is tagged with a "notification" metadata flag so receivers
+// (e.g. the TUI) can distinguish progress updates from final replies without
+// sniffing content prefixes.
 func sendChannelNotification(hub *chat.Hub, channel, chatID, content string, metadata ...map[string]interface{}) {
 	if isSystemChannel(channel) {
 		return
 	}
 	out := chat.Outbound{Channel: channel, ChatID: chatID, Content: content}
+	out.Metadata = make(map[string]interface{}, 2)
 	if len(metadata) > 0 && metadata[0] != nil {
-		out.Metadata = metadata[0]
+		for k, v := range metadata[0] {
+			out.Metadata[k] = v
+		}
 	}
+	out.Metadata["notification"] = true
 	select {
 	case hub.Out <- out:
 	default:
@@ -2207,6 +2214,17 @@ done:
 		}
 		out.Metadata["sender_id"] = msg.SenderID
 	}
+	// Suppress reply for stopped turns: the TUI's response timeout (or an
+	// explicit /stop) may fire while the final LLM call is in flight. The
+	// provider returns successfully after cancellation (the request already
+	// completed server-side), so processTurn falls through to this epilogue
+	// and would queue a reply nobody is waiting for — the TUI then prints it
+	// as the response to the NEXT prompt. Guard the queue point directly.
+	if at.stopped {
+		log.Printf("Turn for %s was stopped — suppressing reply (%d chars)", sessionKey, len(finalContent))
+		return finalContent
+	}
+
 	select {
 	case a.hub.Out <- out:
 		log.Printf("Turn done: reply queued successfully")

@@ -446,9 +446,16 @@ type ChatSession struct {
 	rawBytes chan byte
 
 	// responseWait is how long sendMessage waits for a reply before cancelling
-	// the active turn. Zero means the default of five minutes.
+	// the active turn. Zero means the default of fifteen minutes.
 	responseWait time.Duration
 }
+
+// defaultResponseWait is the fallback wait for a final reply. Agentic turns
+// routinely run many LLM iterations (each up to the provider request timeout)
+// plus tool execution; five minutes was routinely too short and caused the
+// TUI to give up while the turn was mid-flight — the reply then landed in the
+// cliOut buffer and was misprinted as the response to the NEXT prompt.
+const defaultResponseWait = 15 * time.Minute
 
 // New creates a new TUI chat session using the configured workspace for both
 // profile state and tool execution.
@@ -468,7 +475,7 @@ func NewWithProject(cfg config.Config, provider providers.LLMProvider, homeDir, 
 		model = provider.GetDefaultModel()
 	}
 
-	return &ChatSession{
+	s := &ChatSession{
 		cfg:       cfg,
 		provider:  provider,
 		Model:     model,
@@ -479,6 +486,10 @@ func NewWithProject(cfg config.Config, provider providers.LLMProvider, homeDir, 
 		out:       os.Stdout,
 		chatID:    "tui-" + fmt.Sprintf("%d", time.Now().UnixNano()),
 	}
+	if w := cfg.Agents.Defaults.TuiResponseWaitS; w > 0 {
+		s.responseWait = time.Duration(w) * time.Second
+	}
+	return s
 }
 
 // sessionKey returns the hub session key for the current chat.
@@ -673,7 +684,7 @@ func (s *ChatSession) sendMessage(ctx context.Context, cliOut <-chan chat.Outbou
 
 	wait := s.responseWait
 	if wait <= 0 {
-		wait = 5 * time.Minute
+		wait = defaultResponseWait
 	}
 	timeout := time.NewTimer(wait)
 	defer timeout.Stop()
@@ -697,7 +708,7 @@ func (s *ChatSession) sendMessage(ctx context.Context, cliOut <-chan chat.Outbou
 		for {
 			select {
 			case out, ok := <-cliOut:
-				if !ok || !isActivityNotification(out.Content) {
+				if !ok || !isActivityNotification(out) {
 					break drainLoop
 				}
 			case <-drainTimer.C:
@@ -716,6 +727,12 @@ func (s *ChatSession) sendMessage(ctx context.Context, cliOut <-chan chat.Outbou
 
 		case <-waitCtx.Done():
 			stopSpinner()
+			// /stop was invoked — the user asked to abort, so a racing reply
+			// is discarded, not delivered. StopTurn sets the agent-side
+			// stopped flag (suppressing the queue), but a reply may already
+			// be sitting in cliOut from the instant before the stop landed;
+			// consume it so it cannot leak into the next prompt's wait loop.
+			awaitRacingReply(cliOut, 2*time.Second)
 			return
 
 		case c, ok := <-s.rawBytes:
@@ -772,7 +789,7 @@ func (s *ChatSession) sendMessage(ctx context.Context, cliOut <-chan chat.Outbou
 				return
 			}
 
-			if isActivityNotification(out.Content) {
+			if isActivityNotification(out) {
 				stopSpinner()
 				s.writeAbove(fmt.Sprintf("%s%s%s\n", dim, out.Content, reset))
 				// Restart spinner.
@@ -788,18 +805,60 @@ func (s *ChatSession) sendMessage(ctx context.Context, cliOut <-chan chat.Outbou
 		case <-timeout.C:
 			stopSpinner()
 			s.agent.StopTurn(s.sessionKey())
+			// The response wait expired. StopTurn suppresses the agent-side
+			// reply, but one may have been queued in the instant before the
+			// stop landed (turn finished normally, timer fired mid-queue) —
+			// deliver it instead of letting it leak to the next prompt.
+			if out, ok := awaitRacingReply(cliOut, 2*time.Second); ok {
+				s.writeAbove(fmt.Sprintf("%sgino%s ❯ %s\n\n", magenta+bold, reset, out.Content))
+				return
+			}
 			s.writeAbove(fmt.Sprintf("%stimeout waiting for response%s\n", red, reset))
 			return
 		}
 	}
 }
 
-// isActivityNotification returns true if the content is a tool activity message
-// rather than a final response.
-func isActivityNotification(content string) bool {
-	prefixes := []string{"⏳", "🤖", "📢", "⛔", "🔄", "🗑️"}
+// awaitRacingReply waits up to d for a final (non-notification) message on
+// ch, returning it if one arrives. Used after stopping a turn to catch a
+// reply queued in the instant before the stop landed, so it is either
+// delivered (timeout path) or consumed (abort path) instead of leaking into
+// the next prompt's wait loop.
+func awaitRacingReply(ch <-chan chat.Outbound, d time.Duration) (chat.Outbound, bool) {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	for {
+		select {
+		case out, ok := <-ch:
+			if !ok {
+				return chat.Outbound{}, false
+			}
+			if isActivityNotification(out) {
+				continue
+			}
+			return out, true
+		case <-t.C:
+			return chat.Outbound{}, false
+		}
+	}
+}
+
+// isActivityNotification reports whether an outbound message is a progress
+// notification rather than a final reply. The agent tags notifications with a
+// "notification" metadata flag, which is authoritative. The prefix sniff is a
+// fallback for untagged messages. Note: "⏳" is deliberately NOT in the prefix
+// list — the iteration-limit notice is a final reply that starts with ⏳, and
+// misclassifying it would leave the TUI waiting for a response that already
+// arrived (until the response timeout).
+func isActivityNotification(out chat.Outbound) bool {
+	if out.Metadata != nil {
+		if v, ok := out.Metadata["notification"].(bool); ok {
+			return v
+		}
+	}
+	prefixes := []string{"🤖", "📢", "⚠️", "⛔", "🔄", "🗑️", "📥"}
 	for _, p := range prefixes {
-		if strings.HasPrefix(content, p) {
+		if strings.HasPrefix(out.Content, p) {
 			return true
 		}
 	}

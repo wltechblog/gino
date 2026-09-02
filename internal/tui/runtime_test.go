@@ -68,7 +68,7 @@ func TestStartRuntimeConsumesInboundMessages(t *testing.T) {
 			if !ok {
 				t.Fatal("cli subscriber closed before a response arrived")
 			}
-			if isActivityNotification(out.Content) {
+			if isActivityNotification(out) {
 				continue
 			}
 			if !strings.Contains(out.Content, "hello from tui test") {
@@ -153,5 +153,71 @@ func TestSendMessageTimeoutCancelsActiveTurn(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("active turn was not cancelled after TUI response timeout")
+	}
+}
+
+func TestIsActivityNotificationMetadata(t *testing.T) {
+	// Tagged notification — authoritative true, even without a known prefix.
+	tagged := chat.Outbound{
+		Content: "arbitrary text",
+		Metadata: map[string]interface{}{
+			"notification": true,
+		},
+	}
+	if !isActivityNotification(tagged) {
+		t.Fatal("tagged notification should classify as activity")
+	}
+
+	// Tagged as NOT a notification (explicit false) — authoritative.
+	untagged := chat.Outbound{
+		Content:  "🤖 accidentally prefixed final reply",
+		Metadata: map[string]interface{}{"notification": false},
+	}
+	if isActivityNotification(untagged) {
+		t.Fatal("notification:false metadata must override the prefix fallback")
+	}
+
+	// Untagged with known prefix — fallback match.
+	fallback := chat.Outbound{Content: "🤖 Running: exec"}
+	if !isActivityNotification(fallback) {
+		t.Fatal("unclassified content with notification prefix should classify as activity")
+	}
+
+	// Untagged plain reply — not activity.
+	plain := chat.Outbound{Content: "here is your answer"}
+	if isActivityNotification(plain) {
+		t.Fatal("plain reply must not classify as activity")
+	}
+
+	// The iteration-limit notice starts with ⏳ but is a FINAL reply — it
+	// must NOT be classified as activity, or the TUI keeps waiting for a
+	// response that already arrived until the response timeout.
+	iterationNotice := chat.Outbound{Content: "⏳ Reached the 25-iteration limit. Reply \"continue\"."}
+	if isActivityNotification(iterationNotice) {
+		t.Fatal("iteration-limit ⏳ notice is a final reply, not activity")
+	}
+}
+
+func TestAwaitRacingReply(t *testing.T) {
+	ch := make(chan chat.Outbound, 2)
+
+	// Nothing pending: times out without a reply.
+	if _, ok := awaitRacingReply(ch, 50*time.Millisecond); ok {
+		t.Fatal("expected no reply on empty channel")
+	}
+
+	// Reply queued before the wait: returned immediately.
+	ch <- chat.Outbound{Content: "racing reply"}
+	out, ok := awaitRacingReply(ch, time.Second)
+	if !ok || out.Content != "racing reply" {
+		t.Fatalf("expected racing reply, got ok=%v content=%q", ok, out.Content)
+	}
+
+	// Notifications are skipped; the final reply behind them is returned.
+	ch <- chat.Outbound{Content: "🤖 noise", Metadata: map[string]interface{}{"notification": true}}
+	ch <- chat.Outbound{Content: "real reply"}
+	out, ok = awaitRacingReply(ch, time.Second)
+	if !ok || out.Content != "real reply" {
+		t.Fatalf("expected final reply after notification, got ok=%v content=%q", ok, out.Content)
 	}
 }
