@@ -33,7 +33,22 @@ func visualLines(prompt, buf string, width int) []string {
 	cells := 0
 	lines := []string{}
 	cur := &strings.Builder{}
+	inEsc := false
 	for _, r := range full {
+		// ANSI escape sequences occupy no display cells; pass them through
+		// without affecting the wrap computation.
+		if inEsc {
+			cur.WriteRune(r)
+			if r == 'm' {
+				inEsc = false
+			}
+			continue
+		}
+		if r == '\x1b' {
+			cur.WriteRune(r)
+			inEsc = true
+			continue
+		}
 		rw := runeDisplayWidth(r)
 		if cells+rw > width {
 			lines = append(lines, cur.String())
@@ -47,22 +62,53 @@ func visualLines(prompt, buf string, width int) []string {
 	return lines
 }
 
+// visibleCells returns the number of display cells a string occupies,
+// ignoring ANSI escape sequences (which take no space on screen).
+func visibleCells(s string) int {
+	n := 0
+	inEsc := false
+	for _, r := range s {
+		if inEsc {
+			if r == 'm' {
+				inEsc = false
+			}
+			continue
+		}
+		if r == '\x1b' {
+			inEsc = true
+			continue
+		}
+		n += runeDisplayWidth(r)
+	}
+	return n
+}
+
 // cursorRowCol computes the 0-based visual row and cell-column of the cursor
 // given the cursor's byte offset within buf (buffer-relative, NOT including
-// the prompt).
+// the prompt). ANSI escape sequences in the prompt occupy no display cells.
 func cursorRowCol(prompt, buf string, cursorBytes, width int) (row, col int) {
 	if width < 4 {
 		width = 4
 	}
 	cells := 0
 	row = 0
-	col = 0
 	consumed := 0 // bytes consumed of prompt+buf
-	promptBytes := len(prompt)
+	inEsc := false
 	for _, r := range prompt + buf {
-		inBuf := consumed >= promptBytes
-		if inBuf && consumed-promptBytes >= cursorBytes {
+		if consumed >= len(prompt) && consumed-len(prompt) >= cursorBytes {
 			break
+		}
+		if inEsc {
+			if r == 'm' {
+				inEsc = false
+			}
+			consumed += len(string(r))
+			continue
+		}
+		if r == '\x1b' {
+			inEsc = true
+			consumed += len(string(r))
+			continue
 		}
 		rw := runeDisplayWidth(r)
 		if cells+rw > width {
@@ -70,10 +116,9 @@ func cursorRowCol(prompt, buf string, cursorBytes, width int) (row, col int) {
 			cells = 0
 		}
 		cells += rw
-		col = cells
 		consumed += len(string(r))
 	}
-	return row, col
+	return row, cells
 }
 
 // peekByte waits up to d for the next byte. It returns (b, true, false)
