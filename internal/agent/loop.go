@@ -28,6 +28,13 @@ import (
 
 var rememberRE = regexp.MustCompile(`(?i)^remember(?:\s+to)?\s+(.+)$`)
 
+// maxAutoContinuations caps how many synthetic continuation blocks a single
+// turn may inject when it exhausts its iteration budget (processTurn and
+// ProcessDirectWithSessionAndSystemPrompt). Without a cap a runaway tool
+// loop could extend itself forever. 4 blocks means a turn runs at most
+// 5x its configured maxIterations before the user is asked to continue.
+const maxAutoContinuations = 4
+
 // stopCommands are message prefixes that trigger immediate cancellation
 // of the current turn for a session.
 var stopCommands = []string{"/stop", "/cancel", "/abort"}
@@ -533,6 +540,7 @@ type AgentLoop struct {
 	spTool                  *tools.SpawnTool     // subagent spawn tool (disabled until SetSpawnConfig)
 	sessComp                *sessionCompactor    // nil = session-history compaction disabled
 	autoTitleOff            bool                 // config: disable LLM session auto-titling
+	autoContinueOff         bool                 // config: disable iteration-limit auto-continue
 	projects                *ProjectRegistry     // nil = runtime project switching unavailable
 	fsTool                  *tools.FilesystemTool
 	execTool                *tools.ExecTool
@@ -1014,6 +1022,14 @@ func (a *AgentLoop) SetSpawnCLIFlags(flags tools.CLIFlags) {
 // pass false to disable (sessions fall back to derived titles on archive).
 func (a *AgentLoop) SetSessionAutoTitle(enabled bool) {
 	a.autoTitleOff = !enabled
+}
+
+// SetAutoContinue toggles iteration-limit auto-continue. Default on: when a
+// turn exhausts maxIterations without a final reply, the loop injects a
+// synthetic continuation note and keeps going instead of ending the turn and
+// asking the user to reply "continue".
+func (a *AgentLoop) SetAutoContinue(enabled bool) {
+	a.autoContinueOff = !enabled
 }
 
 // SetSessionCompaction enables LLM-based summarization of old persisted
@@ -2202,7 +2218,26 @@ func (a *AgentLoop) processTurn(ctx context.Context, at *activeTurn, sessionKey 
 	// Track tool calls for session continuity (so "continue" doesn't re-read everything).
 	var toolCallLog []toolCallRecord
 
-	for iteration < a.maxIterations {
+	budget := a.maxIterations
+	continuations := 0 // synthetic continuation blocks injected this turn
+	for {
+		if iteration >= budget {
+			if !a.autoContinueOff && finalContent == "" && continuations < maxAutoContinuations {
+				// Iteration budget exhausted mid-task: resume in-process instead of
+				// ending the turn and asking the user to reply "continue". Inject a
+				// continuation note and extend the budget by another full block.
+				continuations++
+				log.Printf("Turn hit iteration limit for %s (%d iterations) — auto-continuing (%d/%d)", sessionKey, iteration, continuations, maxAutoContinuations)
+				messages = append(messages, providers.Message{
+					Role:    "user",
+					Content: "[System: The turn was paused because you reached the tool-call iteration limit for one block. Continue exactly where you left off and finish the task. Do not restart or re-read completed work.]",
+				})
+				userMsgIdx = len(messages) - 1
+				budget = a.maxIterations + continuations*a.maxIterations
+			} else {
+				break
+			}
+		}
 		iteration++
 
 		// Check for cancellation before each iteration
@@ -2387,12 +2422,12 @@ func (a *AgentLoop) processTurn(ctx context.Context, at *activeTurn, sessionKey 
 		}
 	}
 
-	// Loop exhausted maxIterations without a final text response: the turn is
-	// stopped by a limit, not finished. Tell the LLM (so session context stays
-	// accurate) and the user (so they know to reply "continue").
-	if iteration >= a.maxIterations && finalContent == "" {
+	// Loop exhausted ALL iteration budgets (auto-continue cap reached, or the
+	// feature is disabled) without a final text response. The turn is stopped
+	// by a limit, not finished — tell the user how to resume manually.
+	if iteration >= budget && finalContent == "" {
 		log.Printf("Turn hit iteration limit for %s (%d iterations) — notifying user", sessionKey, iteration)
-		limitNote := fmt.Sprintf("⏳ I've hit my tool-call limit for this turn (%d steps) without finishing. Reply **continue** and I'll pick up where I left off.", a.maxIterations)
+		limitNote := fmt.Sprintf("⏳ I've hit my tool-call limit for this turn (%d steps) without finishing. Reply **continue** and I'll pick up where I left off.", iteration)
 		finalContent = limitNote
 	}
 
@@ -2625,10 +2660,19 @@ func (a *AgentLoop) ProcessDirectWithSessionAndSystemPrompt(content string, time
 		messages = filtered
 	}
 
-	// Support tool calling iterations (similar to main loop)
+	// Support tool calling iterations (similar to main loop).
+	// Auto-continue: when the iteration budget is exhausted without a final
+	// reply, inject a continuation note and extend the budget instead of
+	// returning the max-iterations reply that asks the caller to send
+	// "continue" as a whole new turn.
 	var lastToolResult string
 	userMsgIdx := len(messages) - 1
-	for iteration := 0; iteration < a.maxIterations; iteration++ {
+	iteration := 0
+	continuations := 0
+	budget := a.maxIterations
+resume:
+	for iteration < budget {
+		iteration++
 		// Trim/compact messages to keep context manageable
 		if len(messages) > a.maxTurnMessages {
 			if a.compactor != nil && a.compactor.shouldCompact(messages) {
@@ -2692,7 +2736,22 @@ func (a *AgentLoop) ProcessDirectWithSessionAndSystemPrompt(content string, time
 		}
 	}
 
-	maxIterReply := fmt.Sprintf("⏳ Max tool iterations reached (%d) without a final response. Send another message (e.g. 'continue') and I'll pick up where I left off.", a.maxIterations)
+	// Auto-continue: budget exhausted without a final reply. Instead of
+	// ending here (caller would have to send "continue" as a new turn),
+	// inject a continuation note and extend the budget, mirroring processTurn.
+	if !a.autoContinueOff && continuations < maxAutoContinuations {
+		continuations++
+		log.Printf("ProcessDirect hit iteration limit (%d iterations) — auto-continuing (%d/%d)", iteration, continuations, maxAutoContinuations)
+		messages = append(messages, providers.Message{
+			Role:    "user",
+			Content: "[System: The turn was paused because you reached the tool-call iteration limit for one block. Continue exactly where you left off and finish the task. Do not restart or re-read completed work.]",
+		})
+		userMsgIdx = len(messages) - 1
+		budget = a.maxIterations + continuations*a.maxIterations
+		goto resume
+	}
+
+	maxIterReply := fmt.Sprintf("⏳ Max tool iterations reached (%d) without a final response. Send another message (e.g. 'continue') and I'll pick up where I left off.", iteration)
 	// Persist even on max-iterations so the session reflects the exchange.
 	if sessionKey != "" && a.sessions != nil {
 		sess := a.sessions.GetOrCreate(sessionKey)

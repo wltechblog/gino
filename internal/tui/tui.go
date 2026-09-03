@@ -565,6 +565,9 @@ func (s *ChatSession) startRuntime(ctx context.Context) <-chan chat.Outbound {
 	if s.cfg.Agents.Defaults.SessionAutoTitle != nil {
 		s.agent.SetSessionAutoTitle(*s.cfg.Agents.Defaults.SessionAutoTitle)
 	}
+	if s.cfg.Agents.Defaults.AutoContinue != nil {
+		s.agent.SetAutoContinue(*s.cfg.Agents.Defaults.AutoContinue)
+	}
 
 	cliOut := s.hub.Subscribe("cli")
 	s.hub.StartRouter(ctx)

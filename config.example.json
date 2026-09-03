@@ -41,6 +41,7 @@
         ]
       },
       "sessionAutoTitle": true,
+      "autoContinue": true,
       "sessionCompaction": {
         "enabled": true,
         "compactAt": 40,

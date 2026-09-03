@@ -86,10 +86,15 @@ func (p *toolLoopProvider) GetModelContext(ctx context.Context, model string) (i
 	return 0, nil
 }
 
+// With auto-continue enabled by default this legacy shape lives in
+// auto_continue_test.go (TestProcessDirectAutoContinueCapTerminates /
+// TestProcessDirectAutoContinueDisabled). Kept as the disabled-mode guard
+// here so the fallback notice contract stays covered next to its provider.
 func TestProcessDirectMaxIterationsNotice(t *testing.T) {
 	b := chat.NewHub(10)
 	prov := &toolLoopProvider{}
 	ag := NewAgentLoop(b, prov, prov.GetDefaultModel(), 3, "", nil, nil, nil, nil, nil, "", config.SandboxConfig{}, "", 0, 0, nil, config.WebConfig{}, config.SearchConfig{}, "")
+	ag.SetAutoContinue(false)
 
 	resp, err := ag.ProcessDirect("keep working", 10*time.Second)
 	if err != nil {

@@ -297,6 +297,9 @@ func runAgent(homeFlag string, args []string) {
 	if cfg.Agents.Defaults.SessionAutoTitle != nil {
 		ag.SetSessionAutoTitle(*cfg.Agents.Defaults.SessionAutoTitle)
 	}
+	if cfg.Agents.Defaults.AutoContinue != nil {
+		ag.SetAutoContinue(*cfg.Agents.Defaults.AutoContinue)
+	}
 	if cfg.Agents.Defaults.EnableToolActivityIndicator != nil {
 		ag.SetToolActivityIndicator(*cfg.Agents.Defaults.EnableToolActivityIndicator)
 	}

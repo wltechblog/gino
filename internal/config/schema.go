@@ -144,6 +144,12 @@ type AgentDefaults struct {
 	// Manually assigned titles (/title) are never overwritten. Default true.
 	SessionAutoTitle *bool `json:"sessionAutoTitle,omitempty"`
 
+	// AutoContinue resumes turns in-process when they exhaust their
+	// maxToolIterations budget: a continuation note is injected and the
+	// budget extended (capped), instead of ending the turn and asking
+	// the user to reply "continue". Default true.
+	AutoContinue *bool `json:"autoContinue,omitempty"`
+
 	// SessionCompaction summarizes old persisted session history with the LLM
 	// when it grows past a threshold, instead of silently dropping the oldest
 	// entries at MaxHistorySize.
