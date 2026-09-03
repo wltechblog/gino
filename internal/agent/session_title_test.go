@@ -227,3 +227,36 @@ titled:
 		t.Fatalf("LLM was called for a /title command: %d calls", p.called)
 	}
 }
+
+func TestSessionsShowsCurrentSessionTitle(t *testing.T) {
+	ag, _, b := newTitleTestLoop(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go ag.Run(ctx)
+
+	key := "telegram:456"
+	s := ag.sessions.GetOrCreate(key)
+	s.History = []string{"user: hello", "assistant: hi"}
+
+	// Manually title the current session (as /title would).
+	ag.sessions.SetTitle(key, "gino", "manual")
+
+	select {
+	case b.In <- chat.Inbound{Channel: "telegram", SenderID: "u", ChatID: "456", Content: "/sessions"}:
+	default:
+		t.Fatal("couldn't send /sessions")
+	}
+
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case out := <-b.Out:
+			// The current session's manual title must be visible in the listing.
+			if strings.Contains(out.Content, "Current") && strings.Contains(out.Content, "gino") {
+				return
+			}
+		case <-deadline:
+			t.Fatal("/sessions output never showed the current session title")
+		}
+	}
+}

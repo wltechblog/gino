@@ -1072,6 +1072,21 @@ func (a *AgentLoop) CurrentSessionTitle(sessionKey string) string {
 	return ""
 }
 
+// CurrentSessionSummary returns a summary of the CURRENT (active) session,
+// or nil when the key has no session content yet. Lets the TUI and /sessions
+// show the live session — including its title — without archiving it first.
+func (a *AgentLoop) CurrentSessionSummary(sessionKey string) *SessionInfo {
+	cur := a.sessions.Get(sessionKey)
+	if cur == nil || len(cur.History) == 0 {
+		return nil
+	}
+	title := cur.Title
+	if title == "" {
+		title = "Untitled"
+	}
+	return &SessionInfo{Title: title, MessageN: len(cur.History), UpdatedAt: cur.UpdatedAt}
+}
+
 // ListArchivedSessions returns archived sessions for a given session key prefix.
 func (a *AgentLoop) ListArchivedSessions(sessionKey string) []SessionInfo {
 	archivePrefix := sessionKey + ":archive:"
@@ -1702,11 +1717,29 @@ func (a *AgentLoop) dispatchMessage(ctx context.Context, msg chat.Inbound) {
 		return
 	}
 
-	// Handle /sessions — list all archived sessions for this chat.
+	// Handle /sessions — list archived sessions; the CURRENT session is shown
+	// as a header line so its title (e.g. from /title) is visible without
+	// archiving it first. Numbered entries remain archives-only, so /session
+	// N and /title N indexes are unchanged.
 	if strings.TrimSpace(msg.Content) == "/sessions" {
 		archivePrefix := sessionKey + ":archive:"
 		sessions := a.sessions.ListByPrefix(archivePrefix)
+
+		// Header: current session + title (when it exists).
+		var header string
+		if cur := a.sessions.Get(sessionKey); cur != nil && len(cur.History) > 0 {
+			age := "unknown"
+			if !cur.UpdatedAt.IsZero() {
+				age = humanizeDuration(time.Since(cur.UpdatedAt))
+			}
+			header = fmt.Sprintf("📍 *Current:* %s — _%d messages, %s ago_\n\n", displayTitle(cur.Title), len(cur.History), age)
+		}
+
 		if len(sessions) == 0 {
+			if header != "" {
+				sendChannelNotification(a.hub, msg.Channel, msg.ChatID, header+"\nNo archived sessions yet. Use /new to save the current one.")
+				return
+			}
 			sendChannelNotification(a.hub, msg.Channel, msg.ChatID, "📋 No saved sessions. Use /new to start a fresh conversation (current one will be saved).")
 			return
 		}
@@ -1715,14 +1748,13 @@ func (a *AgentLoop) dispatchMessage(ctx context.Context, msg chat.Inbound) {
 		if msg.Channel == "telegram" {
 			markup := buildSessionKeyboard(sessions)
 			meta := map[string]interface{}{"reply_markup": markup}
-			var sb strings.Builder
-			sb.WriteString("📋 *Saved Sessions* — tap to switch:")
-			sendChannelNotification(a.hub, msg.Channel, msg.ChatID, sb.String(), meta)
+			sendChannelNotification(a.hub, msg.Channel, msg.ChatID, header+"📋 *Saved Sessions* — tap to switch:", meta)
 			return
 		}
 
 		// Fallback for non-Telegram channels: text list.
 		var sb strings.Builder
+		sb.WriteString(header)
 		sb.WriteString("📋 *Saved Sessions*\n\n")
 		for i, s := range sessions {
 			title := s.Title

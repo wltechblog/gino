@@ -923,11 +923,19 @@ func (s *ChatSession) handleCommand(line string) bool {
 
 	case "/sessions":
 		sessions := s.agent.ListArchivedSessions(s.sessionKey())
+		if cur := s.agent.CurrentSessionSummary(s.sessionKey()); cur != nil {
+			age := humanizeAge(cur.UpdatedAt)
+			s.writeAbove(fmt.Sprintf("\n%sCurrent session:%s %s (%d msgs, %s)\n", bold, reset, cur.Title, cur.MessageN, age))
+		}
 		if len(sessions) == 0 {
-			s.writeAbove(fmt.Sprintf("%sNo saved sessions. Use /new to archive the current one.%s\n\n", dim, reset))
+			if s.agent.CurrentSessionSummary(s.sessionKey()) == nil {
+				s.writeAbove(fmt.Sprintf("%sNo saved sessions. Use /new to archive the current one.%s\n\n", dim, reset))
+			} else {
+				s.writeAbove(fmt.Sprintf("%sNo archived sessions yet. Use /new to save the current one.%s\n\n", dim, reset))
+			}
 			return true
 		}
-		s.writeAbove(fmt.Sprintf("\n%sSaved Sessions:%s\n", bold, reset))
+		s.writeAbove(fmt.Sprintf("%sSaved Sessions:%s\n", bold, reset))
 		for i, si := range sessions {
 			age := humanizeAge(si.UpdatedAt)
 			s.writeAbove(fmt.Sprintf("  %s%d.%s %s (%d msgs, %s)\n", cyan, i+1, reset, si.Title, si.MessageN, age))
