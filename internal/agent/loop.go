@@ -907,7 +907,25 @@ func (a *AgentLoop) SetSignalListener(l SignalTargetRecorder) {
 }
 
 // Close shuts down all MCP server connections and the brain.
+// Wait blocks until background goroutines (session auto-titling, memory
+// extraction, compaction) have finished, so callers can safely tear down
+// the workspace afterwards. Bounded: shutdown never hangs indefinitely.
+func (a *AgentLoop) Wait() {
+	done := make(chan struct{})
+	go func() {
+		a.bgWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		log.Printf("agent: timed out waiting for background goroutines")
+	}
+}
+
 func (a *AgentLoop) Close() {
+	a.Wait()
+
 	for _, c := range a.mcpClients {
 		_ = c.Close()
 	}
@@ -979,13 +997,13 @@ func (a *AgentLoop) SetSessionCompaction(cfg *config.SessionCompactionConfig) {
 // StopTurn cancels the active turn for a session key, if one is running.
 // Returns true if a turn was cancelled.
 func (a *AgentLoop) StopTurn(sessionKey string) bool {
-	return a.cancelActiveTurn(sessionKey)
+	return a.cancelActiveTurn(a.namespacedKey(sessionKey))
 }
 
 // PurgeOldSessions removes all sessions (including archives) older than the
 // specified number of days, except the active session. Returns the count deleted.
 func (a *AgentLoop) PurgeOldSessions(sessionKey string, days int) int {
-	return a.sessions.PurgeOlderThan(days, sessionKey)
+	return a.sessions.PurgeOlderThan(days, a.namespacedKey(sessionKey))
 }
 
 // SessionSearchResult is a search match for TUI display.
@@ -999,6 +1017,7 @@ type SessionSearchResult struct {
 // SearchArchivedSessions searches all sessions matching the session key prefix
 // for the given query string. Searches titles and message history.
 func (a *AgentLoop) SearchArchivedSessions(sessionKey, query string) []SessionSearchResult {
+	sessionKey = a.namespacedKey(sessionKey)
 	archivePrefix := sessionKey + ":archive:"
 	results := a.sessions.SearchSessions(archivePrefix, query)
 	out := make([]SessionSearchResult, 0, len(results))
@@ -1019,13 +1038,13 @@ func (a *AgentLoop) SearchArchivedSessions(sessionKey, query string) []SessionSe
 
 // DeleteSession removes a session from the session manager (including on-disk).
 func (a *AgentLoop) DeleteSession(sessionKey string) {
-	a.sessions.DeleteSession(sessionKey)
+	a.sessions.DeleteSession(a.namespacedKey(sessionKey))
 }
 
 // ArchiveSession saves the current session's content under an archive key
 // so it can be restored later with /session <N>. Public wrapper for TUI use.
 func (a *AgentLoop) ArchiveSession(sessionKey string) {
-	a.archiveSession(sessionKey)
+	a.archiveSession(a.namespacedKey(sessionKey))
 }
 
 // SessionInfo is a summary of a session for listing.
@@ -1037,6 +1056,7 @@ type SessionInfo struct {
 
 // SetSessionTitle assigns a manual title to the CURRENT session (persisted).
 func (a *AgentLoop) SetSessionTitle(sessionKey, title string) {
+	sessionKey = a.namespacedKey(sessionKey)
 	if len(title) > 80 {
 		title = title[:80]
 	}
@@ -1050,6 +1070,7 @@ func (a *AgentLoop) SetSessionTitle(sessionKey, title string) {
 // (1-indexed, as shown by /sessions). Returns the old title or "" when the
 // archive slot doesn't exist.
 func (a *AgentLoop) SetArchivedSessionTitle(sessionKey string, index int, title string) (string, bool) {
+	sessionKey = a.namespacedKey(sessionKey)
 	archivePrefix := sessionKey + ":archive:"
 	sessions := a.sessions.ListByPrefix(archivePrefix)
 	if index < 0 || index >= len(sessions) {
@@ -1066,7 +1087,7 @@ func (a *AgentLoop) SetArchivedSessionTitle(sessionKey string, index int, title 
 
 // CurrentSessionTitle returns the current session's title ("" when untitled).
 func (a *AgentLoop) CurrentSessionTitle(sessionKey string) string {
-	if cur := a.sessions.Get(sessionKey); cur != nil {
+	if cur := a.sessions.Get(a.namespacedKey(sessionKey)); cur != nil {
 		return cur.Title
 	}
 	return ""
@@ -1076,7 +1097,7 @@ func (a *AgentLoop) CurrentSessionTitle(sessionKey string) string {
 // or nil when the key has no session content yet. Lets the TUI and /sessions
 // show the live session — including its title — without archiving it first.
 func (a *AgentLoop) CurrentSessionSummary(sessionKey string) *SessionInfo {
-	cur := a.sessions.Get(sessionKey)
+	cur := a.sessions.Get(a.namespacedKey(sessionKey))
 	if cur == nil || len(cur.History) == 0 {
 		return nil
 	}
@@ -1089,6 +1110,7 @@ func (a *AgentLoop) CurrentSessionSummary(sessionKey string) *SessionInfo {
 
 // ListArchivedSessions returns archived sessions for a given session key prefix.
 func (a *AgentLoop) ListArchivedSessions(sessionKey string) []SessionInfo {
+	sessionKey = a.namespacedKey(sessionKey)
 	archivePrefix := sessionKey + ":archive:"
 	sessions := a.sessions.ListByPrefix(archivePrefix)
 	result := make([]SessionInfo, 0, len(sessions))
@@ -1110,6 +1132,7 @@ func (a *AgentLoop) ListArchivedSessions(sessionKey string) []SessionInfo {
 // Archives the current session first if it has content. Returns the title of
 // the restored session, or empty string if the archive wasn't found.
 func (a *AgentLoop) SwitchToArchivedSession(sessionKey string, index int) string {
+	sessionKey = a.namespacedKey(sessionKey)
 	archivePrefix := sessionKey + ":archive:"
 	sessions := a.sessions.ListByPrefix(archivePrefix)
 	if index < 0 || index >= len(sessions) {
@@ -1577,6 +1600,26 @@ func (a *AgentLoop) Run(ctx context.Context) {
 // dispatchMessage routes an inbound message to the correct handler.
 // Stop commands cancel the active turn; everything else is queued for processing.
 // Signal messages use a separate session namespace so they don't interrupt active turns.
+// namespacedKey applies the active-project namespace to a bare session key
+// (channel:chatID) exactly the way dispatchMessage does for inbound turns.
+// Callers holding a bare key — the TUI's StopTurn, /title, /sessions, /new,
+// /session N — must resolve through this so they address the session the
+// turns actually run under. Without it, StopTurn no-ops (the reply orphans
+// into the next prompt) and /title writes a phantom session nobody reads.
+// Idempotent: keys already carrying the proj: prefix pass through unchanged.
+func (a *AgentLoop) namespacedKey(sessionKey string) string {
+	if a.projects == nil {
+		return sessionKey
+	}
+	if strings.HasPrefix(sessionKey, "proj:") {
+		return sessionKey
+	}
+	if n := a.projects.ActiveProject(); n != "" {
+		return "proj:" + n + ":" + sessionKey
+	}
+	return sessionKey
+}
+
 func (a *AgentLoop) dispatchMessage(ctx context.Context, msg chat.Inbound) {
 	// Use session key from metadata if provided (e.g. per-user group sessions)
 	sessionKey := msg.Channel + ":" + msg.ChatID
@@ -1587,11 +1630,7 @@ func (a *AgentLoop) dispatchMessage(ctx context.Context, msg chat.Inbound) {
 	}
 	// Namespace sessions by active project so each project keeps its own
 	// conversation history per chat (mirrors the -project CLI flag).
-	if a.projects != nil {
-		if n := a.projects.ActiveProject(); n != "" {
-			sessionKey = "proj:" + n + ":" + sessionKey
-		}
-	}
+	sessionKey = a.namespacedKey(sessionKey)
 
 	// Determine if this is a signal-originated message.
 	isSignal := isSignalMessage(msg)
