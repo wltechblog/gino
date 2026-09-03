@@ -225,6 +225,52 @@ func (sm *SessionManager) LoadAll() error {
 	return nil
 }
 
+// syncFromDiskLocked refreshes in-memory sessions from the on-disk store.
+// Sessions are small (a few KB each) and the directory is tiny, so reading
+// is cheap. This makes external edits (bulk renames, other processes,
+// hand-edited files) visible to ListByPrefix / SearchSessions / Get without
+// a gateway restart.
+//
+// Merge rule: a disk entry replaces the in-memory copy only when the disk
+// UpdatedAt is strictly NEWER. In-flight sessions (mid-turn AddMessage
+// bumps UpdatedAt in memory before Save persists it) therefore always win,
+// so an active turn's stashed *Session pointer can never be orphaned by a
+// stale disk read. Entries that exist only in memory (created but not yet
+// saved) are kept.
+//
+// Caller must hold sm.mu (write).
+func (sm *SessionManager) syncFromDiskLocked() {
+	dir := filepath.Join(sm.workspace, "sessions")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return // no sessions dir yet — nothing to sync
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		// Skip active turn checkpoints and temp files.
+		if strings.HasSuffix(name, ".active.json") || strings.HasSuffix(name, ".tmp") {
+			continue
+		}
+		var s Session
+		b, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil || json.Unmarshal(b, &s) != nil || s.Key == "" {
+			continue
+		}
+		if cur, ok := sm.sessions[s.Key]; ok {
+			// Only adopt disk state that is strictly newer than what we have.
+			if s.UpdatedAt.After(cur.UpdatedAt) {
+				sm.sessions[s.Key] = &s
+			}
+		} else {
+			// Not in memory at all: adopt from disk.
+			sm.sessions[s.Key] = &s
+		}
+	}
+}
+
 func (s *Session) AddMessage(role, content string) {
 	s.History = append(s.History, role+": "+content)
 	if s.CreatedAt.IsZero() {
@@ -239,6 +285,7 @@ func (s *Session) AddMessage(role, content string) {
 func (sm *SessionManager) SetTitle(key, title, source string) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
+	sm.syncFromDiskLocked()
 	key = sanitizeKey(key)
 	s, ok := sm.sessions[key]
 	if !ok {
@@ -259,8 +306,9 @@ func (sm *SessionManager) SetTitle(key, title, source string) {
 // ListByPrefix returns all sessions whose key starts with prefix.
 // Results are sorted by UpdatedAt (most recent first).
 func (sm *SessionManager) ListByPrefix(prefix string) []*Session {
-	sm.mu.RLock()
-	defer sm.mu.RUnlock()
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.syncFromDiskLocked()
 	prefix = sanitizeKey(prefix)
 	var result []*Session
 	for _, s := range sm.sessions {
@@ -277,8 +325,9 @@ func (sm *SessionManager) ListByPrefix(prefix string) []*Session {
 
 // Get returns a session by key without creating it. Returns nil if not found.
 func (sm *SessionManager) Get(key string) *Session {
-	sm.mu.RLock()
-	defer sm.mu.RUnlock()
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.syncFromDiskLocked()
 	key = sanitizeKey(key)
 	return sm.sessions[key]
 }
@@ -326,8 +375,9 @@ type SearchResult struct {
 // string. It searches both session titles and message history (case-insensitive).
 // Returns matches sorted by UpdatedAt (most recent first).
 func (sm *SessionManager) SearchSessions(prefix, query string) []SearchResult {
-	sm.mu.RLock()
-	defer sm.mu.RUnlock()
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.syncFromDiskLocked()
 	prefix = sanitizeKey(prefix)
 	lowerQuery := strings.ToLower(query)
 
