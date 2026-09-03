@@ -28,13 +28,6 @@ import (
 
 var rememberRE = regexp.MustCompile(`(?i)^remember(?:\s+to)?\s+(.+)$`)
 
-// maxAutoContinuations caps how many synthetic continuation blocks a single
-// turn may inject when it exhausts its iteration budget (processTurn and
-// ProcessDirectWithSessionAndSystemPrompt). Without a cap a runaway tool
-// loop could extend itself forever. 4 blocks means a turn runs at most
-// 5x its configured maxIterations before the user is asked to continue.
-const maxAutoContinuations = 4
-
 // stopCommands are message prefixes that trigger immediate cancellation
 // of the current turn for a session.
 var stopCommands = []string{"/stop", "/cancel", "/abort"}
@@ -531,17 +524,18 @@ type AgentLoop struct {
 	tokenStore              *mcp.TokenStore
 	enableToolActivity      bool
 	enableToolCallMessages  bool
-	enableToolErrorMessages bool                 // default true — surface tool failures to user
-	verbose                 bool                 // dump final reply + stats as JSON
-	analytics               bool                 // dump per-turn token usage as JSON
-	signalSocketPath        string               // GINO_SIGNAL_SOCKET injected into MCP child processes
-	signalListener          SignalTargetRecorder // optional: records last real channel for signal routing
-	compactor               *compactor           // nil = use legacy trimTurnMessages
-	spTool                  *tools.SpawnTool     // subagent spawn tool (disabled until SetSpawnConfig)
-	sessComp                *sessionCompactor    // nil = session-history compaction disabled
-	autoTitleOff            bool                 // config: disable LLM session auto-titling
-	autoContinueOff         bool                 // config: disable iteration-limit auto-continue
-	projects                *ProjectRegistry     // nil = runtime project switching unavailable
+	enableToolErrorMessages bool                   // default true — surface tool failures to user
+	verbose                 bool                   // dump final reply + stats as JSON
+	analytics               bool                   // dump per-turn token usage as JSON
+	signalSocketPath        string                 // GINO_SIGNAL_SOCKET injected into MCP child processes
+	signalListener          SignalTargetRecorder   // optional: records last real channel for signal routing
+	compactor               *compactor             // nil = use legacy trimTurnMessages
+	spTool                  *tools.SpawnTool       // subagent spawn tool (disabled until SetSpawnConfig)
+	sessComp                *sessionCompactor      // nil = session-history compaction disabled
+	autoTitleOff            bool                   // config: disable LLM session auto-titling
+	autoContinueOff         bool                   // config: disable resume-on-"continue" interception
+	paused                  map[string]*pausedTurn // iteration-limit-paused turns awaiting "continue"
+	projects                *ProjectRegistry       // nil = runtime project switching unavailable
 	fsTool                  *tools.FilesystemTool
 	execTool                *tools.ExecTool
 	bgTool                  *tools.BackgroundTool
@@ -619,6 +613,13 @@ type activeTurn struct {
 	cancel  context.CancelFunc
 	done    chan struct{} // closed when turn completes
 	stopped bool          // true if cancelled by /stop
+
+	// Resume seeds: when a paused turn is relaunched via resumePausedTurn,
+	// these carry over the pre-pause tool-call log and last tool result so
+	// the session-continuity summary covers the WHOLE logical turn, not just
+	// the post-resume block. Nil/empty for fresh turns.
+	resumeToolLog []toolCallRecord
+	resumeLastRes string
 }
 
 // SignalTargetRecorder is implemented by signal.Listener to record the last
@@ -852,6 +853,7 @@ func NewAgentLoopWithProfileWorkspace(b *chat.Hub, provider providers.LLMProvide
 		enableToolErrorMessages: true,
 		active:                  make(map[string]*activeTurn),
 		pending:                 make(map[string][]pendingMsg),
+		paused:                  make(map[string]*pausedTurn),
 		compactor:               comp,
 		fsTool:                  fsTool,
 		execTool:                execTool,
@@ -1449,6 +1451,20 @@ func (a *AgentLoop) queuePendingMsg(sessionKey, content, sender string) {
 	})
 }
 
+// pausedTurn is an iteration-limit-paused turn awaiting the user's
+// "continue". It snapshots everything processTurn had live: the message
+// chain mid-tool-exchange, the tool-call log, and iteration count, so
+// resumePausedTurn can re-enter the loop exactly where it stopped without
+// rebuilding context from session history.
+type pausedTurn struct {
+	msg         chat.Inbound
+	sess        *session.Session
+	messages    []providers.Message
+	iteration   int
+	toolLog     []toolCallRecord
+	lastToolRes string
+}
+
 // hasActiveTurn returns true if a turn is currently running for the session.
 func (a *AgentLoop) hasActiveTurn(sessionKey string) bool {
 	a.mu.Lock()
@@ -1645,9 +1661,85 @@ func (a *AgentLoop) Run(ctx context.Context) {
 	}
 }
 
-// dispatchMessage routes an inbound message to the correct handler.
-// Stop commands cancel the active turn; everything else is queued for processing.
-// Signal messages use a separate session namespace so they don't interrupt active turns.
+// resumePausedTurn re-launches a paused turn after the user replied
+// "continue". The stashed message chain is resumed as the live turn: the
+// synthetic continuation note is appended (so the model knows to keep going,
+// not restart), the iteration counter resets, and processTurn runs a fresh
+// full budget block. Returns true when a resume was launched (false when
+// nothing was paused for this session). A new non-continue message simply
+// drops the stash (dispatchMessage only calls this for continue-shaped
+// input); /stop and /new clear it explicitly.
+func (a *AgentLoop) resumePausedTurn(ctx context.Context, msg chat.Inbound) bool {
+	sessionKey := msg.Channel + ":" + msg.ChatID
+	if msg.Metadata != nil {
+		if sk, ok := msg.Metadata["session_key"].(string); ok && sk != "" {
+			sessionKey = sk
+		}
+	}
+	sessionKey = a.namespacedKey(sessionKey)
+
+	a.mu.Lock()
+	pt, ok := a.paused[sessionKey]
+	if !ok {
+		a.mu.Unlock()
+		return false
+	}
+	delete(a.paused, sessionKey)
+
+	// A turn is already running — resume would collide. Leave the paused
+	// turn stashed so a later "continue" still works.
+	if _, busy := a.active[sessionKey]; busy {
+		a.paused[sessionKey] = pt
+		a.mu.Unlock()
+		sendChannelNotification(a.hub, msg.Channel, msg.ChatID, "⏳ A turn is already running — reply continue again when it finishes.", msg.Metadata)
+		return true
+	}
+
+	// Strip the pause exchange the paused epilogue recorded (user prompt +
+	// ⏳ notice). The resumed turn will re-record the original user message
+	// alongside its real outcome, so keeping the pair would duplicate the
+	// prompt once per pause/resume cycle. Conservative: only strip when the
+	// trailing pair matches exactly (interleaved signal notes abort the strip).
+	h := pt.sess.History
+	if nh := len(h); nh >= 2 {
+		wantUser := "user: " + labelSharedContent(pt.msg.Channel, pt.msg.Metadata, pt.msg.Content)
+		if h[nh-2] == wantUser && strings.HasPrefix(h[nh-1], "assistant: ⏳ I've hit my tool-call limit") {
+			pt.sess.History = h[:nh-2]
+			if err := a.sessions.Save(pt.sess); err != nil {
+				log.Printf("error saving session after pause-exchange strip: %v", err)
+			}
+		}
+	}
+
+	// Inject the continuation note into the stashed chain.
+	pt.messages = append(pt.messages, providers.Message{
+		Role:    "user",
+		Content: "[System: The user replied \"continue\". Resume exactly where you left off and finish the task. Do not restart or re-read completed work.]",
+	})
+
+	turnCtx, turnCancel := context.WithCancel(ctx)
+	at := &activeTurn{
+		cancel:        turnCancel,
+		done:          make(chan struct{}),
+		resumeToolLog: pt.toolLog,
+		resumeLastRes: pt.lastToolRes,
+	}
+	a.active[sessionKey] = at
+	a.mu.Unlock()
+
+	go func() {
+		defer close(at.done)
+		defer turnCancel()
+		a.processTurn(turnCtx, at, sessionKey, pt.msg, pt.sess, pt.messages)
+		a.mu.Lock()
+		delete(a.active, sessionKey)
+		a.mu.Unlock()
+	}()
+
+	log.Printf("Resumed paused turn for %s (was at iteration %d)", sessionKey, pt.iteration)
+	return true
+}
+
 // namespacedKey applies the active-project namespace to a bare session key
 // (channel:chatID) exactly the way dispatchMessage does for inbound turns.
 // Callers holding a bare key — the TUI's StopTurn, /title, /sessions, /new,
@@ -1692,10 +1784,31 @@ func (a *AgentLoop) dispatchMessage(ctx context.Context, msg chat.Inbound) {
 		signalSessionKey = "signal:" + sessionKey
 	}
 
+	// Handle harness-level "continue": when a previous turn was paused at
+	// the iteration limit, a bare "continue" (or "/continue") resumes that
+	// stashed turn in-process. The user's gating is preserved — nothing runs
+	// until they say so — but the word never travels to the LLM as a fresh
+	// prompt: the stashed message chain replays with the iteration counter
+	// reset, and the turn continues exactly where it stopped.
+	if c := strings.TrimSpace(msg.Content); !a.autoContinueOff && (strings.EqualFold(c, "continue") || strings.EqualFold(c, "/continue")) {
+		if a.resumePausedTurn(ctx, msg) {
+			return
+		}
+		// No paused turn for this session — fall through so "continue"
+		// acts as an ordinary prompt (session history already contains
+		// the ⏳ notice, giving the LLM context for the word).
+	}
+
 	// Handle /stop — cancel the current turn for this session
 	if isStopCommand(msg.Content) {
+		a.mu.Lock()
+		_, hadPaused := a.paused[sessionKey]
+		delete(a.paused, sessionKey)
+		a.mu.Unlock()
 		if a.cancelActiveTurn(sessionKey) {
 			sendChannelNotification(a.hub, msg.Channel, msg.ChatID, "⛔ Stopped.")
+		} else if hadPaused {
+			sendChannelNotification(a.hub, msg.Channel, msg.ChatID, "⛔ Paused turn discarded — it will not resume.", msg.Metadata)
 		} else {
 			sendChannelNotification(a.hub, msg.Channel, msg.ChatID, "Nothing to stop.")
 		}
@@ -1716,6 +1829,11 @@ func (a *AgentLoop) dispatchMessage(ctx context.Context, msg chat.Inbound) {
 				cancelled++
 			}
 		}
+		for key := range a.paused {
+			if strings.HasPrefix(key, discordPrefix) && !strings.HasPrefix(key, "signal:") {
+				delete(a.paused, key)
+			}
+		}
 		a.mu.Unlock()
 		deleted := a.sessions.DeleteByPrefix(discordPrefix)
 		sendChannelNotification(a.hub, msg.Channel, msg.ChatID, fmt.Sprintf("🗑️ Cleared all %d Discord conversations (cancelled %d active turns).", deleted, cancelled))
@@ -1734,6 +1852,11 @@ func (a *AgentLoop) dispatchMessage(ctx context.Context, msg chat.Inbound) {
 				at.cancel()
 				delete(a.active, key)
 				cancelled++
+			}
+		}
+		for key := range a.paused {
+			if key != sessionKey {
+				delete(a.paused, key)
 			}
 		}
 		a.mu.Unlock()
@@ -1880,6 +2003,11 @@ func (a *AgentLoop) dispatchMessage(ctx context.Context, msg chat.Inbound) {
 		}
 		target := sessions[num-1] // 1-indexed
 
+		// A paused turn belongs to the session being switched away from.
+		a.mu.Lock()
+		delete(a.paused, sessionKey)
+		a.mu.Unlock()
+
 		// If the current session has content, archive it first.
 		current := a.sessions.Get(sessionKey)
 		if current != nil && len(current.History) > 0 {
@@ -2010,6 +2138,11 @@ func (a *AgentLoop) dispatchMessage(ctx context.Context, msg chat.Inbound) {
 		// Cancel any active turn first.
 		a.cancelActiveTurn(sessionKey)
 
+		// Drop any paused turn — the fresh session supersedes it.
+		a.mu.Lock()
+		delete(a.paused, sessionKey)
+		a.mu.Unlock()
+
 		// Archive current session if it has history.
 		current := a.sessions.Get(sessionKey)
 		if current != nil && len(current.History) > 0 {
@@ -2078,6 +2211,19 @@ func (a *AgentLoop) dispatchMessage(ctx context.Context, msg chat.Inbound) {
 		}
 	}
 
+	// Any non-continue interactive message supersedes a paused turn: the
+	// user moved on. Drop the stash so its stale context can never leak into
+	// a later resume. ("continue"-shaped input returned earlier, before
+	// reaching this point; signals never touch user pauses.)
+	if !isSignal {
+		a.mu.Lock()
+		if _, had := a.paused[sessionKey]; had {
+			delete(a.paused, sessionKey)
+			log.Printf("Dropped paused turn for %s (superseded by new message)", sessionKey)
+		}
+		a.mu.Unlock()
+	}
+
 	// Record last real channel/chatID for signal routing (only for non-signal messages)
 	if a.signalListener != nil && !isSystemChannel(msg.Channel) && !isSignal {
 		a.signalListener.SetLastTarget(msg.Channel, msg.ChatID)
@@ -2116,6 +2262,11 @@ func (a *AgentLoop) dispatchMessage(ctx context.Context, msg chat.Inbound) {
 	if isSignal {
 		// Only cancel a previous signal turn for this same signal session, not the user's turn.
 		a.cancelActiveTurn(signalSessionKey)
+		// Signals can also pause at the limit; a new signal supersedes any
+		// stash under the signal namespace (no user will "continue" it).
+		a.mu.Lock()
+		delete(a.paused, signalSessionKey)
+		a.mu.Unlock()
 	} else if a.hasActiveTurn(sessionKey) {
 		// A turn is already running for this session — queue the message
 		// so it can be injected at the next iteration boundary.
@@ -2215,29 +2366,14 @@ func (a *AgentLoop) processTurn(ctx context.Context, at *activeTurn, sessionKey 
 	// BuildMessages always puts it last. We need this for trimTurnMessages.
 	userMsgIdx := len(messages) - 1
 
-	// Track tool calls for session continuity (so "continue" doesn't re-read everything).
-	var toolCallLog []toolCallRecord
+	// Track tool calls for session continuity (so "continue" doesn't re-read
+	// everything). A resumed turn seeds the log with its pre-pause half.
+	toolCallLog := at.resumeToolLog
+	if lastToolResult == "" {
+		lastToolResult = at.resumeLastRes
+	}
 
-	budget := a.maxIterations
-	continuations := 0 // synthetic continuation blocks injected this turn
-	for {
-		if iteration >= budget {
-			if !a.autoContinueOff && finalContent == "" && continuations < maxAutoContinuations {
-				// Iteration budget exhausted mid-task: resume in-process instead of
-				// ending the turn and asking the user to reply "continue". Inject a
-				// continuation note and extend the budget by another full block.
-				continuations++
-				log.Printf("Turn hit iteration limit for %s (%d iterations) — auto-continuing (%d/%d)", sessionKey, iteration, continuations, maxAutoContinuations)
-				messages = append(messages, providers.Message{
-					Role:    "user",
-					Content: "[System: The turn was paused because you reached the tool-call iteration limit for one block. Continue exactly where you left off and finish the task. Do not restart or re-read completed work.]",
-				})
-				userMsgIdx = len(messages) - 1
-				budget = a.maxIterations + continuations*a.maxIterations
-			} else {
-				break
-			}
-		}
+	for iteration < a.maxIterations {
 		iteration++
 
 		// Check for cancellation before each iteration
@@ -2422,11 +2558,24 @@ func (a *AgentLoop) processTurn(ctx context.Context, at *activeTurn, sessionKey 
 		}
 	}
 
-	// Loop exhausted ALL iteration budgets (auto-continue cap reached, or the
-	// feature is disabled) without a final text response. The turn is stopped
-	// by a limit, not finished — tell the user how to resume manually.
-	if iteration >= budget && finalContent == "" {
-		log.Printf("Turn hit iteration limit for %s (%d iterations) — notifying user", sessionKey, iteration)
+	// Iteration budget exhausted without a final text response: pause the
+	// turn instead of ending it. Stash the live message chain (and the
+	// tool-call log) so a follow-up "continue" can resume THIS turn
+	// in-process — same context, no fresh-prompt round-trip, no duplicated
+	// exchange in session history. The user stays in control: nothing
+	// resumes until they say so.
+	if iteration >= a.maxIterations && finalContent == "" {
+		a.mu.Lock()
+		a.paused[sessionKey] = &pausedTurn{
+			msg:         msg,
+			sess:        sess,
+			messages:    messages,
+			iteration:   iteration,
+			toolLog:     toolCallLog,
+			lastToolRes: lastToolResult,
+		}
+		a.mu.Unlock()
+		log.Printf("Turn paused at iteration limit for %s (%d iterations) — awaiting continue", sessionKey, iteration)
 		limitNote := fmt.Sprintf("⏳ I've hit my tool-call limit for this turn (%d steps) without finishing. Reply **continue** and I'll pick up where I left off.", iteration)
 		finalContent = limitNote
 	}
@@ -2668,10 +2817,7 @@ func (a *AgentLoop) ProcessDirectWithSessionAndSystemPrompt(content string, time
 	var lastToolResult string
 	userMsgIdx := len(messages) - 1
 	iteration := 0
-	continuations := 0
-	budget := a.maxIterations
-resume:
-	for iteration < budget {
+	for iteration < a.maxIterations {
 		iteration++
 		// Trim/compact messages to keep context manageable
 		if len(messages) > a.maxTurnMessages {
@@ -2734,21 +2880,6 @@ resume:
 			lastToolResult = result
 			messages = append(messages, providers.Message{Role: "tool", Content: a.overflowToolResult(result), ToolCallID: tc.ID})
 		}
-	}
-
-	// Auto-continue: budget exhausted without a final reply. Instead of
-	// ending here (caller would have to send "continue" as a new turn),
-	// inject a continuation note and extend the budget, mirroring processTurn.
-	if !a.autoContinueOff && continuations < maxAutoContinuations {
-		continuations++
-		log.Printf("ProcessDirect hit iteration limit (%d iterations) — auto-continuing (%d/%d)", iteration, continuations, maxAutoContinuations)
-		messages = append(messages, providers.Message{
-			Role:    "user",
-			Content: "[System: The turn was paused because you reached the tool-call iteration limit for one block. Continue exactly where you left off and finish the task. Do not restart or re-read completed work.]",
-		})
-		userMsgIdx = len(messages) - 1
-		budget = a.maxIterations + continuations*a.maxIterations
-		goto resume
 	}
 
 	maxIterReply := fmt.Sprintf("⏳ Max tool iterations reached (%d) without a final response. Send another message (e.g. 'continue') and I'll pick up where I left off.", iteration)

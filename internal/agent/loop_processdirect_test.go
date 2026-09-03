@@ -76,6 +76,11 @@ type toolLoopProvider struct {
 }
 
 func (p *toolLoopProvider) Chat(ctx context.Context, messages []providers.Message, tools []providers.ToolDefinition, model string) (providers.LLMResponse, error) {
+	// Background LLM calls (turn-extract memory) share this provider but
+	// carry no tool definitions; they are not turn-loop iterations.
+	if len(tools) == 0 {
+		return providers.LLMResponse{Content: ""}, nil
+	}
 	p.calls++
 	args := map[string]interface{}{"query": "anything"}
 	tc := providers.ToolCall{ID: fmt.Sprintf("c%d", p.calls), Name: "exec", Arguments: args}

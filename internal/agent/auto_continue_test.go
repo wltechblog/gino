@@ -15,13 +15,14 @@ import (
 
 // finishAfterProvider issues tool calls for its first finishAt invocations,
 // then returns a final text reply. Combined with a small maxIterations it
-// models a task that legitimately needs more iterations than one budget
-// block — the exact case auto-continue exists for.
+// models a task that legitimately needs more than one budget block — the
+// exact case the pause/resume flow exists for.
 type finishAfterProvider struct {
 	mu       sync.Mutex
 	calls    int
 	finishAt int
 	sawNote  bool
+	rawCont  bool // saw a bare "continue" as a user message (must stay false)
 }
 
 func (p *finishAfterProvider) Chat(ctx context.Context, messages []providers.Message, tools []providers.ToolDefinition, model string) (providers.LLMResponse, error) {
@@ -36,9 +37,22 @@ func (p *finishAfterProvider) Chat(ctx context.Context, messages []providers.Mes
 	calls := p.calls
 	p.mu.Unlock()
 
-	// Detect the synthetic continuation note among the messages.
+	// The user's "continue" must be intercepted by the harness, never sent
+	// to the LLM as a raw prompt. The synthetic resume note is user-role
+	// too — distinguish by exact content match.
 	for _, m := range messages {
-		if m.Role == "user" && strings.Contains(m.Content, "iteration limit") {
+		if m.Role != "user" {
+			continue
+		}
+		// BuildMessages appends the <turn_context> wrap after the user
+		// content, so a genuine prompt starts with the word. The resume
+		// note starts with "[System:" — prefix match separates them.
+		if strings.HasPrefix(strings.TrimSpace(m.Content), "continue") && !strings.HasPrefix(strings.TrimSpace(m.Content), "[System:") {
+			p.mu.Lock()
+			p.rawCont = true
+			p.mu.Unlock()
+		}
+		if strings.Contains(m.Content, `user replied "continue"`) {
 			p.mu.Lock()
 			p.sawNote = true
 			p.mu.Unlock()
@@ -64,83 +78,93 @@ func (p *finishAfterProvider) SawNote() bool {
 	return p.sawNote
 }
 
+func (p *finishAfterProvider) RawContinueSeen() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.rawCont
+}
+
 func (p *finishAfterProvider) GetDefaultModel() string { return "ac-test" }
 
 func (p *finishAfterProvider) GetModelContext(ctx context.Context, model string) (int, error) {
 	return 0, nil
 }
 
-// TestProcessDirectAutoContinuesAndFinishes: with a budget of 3 iterations and
-// a task that needs 7 tool calls + 1 final reply, the turn must extend its own
-// budget and finish — no "continue" round-trip to the caller.
-func TestProcessDirectAutoContinuesAndFinishes(t *testing.T) {
-	b := chat.NewHub(10)
-	prov := &finishAfterProvider{finishAt: 7}
-	ag := NewAgentLoop(b, prov, prov.GetDefaultModel(), 3, "", nil, nil, nil, nil, nil, "", config.SandboxConfig{}, "", 0, 0, nil, config.WebConfig{}, config.SearchConfig{}, "")
+func newPauseTestAgent(b *chat.Hub, prov providers.LLMProvider, maxIter int) *AgentLoop {
+	ag := NewAgentLoop(b, prov, prov.GetDefaultModel(), maxIter, "", nil, nil, nil, nil, nil, "", config.SandboxConfig{}, "", 0, 0, nil, config.WebConfig{}, config.SearchConfig{}, "")
+	ag.SetSessionAutoTitle(false) // auto-titler would add extra provider calls and race counts
+	return ag
+}
 
-	resp, err := ag.ProcessDirect("keep working", 30*time.Second)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if resp != "task complete" {
-		t.Fatalf("expected finished reply, got %q", resp)
-	}
-	if calls := prov.Calls(); calls != 8 {
-		t.Fatalf("expected 8 LLM calls (7 tool + 1 final), got %d", calls)
-	}
-	if !prov.SawNote() {
-		t.Fatal("continuation note was never injected into the message chain")
+// waitForReply polls the subscription until a message matching predicate
+// arrives or the deadline expires.
+func waitForReply(t *testing.T, sub <-chan chat.Outbound, match func(chat.Outbound) bool, what string) chat.Outbound {
+	t.Helper()
+	deadline := time.After(30 * time.Second)
+	for {
+		select {
+		case out := <-sub:
+			if match(out) {
+				return out
+			}
+		case <-deadline:
+			t.Fatalf("%s never arrived within 30s", what)
+			return chat.Outbound{}
+		}
 	}
 }
 
-// TestProcessDirectAutoContinueCapTerminates: a provider that NEVER finishes
-// must still terminate — capped extensions, then the fallback notice.
-func TestProcessDirectAutoContinueCapTerminates(t *testing.T) {
+// TestHubTurnPausesAtLimit: a task needing more iterations than the budget
+// ends with the ⏳ notice (user gating preserved) AND stashes the live turn.
+func TestHubTurnPausesAtLimit(t *testing.T) {
 	b := chat.NewHub(10)
 	prov := &toolLoopProvider{}
-	ag := NewAgentLoop(b, prov, prov.GetDefaultModel(), 3, "", nil, nil, nil, nil, nil, "", config.SandboxConfig{}, "", 0, 0, nil, config.WebConfig{}, config.SearchConfig{}, "")
+	ag := newPauseTestAgent(b, prov, 3)
 
-	resp, err := ag.ProcessDirect("keep working", 30*time.Second)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !strings.Contains(resp, "Max tool iterations reached") {
-		t.Fatalf("expected fallback limit notice after cap, got %q", resp)
-	}
-	// 3 base + 4 extension blocks of 3 = 15 total iterations.
-	if prov.calls != 15 {
-		t.Fatalf("expected 15 LLM calls (5 budget blocks of 3), got %d", prov.calls)
-	}
-}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go ag.Run(ctx)
+	defer ag.Close()
 
-// TestProcessDirectAutoContinueDisabled: with auto-continue off, the legacy
-// behavior holds — exactly maxIterations calls, then the notice.
-func TestProcessDirectAutoContinueDisabled(t *testing.T) {
-	b := chat.NewHub(10)
-	prov := &toolLoopProvider{}
-	ag := NewAgentLoop(b, prov, prov.GetDefaultModel(), 3, "", nil, nil, nil, nil, nil, "", config.SandboxConfig{}, "", 0, 0, nil, config.WebConfig{}, config.SearchConfig{}, "")
-	ag.SetAutoContinue(false)
+	sub := b.Subscribe("cli")
+	b.StartRouter(ctx)
 
-	resp, err := ag.ProcessDirect("keep working", 30*time.Second)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	b.In <- chat.Inbound{Channel: "cli", ChatID: "pause-1", SenderID: "tester", Content: "do a long task", Timestamp: time.Now()}
+
+	out := waitForReply(t, sub, func(o chat.Outbound) bool { return strings.Contains(o.Content, "tool-call limit") }, "⏳ limit notice")
+	if !strings.Contains(out.Content, "continue") {
+		t.Fatalf("notice must tell the user how to resume: %q", out.Content)
 	}
-	if !strings.Contains(resp, "Max tool iterations reached") {
-		t.Fatalf("expected limit notice, got %q", resp)
+
+	// The turn must now be parked in the paused map under the session key.
+	deadline := time.After(5 * time.Second)
+	for {
+		ag.mu.Lock()
+		_, ok := ag.paused["cli:pause-1"]
+		ag.mu.Unlock()
+		if ok {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("turn not stashed in paused map after limit notice")
+		case <-time.After(20 * time.Millisecond):
+		}
 	}
 	if prov.calls != 3 {
-		t.Fatalf("expected exactly 3 LLM calls (no extensions), got %d", prov.calls)
+		t.Fatalf("expected exactly 3 LLM calls (one budget block), got %d", prov.calls)
 	}
 }
 
-// TestHubTurnAutoContinues: the interactive dispatch path (processTurn via
-// dispatchMessage) auto-continues too — the user receives the finished reply,
-// never the ⏳ notice, and never has to send "continue".
-func TestHubTurnAutoContinues(t *testing.T) {
+// TestHubTurnResumeOnContinue: the full loop — pause at limit, user replies
+// "continue", harness resumes the stashed turn, which then finishes. The word
+// itself must never reach the LLM as a raw user prompt.
+func TestHubTurnResumeOnContinue(t *testing.T) {
 	b := chat.NewHub(10)
-	prov := &finishAfterProvider{finishAt: 7}
-	ag := NewAgentLoop(b, prov, prov.GetDefaultModel(), 3, "", nil, nil, nil, nil, nil, "", config.SandboxConfig{}, "", 0, 0, nil, config.WebConfig{}, config.SearchConfig{}, "")
-	ag.SetSessionAutoTitle(false) // the auto-titler would add an extra provider call and race the count assertions
+	// finishAt=5 with budget 3: block 1 runs calls 1-3 (all tool calls),
+	// pause; one resume block runs calls 4,5 (tool) and 6 (final reply).
+	prov := &finishAfterProvider{finishAt: 5}
+	ag := newPauseTestAgent(b, prov, 3)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -150,44 +174,32 @@ func TestHubTurnAutoContinues(t *testing.T) {
 	sub := b.Subscribe("cli")
 	b.StartRouter(ctx)
 
-	b.In <- chat.Inbound{
-		Channel:   "cli",
-		ChatID:    "autocont-test",
-		SenderID:  "tester",
-		Content:   "do a long task",
-		Timestamp: time.Now(),
-	}
+	b.In <- chat.Inbound{Channel: "cli", ChatID: "resume-1", SenderID: "tester", Content: "do a long task", Timestamp: time.Now()}
+	waitForReply(t, sub, func(o chat.Outbound) bool { return strings.Contains(o.Content, "tool-call limit") }, "⏳ limit notice")
 
-	deadline := time.After(30 * time.Second)
-	for {
-		select {
-		case out := <-sub:
-			if strings.Contains(out.Content, "task complete") {
-				if !prov.SawNote() {
-					t.Fatal("finished without ever injecting a continuation note — test bug or wrong code path")
-				}
-				if calls := prov.Calls(); calls != 8 {
-					t.Fatalf("expected 8 LLM calls, got %d", calls)
-				}
-				return
-			}
-			if strings.Contains(out.Content, "⏳") {
-				t.Fatalf("iteration-limit notice reached the user: %q", out.Content)
-			}
-			// tool-activity notifications etc. — ignore
-		case <-deadline:
-			t.Fatal("turn did not finish within 30s")
-		}
+	b.In <- chat.Inbound{Channel: "cli", ChatID: "resume-1", SenderID: "tester", Content: "continue", Timestamp: time.Now()}
+
+	out := waitForReply(t, sub, func(o chat.Outbound) bool { return strings.Contains(o.Content, "task complete") }, "finished reply after resume")
+	_ = out
+
+	if !prov.SawNote() {
+		t.Fatal("resume note never reached the LLM — turn was rebuilt from scratch instead of resumed")
+	}
+	if prov.RawContinueSeen() {
+		t.Fatal(`raw "continue" prompt reached the LLM — interception failed`)
+	}
+	// 3 (block one) + 3 (resume block, finishing at call 6) = 6 calls total.
+	if calls := prov.Calls(); calls != 6 {
+		t.Fatalf("expected 6 LLM calls across both blocks, got %d", calls)
 	}
 }
 
-// TestHubTurnAutoContinueDisabled: legacy behavior on the hub path.
-func TestHubTurnAutoContinueDisabled(t *testing.T) {
+// TestHubTurnNewMessageDropsPause: a follow-up message that is NOT
+// "continue" supersedes the paused turn — no resume, stash cleared.
+func TestHubTurnNewMessageDropsPause(t *testing.T) {
 	b := chat.NewHub(10)
-	prov := &finishAfterProvider{finishAt: 7}
-	ag := NewAgentLoop(b, prov, prov.GetDefaultModel(), 3, "", nil, nil, nil, nil, nil, "", config.SandboxConfig{}, "", 0, 0, nil, config.WebConfig{}, config.SearchConfig{}, "")
-	ag.SetAutoContinue(false)
-	ag.SetSessionAutoTitle(false) // keep provider call count deterministic
+	prov := &toolLoopProvider{}
+	ag := newPauseTestAgent(b, prov, 3)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -197,29 +209,99 @@ func TestHubTurnAutoContinueDisabled(t *testing.T) {
 	sub := b.Subscribe("cli")
 	b.StartRouter(ctx)
 
-	b.In <- chat.Inbound{
-		Channel:   "cli",
-		ChatID:    "autocont-off",
-		SenderID:  "tester",
-		Content:   "do a long task",
-		Timestamp: time.Now(),
+	b.In <- chat.Inbound{Channel: "cli", ChatID: "drop-1", SenderID: "tester", Content: "do a long task", Timestamp: time.Now()}
+	waitForReply(t, sub, func(o chat.Outbound) bool { return strings.Contains(o.Content, "tool-call limit") }, "⏳ limit notice")
+
+	// Wait for the stash to land.
+	deadline := time.After(5 * time.Second)
+	for {
+		ag.mu.Lock()
+		_, ok := ag.paused["cli:drop-1"]
+		ag.mu.Unlock()
+		if ok {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("turn not stashed")
+		case <-time.After(20 * time.Millisecond):
+		}
 	}
 
-	deadline := time.After(30 * time.Second)
+	b.In <- chat.Inbound{Channel: "cli", ChatID: "drop-1", SenderID: "tester", Content: "actually, do something else", Timestamp: time.Now()}
+	waitForReply(t, sub, func(o chat.Outbound) bool { return strings.Contains(o.Content, "tool-call limit") }, "second ⏳ notice")
+
+	// The new turn ran to ITS limit; the old stash was replaced by the new
+	// one. Total calls: 3 + 3 = 6 — the paused turn was NOT resumed first.
+	if prov.calls != 6 {
+		t.Fatalf("expected 6 LLM calls (two independent budget blocks, no resume), got %d", prov.calls)
+	}
+}
+
+// TestHubTurnStopDiscardsPause: /stop drops the stash with a clear notice.
+func TestHubTurnStopDiscardsPause(t *testing.T) {
+	b := chat.NewHub(10)
+	prov := &toolLoopProvider{}
+	ag := newPauseTestAgent(b, prov, 3)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go ag.Run(ctx)
+	defer ag.Close()
+
+	sub := b.Subscribe("cli")
+	b.StartRouter(ctx)
+
+	b.In <- chat.Inbound{Channel: "cli", ChatID: "stop-1", SenderID: "tester", Content: "do a long task", Timestamp: time.Now()}
+	waitForReply(t, sub, func(o chat.Outbound) bool { return strings.Contains(o.Content, "tool-call limit") }, "⏳ limit notice")
+
+	deadline := time.After(5 * time.Second)
 	for {
-		select {
-		case out := <-sub:
-			if strings.Contains(out.Content, "tool-call limit") {
-				if calls := prov.Calls(); calls != 3 {
-					t.Fatalf("expected exactly 3 LLM calls, got %d", calls)
-				}
-				return
-			}
-			if strings.Contains(out.Content, "task complete") {
-				t.Fatal("turn finished despite needing 8 calls with auto-continue disabled")
-			}
-		case <-deadline:
-			t.Fatal("limit notice never reached the user within 30s")
+		ag.mu.Lock()
+		_, ok := ag.paused["cli:stop-1"]
+		ag.mu.Unlock()
+		if ok {
+			break
 		}
+		select {
+		case <-deadline:
+			t.Fatal("turn not stashed")
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+
+	b.In <- chat.Inbound{Channel: "cli", ChatID: "stop-1", SenderID: "tester", Content: "/stop", Timestamp: time.Now()}
+	waitForReply(t, sub, func(o chat.Outbound) bool { return strings.Contains(o.Content, "Paused turn discarded") }, "discard notice")
+
+	ag.mu.Lock()
+	_, still := ag.paused["cli:stop-1"]
+	ag.mu.Unlock()
+	if still {
+		t.Fatal("paused stash survived /stop")
+	}
+}
+
+// TestContinueWithoutPauseFallsThrough: "continue" with no paused turn acts
+// as an ordinary prompt (dispatch returns without swallowing it).
+func TestContinueWithoutPauseFallsThrough(t *testing.T) {
+	b := chat.NewHub(10)
+	prov := &finishAfterProvider{finishAt: 0} // answers immediately
+	ag := newPauseTestAgent(b, prov, 3)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go ag.Run(ctx)
+	defer ag.Close()
+
+	sub := b.Subscribe("cli")
+	b.StartRouter(ctx)
+
+	b.In <- chat.Inbound{Channel: "cli", ChatID: "fall-1", SenderID: "tester", Content: "continue", Timestamp: time.Now()}
+	out := waitForReply(t, sub, func(o chat.Outbound) bool { return strings.Contains(o.Content, "task complete") }, "ordinary reply")
+	_ = out
+	// It reached the LLM as a normal prompt (raw "continue" seen) because
+	// there was nothing to resume.
+	if !prov.RawContinueSeen() {
+		t.Fatal(`"continue" with no paused turn should fall through as an ordinary prompt`)
 	}
 }
