@@ -223,6 +223,12 @@ type toolCallRecord struct {
 // summarizeToolCalls builds a brief summary of tool calls made during a turn,
 // so that the next "continue" turn can pick up where things left off instead of
 // re-reading all the same files from scratch.
+//
+// The summary is CONTEXT FOR THE MODEL ONLY. It must never be shown to the
+// user and must never be stored as if the assistant "said" it: framing it as
+// assistant speech teaches the LLM to mimic the pattern and append fake
+// tool-call dumps to its real replies. Callers therefore inject it with the
+// system role, wrapped in explicit handling instructions.
 func summarizeToolCalls(records []toolCallRecord) string {
 	if len(records) == 0 {
 		return ""
@@ -265,6 +271,32 @@ func summarizeToolCalls(records []toolCallRecord) string {
 	}
 	sb.WriteString("]")
 	return sb.String()
+}
+
+// toolCallContextMessage wraps a tool-call summary as an internal system
+// note for the model. The framing is critical: a bare summary stored or
+// injected as assistant content gets pattern-matched by the LLM on later
+// turns, which then emits "[Previous turn made N tool call(s): ...]" as
+// part of its user-facing reply. The wrapper states what the block is and
+// forbids echoing it.
+func toolCallContextMessage(summary string) providers.Message {
+	wrapped := fmt.Sprintf(
+		"[Internal context — not part of any user-visible reply. The following is a record of tool calls from the previous turn, provided so you can resume without redoing work. Do NOT quote, reproduce, or append records like this in your responses.]\n\n%s",
+		summary)
+	return providers.Message{Role: "system", Content: wrapped}
+}
+
+// leakedToolSummaryRe matches a trailing "[Previous turn made N tool call(s): ...]"
+// record. Older builds appended these records to user-visible replies and
+// stored them in assistant role in session history; polluted histories can
+// still induce the model to reproduce the pattern. Stripped at the send
+// boundary as defense in depth.
+var leakedToolSummaryRe = regexp.MustCompile(`(?s)\n*\[Previous turn made \d+ tool call\(s\):.*$`)
+
+// stripLeakedToolSummary removes a trailing leaked tool-call record from a
+// reply (possibly leaving it empty).
+func stripLeakedToolSummary(s string) string {
+	return strings.TrimSpace(leakedToolSummaryRe.ReplaceAllString(s, ""))
 }
 
 // captureToolMemory adds key tool results to short-term memory so the ranker
@@ -2208,20 +2240,14 @@ func (a *AgentLoop) processTurn(ctx context.Context, at *activeTurn, sessionKey 
 					log.Printf("Compaction failed, falling back to trim: %v", compactErr)
 					// Inject tool call summary before trimming
 					if summary := summarizeToolCalls(toolCallLog); summary != "" {
-						messages = append(messages, providers.Message{
-							Role:    "assistant",
-							Content: summary,
-						})
+						messages = append(messages, toolCallContextMessage(summary))
 					}
 					messages, userMsgIdx = trimTurnMessages(messages, userMsgIdx, a.maxTurnMessages)
 				}
 			} else {
 				// Legacy trim: inject tool call summary, then slice.
 				if summary := summarizeToolCalls(toolCallLog); summary != "" {
-					messages = append(messages, providers.Message{
-						Role:    "assistant",
-						Content: summary,
-					})
+					messages = append(messages, toolCallContextMessage(summary))
 				}
 				messages, userMsgIdx = trimTurnMessages(messages, userMsgIdx, a.maxTurnMessages)
 			}
@@ -2382,17 +2408,22 @@ done:
 		finalContent = "I've completed processing but have no response to give."
 	}
 
+	// Defense in depth: never let a leaked tool-call record reach the user,
+	// even if a polluted session history induced the model to emit one.
+	finalContent = stripLeakedToolSummary(finalContent)
+
 	// Save session for interactive channels only.
-	// When tool calls were made, append a summary to the session copy so that a
-	// follow-up "continue" message can pick up where things left off instead of
-	// re-reading all the same files from scratch.
+	// When tool calls were made, record them as a SEPARATE system note so a
+	// follow-up "continue" message can pick up where things left off instead
+	// of re-reading the same files. Never append the record to the assistant
+	// reply: storing it as assistant speech teaches the model to mimic the
+	// pattern and emit the block in user-visible replies.
 	if !isSystemChannel(msg.Channel) {
 		sess.AddMessage("user", labelSharedContent(msg.Channel, msg.Metadata, msg.Content))
-		sessionContent := finalContent
+		sess.AddMessage("assistant", finalContent)
 		if summary := summarizeToolCalls(toolCallLog); summary != "" {
-			sessionContent += "\n\n" + summary
+			sess.AddMessage("system", "[Internal context for the model, not part of any user-visible reply. This is a record of tool calls made in the previous turn so you can resume without redoing work. Never quote, reproduce, or append records like this in your responses.]\n"+summary)
 		}
-		sess.AddMessage("assistant", sessionContent)
 		if err := a.sessions.Save(sess); err != nil {
 			log.Printf("error saving session: %v", err)
 		}
