@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 #
-# install.sh — Gino installer (root + yolo + brain profile)
+# install/install.sh — Gino installer (root + yolo + brain profile)
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/wltechblog/gino/main/install.sh | sudo bash
+#   curl -fsSL https://raw.githubusercontent.com/wltechblog/gino/main/install/install.sh | sudo bash
+#
+# For what this script does and why, see install/README.md.
 #
 # Assumes a Debian-based system with network access. Installs:
 #   - Go toolchain (official tarball if system Go is too old)
@@ -111,7 +113,7 @@ retry() { # retry N label cmd...
 
 go_version_ok() { # go_version_ok MINIMUM
     local need="$1" have
-    have="$(go version 2>/dev/null | awk '{print $3}')" || return 1
+    have="$(GOTOOLCHAIN=local go version 2>/dev/null | awk '{print $3}')" || return 1
     have="${have#go}"
     [ -n "$have" ] || return 1
     [ "$(printf '%s\n' "$need" "$have" | sort -V | head -n1)" = "$need" ]
