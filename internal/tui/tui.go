@@ -562,6 +562,10 @@ func (s *ChatSession) startRuntime(ctx context.Context) <-chan chat.Outbound {
 		s.cfg.Agents.Defaults.VisionModel,
 	)
 
+	if s.cfg.Agents.Defaults.SessionAutoTitle != nil {
+		s.agent.SetSessionAutoTitle(*s.cfg.Agents.Defaults.SessionAutoTitle)
+	}
+
 	cliOut := s.hub.Subscribe("cli")
 	s.hub.StartRouter(ctx)
 	go s.agent.Run(ctx)
@@ -1032,6 +1036,30 @@ func (s *ChatSession) handleCommand(line string) bool {
 
 		s.writeAbove(fmt.Sprintf("%s✓ Reasoning set to: %s%s\n", green, effort, reset))
 
+	case "/title":
+		rest := strings.TrimSpace(strings.TrimPrefix(line, "/title"))
+		if rest == "" {
+			cur := s.agent.CurrentSessionTitle(s.sessionKey())
+			if cur == "" {
+				cur = "(untitled)"
+			}
+			s.writeAbove(fmt.Sprintf("%sUsage: /title <text> — title current session, /title <N> <text> — rename archived session N\nCurrent title: %s%s\n\n", dim, cur, reset))
+			return true
+		}
+		if fields := strings.Fields(rest); len(fields) >= 2 {
+			if n, err := strconv.Atoi(fields[0]); err == nil && n >= 1 {
+				titleText := strings.TrimSpace(strings.TrimPrefix(rest, fields[0]))
+				if old, ok := s.agent.SetArchivedSessionTitle(s.sessionKey(), n-1, titleText); ok {
+					s.writeAbove(fmt.Sprintf("%s✓ Session %d retitled: %s (was: %s)%s\n\n", green, n, titleText, old, reset))
+					return true
+				}
+				s.writeAbove(fmt.Sprintf("%sSession %d not found. Use /sessions to list.%s\n\n", yellow, n, reset))
+				return true
+			}
+		}
+		s.agent.SetSessionTitle(s.sessionKey(), rest)
+		s.writeAbove(fmt.Sprintf("%s✓ Current session titled: %s%s\n\n", green, rest, reset))
+
 	case "/multiline", "/multi":
 		s.multiLine = !s.multiLine
 		state := "off"
@@ -1062,6 +1090,7 @@ func (s *ChatSession) printHelp() {
 	s.writeAbove(fmt.Sprintf("  %s/new%s        Start new conversation (archives current)\n", cyan, reset))
 	s.writeAbove(fmt.Sprintf("  %s/sessions%s   List saved sessions\n", cyan, reset))
 	s.writeAbove(fmt.Sprintf("  %s/session N%s  Switch to session #N\n", cyan, reset))
+	s.writeAbove(fmt.Sprintf("  %s/title text%s  Title current session (/title N text renames #N)\n", cyan, reset))
 	s.writeAbove(fmt.Sprintf("  %s/search text%s  Search saved sessions\n", cyan, reset))
 	s.writeAbove(fmt.Sprintf("  %s/purge days%s  Delete sessions older than N days\n", cyan, reset))
 	s.writeAbove(fmt.Sprintf("  %s/stop%s       Abort the current response\n", cyan, reset))

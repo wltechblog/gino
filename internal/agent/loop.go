@@ -500,6 +500,7 @@ type AgentLoop struct {
 	compactor               *compactor           // nil = use legacy trimTurnMessages
 	spTool                  *tools.SpawnTool     // subagent spawn tool (disabled until SetSpawnConfig)
 	sessComp                *sessionCompactor    // nil = session-history compaction disabled
+	autoTitleOff            bool                 // config: disable LLM session auto-titling
 	projects                *ProjectRegistry     // nil = runtime project switching unavailable
 	fsTool                  *tools.FilesystemTool
 	execTool                *tools.ExecTool
@@ -959,6 +960,12 @@ func (a *AgentLoop) SetSpawnCLIFlags(flags tools.CLIFlags) {
 	a.spTool.SetCLIFlags(flags)
 }
 
+// SetSessionAutoTitle toggles LLM-generated session titling. Default on;
+// pass false to disable (sessions fall back to derived titles on archive).
+func (a *AgentLoop) SetSessionAutoTitle(enabled bool) {
+	a.autoTitleOff = !enabled
+}
+
 // SetSessionCompaction enables LLM-based summarization of old persisted
 // session history. Pass nil to disable.
 func (a *AgentLoop) SetSessionCompaction(cfg *config.SessionCompactionConfig) {
@@ -1028,6 +1035,43 @@ type SessionInfo struct {
 	UpdatedAt time.Time
 }
 
+// SetSessionTitle assigns a manual title to the CURRENT session (persisted).
+func (a *AgentLoop) SetSessionTitle(sessionKey, title string) {
+	if len(title) > 80 {
+		title = title[:80]
+	}
+	if a.sessions.Get(sessionKey) == nil {
+		a.sessions.GetOrCreate(sessionKey)
+	}
+	a.sessions.SetTitle(sessionKey, title, "manual")
+}
+
+// SetArchivedSessionTitle assigns a manual title to archived session #N
+// (1-indexed, as shown by /sessions). Returns the old title or "" when the
+// archive slot doesn't exist.
+func (a *AgentLoop) SetArchivedSessionTitle(sessionKey string, index int, title string) (string, bool) {
+	archivePrefix := sessionKey + ":archive:"
+	sessions := a.sessions.ListByPrefix(archivePrefix)
+	if index < 0 || index >= len(sessions) {
+		return "", false
+	}
+	target := sessions[index]
+	oldTitle := target.Title // capture before SetTitle mutates the same pointer
+	if len(title) > 80 {
+		title = title[:80]
+	}
+	a.sessions.SetTitle(target.Key, title, "manual")
+	return oldTitle, true
+}
+
+// CurrentSessionTitle returns the current session's title ("" when untitled).
+func (a *AgentLoop) CurrentSessionTitle(sessionKey string) string {
+	if cur := a.sessions.Get(sessionKey); cur != nil {
+		return cur.Title
+	}
+	return ""
+}
+
 // ListArchivedSessions returns archived sessions for a given session key prefix.
 func (a *AgentLoop) ListArchivedSessions(sessionKey string) []SessionInfo {
 	archivePrefix := sessionKey + ":archive:"
@@ -1069,6 +1113,7 @@ func (a *AgentLoop) SwitchToArchivedSession(sessionKey string, index int) string
 	active.History = make([]string, len(target.History))
 	copy(active.History, target.History)
 	active.Title = target.Title
+	active.TitleSource = target.TitleSource
 	if err := a.sessions.Save(active); err != nil {
 		log.Printf("error saving switched session: %v", err)
 	}
@@ -1092,15 +1137,23 @@ func (a *AgentLoop) archiveSession(sessionKey string) {
 		return
 	}
 
-	title := generateSessionSummary(current.History)
+	// Preserve an existing title (manual or LLM); only derive one when the
+	// session was never titled.
+	title := current.Title
+	titleSource := current.TitleSource
+	if title == "" {
+		title = generateSessionSummary(current.History)
+		titleSource = "derived"
+	}
 	archiveKey := fmt.Sprintf("%s:archive:%d", sessionKey, time.Now().UnixNano())
 
 	archive := &session.Session{
-		Key:       archiveKey,
-		Title:     title,
-		History:   make([]string, len(current.History)),
-		CreatedAt: current.CreatedAt,
-		UpdatedAt: time.Now(),
+		Key:         archiveKey,
+		Title:       title,
+		TitleSource: titleSource,
+		History:     make([]string, len(current.History)),
+		CreatedAt:   current.CreatedAt,
+		UpdatedAt:   time.Now(),
 	}
 	copy(archive.History, current.History)
 
@@ -1112,6 +1165,7 @@ func (a *AgentLoop) archiveSession(sessionKey string) {
 	loaded := a.sessions.Get(archiveKey)
 	if loaded != nil {
 		loaded.Title = title
+		loaded.TitleSource = titleSource
 		loaded.History = archive.History
 		loaded.CreatedAt = current.CreatedAt
 		loaded.UpdatedAt = time.Now()
@@ -1119,6 +1173,8 @@ func (a *AgentLoop) archiveSession(sessionKey string) {
 }
 
 // generateSessionSummary extracts a short title from the first user message.
+// This is only a fallback for sessions that were never titled by the LLM or
+// the user — archiveSession prefers an existing title.
 func generateSessionSummary(history []string) string {
 	for _, entry := range history {
 		if strings.HasPrefix(entry, "user: ") {
@@ -1137,6 +1193,69 @@ func generateSessionSummary(history []string) string {
 		}
 	}
 	return "Untitled"
+}
+
+// maybeAutoTitleSession gives an untitled session a descriptive title using a
+// background LLM call after its first substantive turn. Sessions titled
+// manually (via /title) are never overwritten; a previously LLM-titled
+// session is not re-titled (the first exchange is the best signal of topic).
+func (a *AgentLoop) maybeAutoTitleSession(sessionKey, firstUserMsg, firstAssistantReply string) {
+	if a.autoTitleOff {
+		return
+	}
+	sess := a.sessions.Get(sessionKey)
+	if sess == nil {
+		return
+	}
+	if sess.Title != "" {
+		// Already titled — respect it (manual and LLM titles are sticky).
+		return
+	}
+
+	a.bgWG.Add(1)
+	go func() {
+		defer a.bgWG.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("auto-title panic recovered: %v", r)
+			}
+		}()
+
+		head := func(s string, n int) string {
+			if len(s) > n {
+				return s[:n] + "…"
+			}
+			return s
+		}
+		prompt := "You generate short titles for saved chat sessions. Given the opening exchange of a conversation, write a concise descriptive title (3-8 words) that captures what the conversation is about. Reply with ONLY the title — no quotes, no punctuation at the end, no explanation.\n\n"
+		prompt += "User: " + head(firstUserMsg, 2000) + "\n\nAssistant: " + head(firstAssistantReply, 2000)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		resp, err := a.provider.Chat(ctx, []providers.Message{
+			{Role: "user", Content: prompt},
+		}, nil, a.model)
+		if err != nil {
+			log.Printf("session auto-title failed: %v", err)
+			return
+		}
+		title := strings.TrimSpace(resp.Content)
+		// Strip wrapping quotes and trailing punctuation the model sometimes adds.
+		title = strings.Trim(title, "\"'“”‘’ \t")
+		title = strings.TrimRight(title, ".!?")
+		if title == "" {
+			return
+		}
+		if len(title) > 80 {
+			title = title[:80]
+		}
+		// Re-check under the session lock: a /title command may have raced us.
+		if cur := a.sessions.Get(sessionKey); cur != nil && cur.Title != "" {
+			return
+		}
+		a.sessions.SetTitle(sessionKey, title, "llm")
+		log.Printf("session auto-titled: %s → %q", sessionKey, title)
+	}()
 }
 
 // buildSessionKeyboard builds a Telegram InlineKeyboardMarkup JSON string
@@ -1173,6 +1292,15 @@ func buildSessionKeyboard(sessions []*session.Session) string {
 		return ""
 	}
 	return string(data)
+}
+
+// displayTitle returns the session title for display, substituting
+// "Untitled" for sessions that were never titled.
+func displayTitle(title string) string {
+	if strings.TrimSpace(title) == "" {
+		return "Untitled"
+	}
+	return title
 }
 
 // humanizeDuration formats a duration as a human-readable relative time string.
@@ -1539,6 +1667,7 @@ func (a *AgentLoop) dispatchMessage(ctx context.Context, msg chat.Inbound) {
 				active.History = make([]string, len(target.History))
 				copy(active.History, target.History)
 				active.Title = target.Title
+				active.TitleSource = target.TitleSource
 				if err := a.sessions.Save(active); err != nil {
 					log.Printf("error saving switched session: %v", err)
 				}
@@ -1644,6 +1773,7 @@ func (a *AgentLoop) dispatchMessage(ctx context.Context, msg chat.Inbound) {
 		active.History = make([]string, len(target.History))
 		copy(active.History, target.History)
 		active.Title = target.Title
+		active.TitleSource = target.TitleSource
 		if err := a.sessions.Save(active); err != nil {
 			log.Printf("error saving switched session: %v", err)
 		}
@@ -1700,6 +1830,59 @@ func (a *AgentLoop) dispatchMessage(ctx context.Context, msg chat.Inbound) {
 			sb.WriteString(fmt.Sprintf("   `/session %d`\n\n", i+1))
 		}
 		sendChannelNotification(a.hub, msg.Channel, msg.ChatID, sb.String())
+		return
+	}
+
+	// Handle /title — assign a title to the current or an archived session.
+	//   /title <text>          title the CURRENT session
+	//   /title <N> <text>      rename archived session #N (as shown by /sessions)
+	if rest, ok := strings.CutPrefix(strings.TrimSpace(msg.Content), "/title"); ok && (rest == "" || rest[0] == ' ') {
+		rest = strings.TrimSpace(rest)
+		if rest == "" {
+			cur := a.sessions.Get(sessionKey)
+			curTitle := ""
+			if cur != nil {
+				curTitle = cur.Title
+			}
+			sendChannelNotification(a.hub, msg.Channel, msg.ChatID, fmt.Sprintf("Usage: `/title <text>` — title the current session\nUsage: `/title <N> <text>` — rename archived session N\nCurrent session title: *%s*", displayTitle(curTitle)))
+			return
+		}
+
+		// /title <N> <text> — rename archived session N.
+		var num int
+		var titleText string
+		if fields := strings.Fields(rest); len(fields) >= 2 {
+			if n, err := strconv.Atoi(fields[0]); err == nil && n >= 1 {
+				num = n
+				titleText = strings.TrimSpace(strings.TrimPrefix(rest, fields[0]))
+			}
+		}
+
+		if num > 0 && titleText != "" {
+			archivePrefix := sessionKey + ":archive:"
+			sessions := a.sessions.ListByPrefix(archivePrefix)
+			if num > len(sessions) {
+				sendChannelNotification(a.hub, msg.Channel, msg.ChatID, fmt.Sprintf("Session %d not found. Only %d session(s) available.", num, len(sessions)))
+				return
+			}
+			target := sessions[num-1]
+			if len(titleText) > 80 {
+				titleText = titleText[:80]
+			}
+			a.sessions.SetTitle(target.Key, titleText, "manual")
+			sendChannelNotification(a.hub, msg.Channel, msg.ChatID, fmt.Sprintf("✅ Session %d retitled: *%s*", num, titleText))
+			return
+		}
+
+		// /title <text> — title the current session.
+		if len(rest) > 80 {
+			rest = rest[:80]
+		}
+		if a.sessions.Get(sessionKey) == nil {
+			a.sessions.GetOrCreate(sessionKey)
+		}
+		a.sessions.SetTitle(sessionKey, rest, "manual")
+		sendChannelNotification(a.hub, msg.Channel, msg.ChatID, fmt.Sprintf("✅ Current session titled: *%s*", rest))
 		return
 	}
 
@@ -2141,6 +2324,13 @@ done:
 		sess.AddMessage("assistant", sessionContent)
 		if err := a.sessions.Save(sess); err != nil {
 			log.Printf("error saving session: %v", err)
+		}
+
+		// First exchange of a session: give it a descriptive LLM-generated
+		// title in the background so /sessions shows something meaningful
+		// instead of a raw prompt excerpt. No-op when already titled.
+		if len(sess.History) == 2 {
+			a.maybeAutoTitleSession(sessionKey, msg.Content, finalContent)
 		}
 	}
 

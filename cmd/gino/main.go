@@ -294,6 +294,9 @@ func runAgent(homeFlag string, args []string) {
 	ag.SetSpawnCLIFlags(tools.CLIFlags{Model: *modelFlag, SystemPrompt: *systemPromptOverride})
 	ag.SetSpawnConfig(cfg.Agents.Defaults.Spawn, cfg.Providers.Presets)
 	ag.SetSessionCompaction(&cfg.Agents.Defaults.SessionCompaction)
+	if cfg.Agents.Defaults.SessionAutoTitle != nil {
+		ag.SetSessionAutoTitle(*cfg.Agents.Defaults.SessionAutoTitle)
+	}
 	if cfg.Agents.Defaults.EnableToolActivityIndicator != nil {
 		ag.SetToolActivityIndicator(*cfg.Agents.Defaults.EnableToolActivityIndicator)
 	}
@@ -439,6 +442,9 @@ func runGateway(homeFlag string, args []string) {
 	// spawn/message/cron/write_memory disabled so they can't recurse.
 	ag.SetSpawnConfig(cfg.Agents.Defaults.Spawn, cfg.Providers.Presets)
 	ag.SetSessionCompaction(&cfg.Agents.Defaults.SessionCompaction)
+	if cfg.Agents.Defaults.SessionAutoTitle != nil {
+		ag.SetSessionAutoTitle(*cfg.Agents.Defaults.SessionAutoTitle)
+	}
 
 	// Persist background jobs (pollers survive restarts; interrupted one-shots
 	// are reported unless marked rerunOnRestart).

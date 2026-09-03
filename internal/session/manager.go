@@ -17,11 +17,16 @@ const MaxHistorySize = 50
 
 // Session holds a short chat history.
 type Session struct {
-	Key       string    `json:"key"`
-	Title     string    `json:"title,omitempty"`
-	History   []string  `json:"history"`
-	CreatedAt time.Time `json:"created_at,omitempty"`
-	UpdatedAt time.Time `json:"updated_at,omitempty"`
+	Key   string `json:"key"`
+	Title string `json:"title,omitempty"`
+	// TitleSource records how the current title was set, so automatic
+	// (LLM-derived) titling never overwrites a user-assigned title.
+	// "manual" = set via /title, "llm" = LLM-generated, "derived" = excerpt
+	// of the first user message, "" = never titled.
+	TitleSource string    `json:"title_source,omitempty"`
+	History     []string  `json:"history"`
+	CreatedAt   time.Time `json:"created_at,omitempty"`
+	UpdatedAt   time.Time `json:"updated_at,omitempty"`
 }
 
 // SessionManager stores sessions in memory and persists to disk under workspace.
@@ -229,13 +234,25 @@ func (s *Session) AddMessage(role, content string) {
 }
 
 // SetTitle updates the session title and persists the change.
-func (sm *SessionManager) SetTitle(key, title string) {
+// source records provenance: "manual" titles are never overwritten by
+// automatic titling, "llm"/"derived" may be.
+func (sm *SessionManager) SetTitle(key, title, source string) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	key = sanitizeKey(key)
-	if s, ok := sm.sessions[key]; ok {
-		s.Title = title
-		s.UpdatedAt = time.Now()
+	s, ok := sm.sessions[key]
+	if !ok {
+		return
+	}
+	// A manual title is sticky: automatic titling must not clobber it.
+	if s.TitleSource == "manual" && source != "manual" {
+		return
+	}
+	s.Title = title
+	s.TitleSource = source
+	s.UpdatedAt = time.Now()
+	if err := sm.saveLocked(s); err != nil {
+		log.Printf("Session: persist title for %s: %v", key, err)
 	}
 }
 
@@ -265,8 +282,6 @@ func (sm *SessionManager) Get(key string) *Session {
 	key = sanitizeKey(key)
 	return sm.sessions[key]
 }
-
-
 
 // PurgeOlderThan removes all sessions (including archives) whose UpdatedAt is
 // older than the specified number of days. Sessions whose UpdatedAt is zero

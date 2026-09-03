@@ -138,6 +138,12 @@ type AgentDefaults struct {
 	// Spawn configures the spawn tool for subagent task execution.
 	Spawn SpawnConfig `json:"spawn,omitempty"`
 
+	// SessionAutoTitle enables LLM-generated session titles: after the first
+	// exchange of a new session, a background LLM call gives it a descriptive
+	// title so /sessions lists are meaningful instead of prompt excerpts.
+	// Manually assigned titles (/title) are never overwritten. Default true.
+	SessionAutoTitle *bool `json:"sessionAutoTitle,omitempty"`
+
 	// SessionCompaction summarizes old persisted session history with the LLM
 	// when it grows past a threshold, instead of silently dropping the oldest
 	// entries at MaxHistorySize.
