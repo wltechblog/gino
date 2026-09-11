@@ -252,6 +252,27 @@ func (t *FilesystemTool) resolve(pathStr string) (*os.Root, string, error) {
 	return nil, "", fmt.Errorf("filesystem: path %q is outside all allowed directories", pathStr)
 }
 
+// openSandboxed resolves pathStr through the same roots the filesystem tool
+// uses and opens it read-only. The caller must Close the returned file.
+// Used by sibling tools (e.g. web_post) so file uploads respect the exact
+// same path containment — including runtime workspace switches — as the
+// filesystem tool itself.
+func (t *FilesystemTool) openSandboxed(pathStr string) (*os.File, error) {
+	root, rel, err := t.resolve(pathStr)
+	if err != nil {
+		return nil, err
+	}
+	f, err := root.Open(rel)
+	if err != nil {
+		return nil, err
+	}
+	if info, err := f.Stat(); err == nil && info.IsDir() {
+		_ = f.Close()
+		return nil, fmt.Errorf("filesystem: %q is a directory", pathStr)
+	}
+	return f, nil
+}
+
 func (t *FilesystemTool) Name() string { return "filesystem" }
 func (t *FilesystemTool) Description() string {
 	return "Read, write, edit (find-and-replace), and list files in the workspace and allowed directories. For editing source code and project files, use action 'edit' with old_text/new_text — do NOT use edit_memory (that is only for memory/notes files)."

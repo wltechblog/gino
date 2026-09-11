@@ -680,6 +680,7 @@ func NewAgentLoopWithProfileWorkspace(b *chat.Hub, provider providers.LLMProvide
 	execTool := tools.NewExecToolWithSandbox(60, workspace, allDirs, sandbox)
 	register(execTool)
 	register(tools.NewWebToolWithConfig(webCfg.TimeoutS, webCfg.MaxResponseBytes, webCfg.UserAgent))
+	register(tools.NewWebPostTool(webCfg.TimeoutS, webCfg.MaxResponseBytes, webCfg.UserAgent, fsTool))
 
 	// Web search: use Brave if configured, otherwise fall back to DuckDuckGo
 	braveKey := searchCfg.BraveAPIKey
