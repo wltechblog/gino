@@ -358,13 +358,14 @@ func (t *SpawnTool) doSpawn(ctx context.Context, args map[string]interface{}) (s
 	t.tasks[id] = tk
 	t.mu.Unlock()
 
-	runCtx, cancel := context.WithTimeout(ctx, timeout)
-	tk.cancel = cancel
-
 	argv, childEnv := t.buildChildInvocation(agentName, profile, sess, task)
 
 	if wait {
-		// Synchronous: run inline, return output as the tool result.
+		// Synchronous: run inline against the TURN context, returning
+		// output as the tool result. Deliberately tied to the turn —
+		// /stop or a response timeout kills the child with the turn.
+		runCtx, cancel := context.WithTimeout(ctx, timeout)
+		tk.cancel = cancel
 		output, err := t.runChild(runCtx, argv, childEnv)
 		t.mu.Lock()
 		delete(t.tasks, id)
@@ -381,7 +382,12 @@ func (t *SpawnTool) doSpawn(ctx context.Context, args map[string]interface{}) (s
 	}
 
 	// Asynchronous: deliver the result to the originating chat when done.
+	// The child runs in its own context DETACHED from the registering turn —
+	// a long research task must survive the parent turn ending (reply sent,
+	// turn context canceled). Only the timeout or an explicit cancel kills it.
 	channel, chatID := t.currentContext()
+	runCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	tk.cancel = cancel
 	go func() {
 		defer cancel()
 		output, err := t.runChild(runCtx, argv, childEnv)
