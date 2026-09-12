@@ -37,9 +37,8 @@ OLLAMA_IMAGE="docker.io/ollama/ollama:latest"
 EMBED_MODEL="nomic-embed-text"
 GO_NEED="1.26.3"
 GO_INSTALL="1.26.4"
-DEFAULT_API_BASE="https://api.z.ai/api/coding/paas/v4"
-DEFAULT_MODEL="glm-4.6"
-DEFAULT_SUB_MODEL="glm-4.5-air"
+# LLM provider presets live in section 6 (provider menu); each preset
+# carries its own apiBase, default models, and reasoningLevels vocabulary.
 
 # ── helpers ─────────────────────────────────────────────────────────────────
 log()  { printf '\033[1;32m==>\033[0m %s\n' "$*" >&2; }
@@ -251,13 +250,69 @@ fi
 printf '\n' >&3
 printf '\033[1m── Provider ──────────────────────────────────────\033[0m\n' >&3
 
-ask_required "LLM provider API base URL" "$DEFAULT_API_BASE"
+# provider presets: base URL / default model / default subagent model /
+# reasoningLevels vocabulary (see docs/CONFIG.md "Reasoning models").
+provider_menu() {
+    printf 'Select LLM provider:\n' >&3
+    printf '  1) z.ai GLM — Coding Plan      (api.z.ai/api/coding/paas/v4)\n' >&3
+    printf '  2) z.ai GLM — Direct API       (api.z.ai/api/paas/v4)\n' >&3
+    printf '  3) OpenAI                      (api.openai.com/v1)\n' >&3
+    printf '  4) OpenRouter                  (openrouter.ai/api/v1)\n' >&3
+    printf '  5) Ollama — local              (127.0.0.1:11434, no key needed)\n' >&3
+    printf '  6) Custom — any OpenAI-compatible endpoint\n' >&3
+}
+provider_menu
+API_BASE=""; MODEL=""; SUB_MODEL_DEFAULT=""; REASONING_LEVELS=""
+API_KEY_DEFAULT=""
+while :; do
+    ask "Choice" "1"
+    case "$REPLY" in
+        1)  API_BASE="https://api.z.ai/api/coding/paas/v4"
+            MODEL="glm-5.2"; SUB_MODEL_DEFAULT="glm-4.5-air"
+            # coding endpoint accepts the broad vocabulary and remaps per model
+            REASONING_LEVELS='["none", "minimal", "low", "medium", "high", "xhigh", "max"]'
+            ;;
+        2)  API_BASE="https://api.z.ai/api/paas/v4"
+            MODEL="glm-5.3"; SUB_MODEL_DEFAULT="glm-5.3-flash"
+            # direct API + GLM-5.3: only these three; anything else hard-errors
+            REASONING_LEVELS='["low", "high", "max"]'
+            ;;
+        3)  API_BASE="https://api.openai.com/v1"
+            MODEL="gpt-5"; SUB_MODEL_DEFAULT="gpt-5-mini"
+            REASONING_LEVELS='["minimal", "low", "medium", "high"]'
+            ;;
+        4)  API_BASE="https://openrouter.ai/api/v1"
+            MODEL="glm-5.2"; SUB_MODEL_DEFAULT="glm-4.5-air"
+            REASONING_LEVELS='["none", "minimal", "low", "medium", "high", "xhigh", "max"]'
+            ;;
+        5)  API_BASE="http://127.0.0.1:11434/v1"
+            MODEL="qwen3:8b"; SUB_MODEL_DEFAULT="qwen3:4b"
+            REASONING_LEVELS='["none"]'
+            API_KEY_DEFAULT="ollama"   # local endpoint ignores the key
+            ;;
+        6)  ;;
+        *)  printf '  enter a number 1-6\n' >&3; continue ;;
+    esac
+    break
+done
+PROVIDER_CHOICE="$REPLY"
+
+ask_required "LLM provider API base URL" "$API_BASE"
 API_BASE="$(json_sanitize "$REPLY")"
 
-ask_required "API key"
-API_KEY="$(json_sanitize "$REPLY")"
+if [ "$PROVIDER_CHOICE" = "5" ]; then
+    ask_secret "API key (any value for local endpoints)" "ollama"
+    API_KEY="$(json_sanitize "$REPLY")"
+else
+    while :; do
+        ask_secret "API key"
+        [ -n "$REPLY" ] && break
+        printf '  a value is required\n' >&3
+    done
+    API_KEY="$(json_sanitize "$REPLY")"
+fi
 
-ask_required "Model name" "$DEFAULT_MODEL"
+ask_required "Model name" "$MODEL"
 MODEL="$(json_sanitize "$REPLY")"
 
 # optional subagent
@@ -280,7 +335,7 @@ if [ "$REPLY" = "y" ]; then
     SUB_API_KEY="$(json_sanitize "$REPLY")"
     [ -z "$SUB_API_KEY" ] && SUB_API_KEY="$API_KEY"
 
-    ask_required "Subagent model" "$DEFAULT_SUB_MODEL"
+    ask_required "Subagent model" "${SUB_MODEL_DEFAULT:-$MODEL}"
     SUB_MODEL="$(json_sanitize "$REPLY")"
 
     if [ "$SUB_API_BASE" != "$API_BASE" ] || [ "$SUB_API_KEY" != "$API_KEY" ]; then
@@ -327,6 +382,13 @@ fi
 
 if [ "${CONFIG_ACTION:-new}" != "kept" ]; then
     log "writing $CONFIG"
+
+    # reasoning vocabulary fragment (empty = omit reasoningLevels)
+    PROVIDER_EXTRA=""
+    if [ -n "$REASONING_LEVELS" ]; then
+        PROVIDER_EXTRA=",
+            \"reasoningLevels\": ${REASONING_LEVELS}"
+    fi
 
     # subagent JSON fragments
     SPAWN_AGENTS_JSON="[]"
@@ -397,7 +459,7 @@ EOF
     "providers": {
         "openai": {
             "apiBase": "${API_BASE}",
-            "apiKey": "${API_KEY}"
+            "apiKey": "${API_KEY}"${PROVIDER_EXTRA}
         },
 ${PRESETS_JSON}        "fallbacks": []
     },
@@ -423,6 +485,10 @@ EOF
         log "config JSON validated + normalized"
     fi
     chmod 600 "$CONFIG"
+fi
+
+if [ "$PROVIDER_CHOICE" = "5" ] && [ "${CONFIG_ACTION:-new}" != "kept" ]; then
+    warn "Ollama LLM mode: pull your model first — podman exec $OLLAMA_NAME ollama pull $MODEL"
 fi
 
 # ── 8. gateway service (Telegram mode) ──────────────────────────────────────
@@ -453,6 +519,8 @@ printf '\n' >&3
 printf '\033[1m── Install complete ───────────────────────────────\033[0m\n' >&3
 {
     printf '  binary     : %s/gino\n' "$BIN_DIR"
+    printf '  provider   : %s\n' "$API_BASE"
+    printf '  model      : %s\n' "$MODEL"
     printf '  repo       : %s\n' "$REPO_DIR"
     printf '  config     : %s (%s)\n' "$CONFIG" "${CONFIG_ACTION:-new}"
     printf '  sandbox    : yolo\n'
