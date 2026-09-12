@@ -24,6 +24,7 @@ func NewProviderFromConfig(cfg config.Config) LLMProvider {
 		effectiveMaxRetries(cfg.Agents.Defaults.MaxRetries),
 		time.Duration(effectiveRetryBaseWait(cfg.Agents.Defaults.RetryBaseWaitS))*time.Second,
 	)
+	primary.SetReasoningLevels(cfg.Providers.OpenAI.ReasoningLevels)
 	primary.SetReasoningEffort(cfg.Providers.OpenAI.ReasoningEffort)
 	if cfg.Agents.Defaults.Verbose {
 		primary.SetVerbose(true)
@@ -69,6 +70,7 @@ func NewProviderFromConfig(cfg config.Config) LLMProvider {
 			effectiveMaxRetries(cfg.Agents.Defaults.MaxRetries),
 			time.Duration(effectiveRetryBaseWait(cfg.Agents.Defaults.RetryBaseWaitS))*time.Second,
 		)
+		provider.SetReasoningLevels(fb.ReasoningLevels)
 		provider.SetReasoningEffort(fb.ReasoningEffort)
 		if cfg.Agents.Defaults.Verbose {
 			provider.SetVerbose(true)

@@ -132,7 +132,8 @@ type AgentDefaults struct {
 
 	// ReasoningEffort controls reasoning for OpenAI-compatible providers.
 	// Applied by gateway when not overridden by -R flag or provider config.
-	// Valid values: none, low, medium, high.
+	// Valid values come from providers.openai.reasoningLevels
+	// (default: none, minimal, low, medium, high).
 	ReasoningEffort string `json:"reasoningEffort,omitempty"`
 
 	// Spawn configures the spawn tool for subagent task execution.
@@ -421,10 +422,17 @@ type ProvidersConfig struct {
 }
 
 type ProviderConfig struct {
-	APIKey          string `json:"apiKey"`
-	APIBase         string `json:"apiBase"`
-	Model           string `json:"model,omitempty"`
+	APIKey  string `json:"apiKey"`
+	APIBase string `json:"apiBase"`
+	Model   string `json:"model,omitempty"`
+	// ReasoningEffort is the request parameter sent as reasoning_effort.
 	ReasoningEffort string `json:"reasoningEffort,omitempty"`
+	// ReasoningLevels is the allowed vocabulary for reasoningEffort.
+	// Values vary by model family: e.g. OpenAI gpt-5 uses minimal|low|medium|high
+	// (and none to disable), Claude uses no override, DeepSeek-R1 accepts an
+	// empty value, GLM uses none|low|medium|high. Empty = gino defaults
+	// (none|minimal|low|medium|high). Invalid values are rejected, not remapped.
+	ReasoningLevels []string `json:"reasoningLevels,omitempty"`
 }
 
 // FallbackConfig defines a fallback LLM provider to use when the primary fails.
@@ -447,8 +455,13 @@ type FallbackConfig struct {
 	MaxTokens int `json:"maxTokens,omitempty"`
 
 	// ReasoningEffort controls reasoning for OpenAI-compatible providers.
-	// For Ollama, "none" disables thinking.
+	// For Ollama, "none" disables thinking. Valid values come from this
+	// fallback's reasoningLevels (default: none, minimal, low, medium, high).
 	ReasoningEffort string `json:"reasoningEffort,omitempty"`
+
+	// ReasoningLevels is the allowed vocabulary for reasoningEffort on this
+	// fallback. Empty = gino defaults (none|minimal|low|medium|high).
+	ReasoningLevels []string `json:"reasoningLevels,omitempty"`
 
 	// RecoverAfter controls how long to stay on this fallback before retrying
 	// the primary provider. Defaults to 5m. Set to "0s" to retry primary on

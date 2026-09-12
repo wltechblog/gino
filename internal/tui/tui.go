@@ -1030,13 +1030,13 @@ func (s *ChatSession) handleCommand(line string) bool {
 		}
 
 		if len(parts) != 2 {
-			s.writeAbove(fmt.Sprintf("%sUsage: /reasoning <none|low|medium|high>%s\n", yellow, reset))
+			s.writeAbove(fmt.Sprintf("%sUsage: /reasoning <%s>%s\n", yellow, strings.Join(providers.ReasoningLevelsOf(s.provider), "|"), reset))
 			return true
 		}
 
-		effort, ok := providers.NormalizeReasoningEffort(parts[1])
+		effort, ok := providers.NormalizeReasoningEffortIn(parts[1], providers.ReasoningLevelsOf(s.provider))
 		if !ok {
-			s.writeAbove(fmt.Sprintf("%sInvalid reasoning level. Use none, low, medium, or high.%s\n", yellow, reset))
+			s.writeAbove(fmt.Sprintf("%sInvalid reasoning level %q. Allowed: %s%s\n", yellow, parts[1], strings.Join(providers.ReasoningLevelsOf(s.provider), ", "), reset))
 			return true
 		}
 

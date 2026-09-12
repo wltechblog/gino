@@ -225,7 +225,7 @@ func runAgent(homeFlag string, args []string) {
 	fs := flag.NewFlagSet("agent", flag.ExitOnError)
 	msg := fs.String("m", "", "Message to send to the agent")
 	modelFlag := fs.String("M", "", "Model to use (overrides config/provider default)")
-	reasoningFlag := fs.String("R", "", "Reasoning effort: none, low, medium, or high")
+	reasoningFlag := fs.String("R", "", "Reasoning effort (must be in the provider's reasoningLevels vocabulary)")
 	projectFlag := fs.String("project", "", "Project working directory while retaining the configured Gino profile")
 	sessionKey := fs.String("session", "", "Session key for multi-turn context persistence")
 	systemPromptOverride := fs.String("system-prompt", "", "Override the system prompt (used by benchmarks)")
@@ -243,9 +243,9 @@ func runAgent(homeFlag string, args []string) {
 	provider := providers.NewProviderFromConfig(cfg)
 
 	if *reasoningFlag != "" {
-		effort, ok := providers.NormalizeReasoningEffort(*reasoningFlag)
+		effort, ok := providers.NormalizeReasoningEffortIn(*reasoningFlag, providers.ReasoningLevelsOf(provider))
 		if !ok {
-			fmt.Fprintln(os.Stderr, "invalid -R value; use none, low, medium, or high")
+			fmt.Fprintf(os.Stderr, "invalid -R value %q; allowed levels: %s\n", *reasoningFlag, strings.Join(providers.ReasoningLevelsOf(provider), ", "))
 			os.Exit(2)
 		}
 		if !providers.SetReasoningEffort(provider, effort) {
@@ -334,7 +334,7 @@ func runAgent(homeFlag string, args []string) {
 func runChat(homeFlag string, args []string) {
 	fs := flag.NewFlagSet("chat", flag.ExitOnError)
 	modelFlag := fs.String("M", "", "Model to use (overrides config/provider default)")
-	reasoningFlag := fs.String("R", "", "Reasoning effort: none, low, medium, or high")
+	reasoningFlag := fs.String("R", "", "Reasoning effort (must be in the provider's reasoningLevels vocabulary)")
 	projectFlag := fs.String("project", "", "Project working directory while retaining the configured Gino profile")
 	_ = fs.Parse(args)
 
@@ -348,9 +348,9 @@ func runChat(homeFlag string, args []string) {
 	provider := providers.NewProviderFromConfig(cfg)
 
 	if *reasoningFlag != "" {
-		effort, ok := providers.NormalizeReasoningEffort(*reasoningFlag)
+		effort, ok := providers.NormalizeReasoningEffortIn(*reasoningFlag, providers.ReasoningLevelsOf(provider))
 		if !ok {
-			fmt.Fprintln(os.Stderr, "invalid -R value; use none, low, medium, or high")
+			fmt.Fprintf(os.Stderr, "invalid -R value %q; allowed levels: %s\n", *reasoningFlag, strings.Join(providers.ReasoningLevelsOf(provider), ", "))
 			os.Exit(2)
 		}
 		if !providers.SetReasoningEffort(provider, effort) {
@@ -405,7 +405,10 @@ func runGateway(homeFlag string, args []string) {
 	// Apply reasoning effort from config (provider config takes precedence,
 	// then agent defaults). Gateway has no -R flag, so config is the only way.
 	if cfg.Agents.Defaults.ReasoningEffort != "" {
-		if effort, ok := providers.NormalizeReasoningEffort(cfg.Agents.Defaults.ReasoningEffort); ok {
+		effort, ok := providers.NormalizeReasoningEffortIn(cfg.Agents.Defaults.ReasoningEffort, providers.ReasoningLevelsOf(provider))
+		if !ok {
+			log.Printf("config: ignoring agents.defaults.reasoningEffort %q — not in provider vocabulary (%s)", cfg.Agents.Defaults.ReasoningEffort, strings.Join(providers.ReasoningLevelsOf(provider), ", "))
+		} else {
 			providers.SetReasoningEffort(provider, effort)
 		}
 	}

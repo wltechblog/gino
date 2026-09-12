@@ -16,13 +16,16 @@ import (
 
 // OpenAIProvider calls an OpenAI-compatible API (OpenAI, OpenRouter, or similar).
 type OpenAIProvider struct {
-	APIKey            string
-	APIBase           string // e.g. https://api.openai.com/v1 or https://openrouter.ai/api/v1
-	MaxTokens         int    // 0 means "let the API decide"
-	MaxRetries        int    // number of retries on transient errors (default 2)
-	RetryBaseWait     time.Duration
-	reasoningMu       sync.RWMutex
-	ReasoningEffort   string
+	APIKey          string
+	APIBase         string // e.g. https://api.openai.com/v1 or https://openrouter.ai/api/v1
+	MaxTokens       int    // 0 means "let the API decide"
+	MaxRetries      int    // number of retries on transient errors (default 2)
+	RetryBaseWait   time.Duration
+	reasoningMu     sync.RWMutex
+	ReasoningEffort string
+	// ReasoningLevels is the allowed vocabulary for ReasoningEffort.
+	// Empty = DefaultReasoningLevels. Set via SetReasoningLevels.
+	ReasoningLevels   []string
 	PerAttemptTimeout time.Duration // timeout per individual API call attempt
 	Client            *http.Client
 	Verbose           bool // log full request/response JSON when true
@@ -70,6 +73,48 @@ func (p *OpenAIProvider) SetReasoningEffort(effort string) {
 	defer p.reasoningMu.Unlock()
 
 	p.ReasoningEffort = effort
+}
+
+// SetReasoningLevels sets the allowed reasoning-effort vocabulary for this
+// provider. Pass nil/empty to restore the default vocabulary. Values are
+// normalized (trimmed, lowercased).
+func (p *OpenAIProvider) SetReasoningLevels(levels []string) {
+	p.reasoningMu.Lock()
+	defer p.reasoningMu.Unlock()
+
+	if len(levels) == 0 {
+		p.ReasoningLevels = nil
+		return
+	}
+	norm := make([]string, 0, len(levels))
+	for _, lvl := range levels {
+		if v := strings.ToLower(strings.TrimSpace(lvl)); v != "" {
+			norm = append(norm, v)
+		}
+	}
+	if len(norm) == 0 {
+		p.ReasoningLevels = nil
+		return
+	}
+	p.ReasoningLevels = norm
+}
+
+// GetReasoningLevels returns the effective vocabulary (never nil).
+func (p *OpenAIProvider) GetReasoningLevels() []string {
+	p.reasoningMu.RLock()
+	defer p.reasoningMu.RUnlock()
+
+	if len(p.ReasoningLevels) == 0 {
+		return DefaultReasoningLevels
+	}
+	return append([]string(nil), p.ReasoningLevels...)
+}
+
+// ReasoningEffortAllowed reports whether effort is in this provider's
+// effective vocabulary.
+func (p *OpenAIProvider) ReasoningEffortAllowed(effort string) bool {
+	_, ok := NormalizeReasoningEffortIn(effort, p.GetReasoningLevels())
+	return ok
 }
 
 func (p *OpenAIProvider) GetReasoningEffort() string {

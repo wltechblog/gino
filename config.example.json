@@ -3,6 +3,7 @@
     "defaults": {
       "workspace": "~/.gino/workspace",
       "model": "glm-4.6",
+      "reasoningEffort": "",
       "maxTokens": 16384,
       "temperature": 0.7,
       "maxToolIterations": 50,
@@ -78,7 +79,15 @@
   "providers": {
     "openai": {
       "apiKey": "YOUR_API_KEY",
-      "apiBase": "https://api.z.ai/api/coding/paas/v4"
+      "apiBase": "https://api.z.ai/api/coding/paas/v4",
+      "reasoningEffort": "high",
+      "reasoningLevels": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high"
+      ]
     },
     "presets": {
       "zai-vision": {
@@ -93,6 +102,14 @@
         "apiKey": "YOUR_FALLBACK_API_KEY",
         "apiBase": "https://api.openai.com/v1",
         "model": "gpt-4o",
+        "reasoningEffort": "low",
+        "reasoningLevels": [
+          "none",
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ],
         "maxTokens": 0,
         "recoverAfter": "5m"
       }

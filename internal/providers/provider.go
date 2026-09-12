@@ -58,16 +58,53 @@ type ReasoningEffortController interface {
 	GetReasoningEffort() string
 }
 
-// NormalizeReasoningEffort validates the OpenAI-compatible reasoning levels.
-func NormalizeReasoningEffort(value string) (string, bool) {
-	value = strings.ToLower(strings.TrimSpace(value))
+// DefaultReasoningLevels is the default reasoning-effort vocabulary:
+// the OpenAI standard levels plus "minimal" (used by newer OpenAI models).
+var DefaultReasoningLevels = []string{"none", "minimal", "low", "medium", "high"}
 
-	switch value {
-	case "none", "low", "medium", "high":
-		return value, true
-	default:
+// NormalizeReasoningEffort validates a reasoning level against the default
+// vocabulary. See NormalizeReasoningEffortIn.
+func NormalizeReasoningEffort(value string) (string, bool) {
+	return NormalizeReasoningEffortIn(value, nil)
+}
+
+// NormalizeReasoningEffortIn validates a reasoning level against an explicit
+// vocabulary. When levels is empty, DefaultReasoningLevels applies. Values are
+// compared case-insensitively and trimmed; the canonical (lowercased) form is
+// returned. When levels is non-empty and the value is not in it, the value is
+// rejected (operators own their vocabulary — no silent remapping).
+func NormalizeReasoningEffortIn(value string, levels []string) (string, bool) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
 		return "", false
 	}
+	if len(levels) == 0 {
+		levels = DefaultReasoningLevels
+	}
+	for _, lvl := range levels {
+		if value == strings.ToLower(strings.TrimSpace(lvl)) {
+			return value, true
+		}
+	}
+	return "", false
+}
+
+// ReasoningLevelsOf returns the effective reasoning vocabulary for a
+// provider (DefaultReasoningLevels when unsupported).
+func ReasoningLevelsOf(provider LLMProvider) []string {
+	if c, ok := provider.(interface{ GetReasoningLevels() []string }); ok {
+		return c.GetReasoningLevels()
+	}
+	return DefaultReasoningLevels
+}
+
+// ReasoningEffortAllowedOn reports whether effort is in provider's vocabulary.
+func ReasoningEffortAllowedOn(provider LLMProvider, effort string) bool {
+	if c, ok := provider.(interface{ ReasoningEffortAllowed(string) bool }); ok {
+		return c.ReasoningEffortAllowed(effort)
+	}
+	_, ok := NormalizeReasoningEffortIn(effort, nil)
+	return ok
 }
 
 // SetReasoningEffort changes reasoning effort when the provider supports it.

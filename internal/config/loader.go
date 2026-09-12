@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 )
 
 // LoadConfig loads config from <homeDir>/config.json if present, then applies any environment variable overrides on top.
@@ -46,6 +47,12 @@ func applyEnvOverrides(cfg *Config) {
 		}
 		cfg.Providers.OpenAI.ReasoningEffort = v
 	}
+	if v := os.Getenv("GINO_REASONING_LEVELS"); v != "" {
+		if cfg.Providers.OpenAI == nil {
+			cfg.Providers.OpenAI = &ProviderConfig{}
+		}
+		cfg.Providers.OpenAI.ReasoningLevels = parseLevelsEnv(v)
+	}
 	if v := os.Getenv("GINO_MAX_TOKENS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			cfg.Agents.Defaults.MaxTokens = n
@@ -78,4 +85,16 @@ func applyEnvOverrides(cfg *Config) {
 			cfg.Channels.Discord.ThreadCooldownS = &n
 		}
 	}
+}
+
+// parseLevelsEnv splits a comma-separated reasoning-levels env value into a
+// cleaned slice. Empty entries are dropped; an entirely-empty value yields nil.
+func parseLevelsEnv(v string) []string {
+	var out []string
+	for _, part := range strings.Split(v, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }

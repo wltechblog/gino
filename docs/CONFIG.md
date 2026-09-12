@@ -66,6 +66,7 @@ Agent behavior settings.
 |-------|------|---------|-------------|
 | `workspace` | string | `~/.gino/workspace` | Path to the agent's workspace directory. Contains bootstrap files, memory, and skills. |
 | `model` | string | `stub-model` | Default LLM model to use. Set to a real model like `google/gemini-2.5-flash`. Can be overridden with the `-M` flag. |
+| `reasoningEffort` | string | *(none)* | Reasoning effort sent as `reasoning_effort`. Validated against the provider's `reasoningLevels` (provider config takes precedence). |
 | `maxTokens` | int | `8192` | Maximum tokens for LLM responses. |
 | `temperature` | float | `0.7` | LLM temperature (0.0 = deterministic, 1.0 = creative). |
 | `maxToolIterations` | int | `100` | Maximum number of tool-calling iterations per request. Prevents infinite loops. |
@@ -131,6 +132,8 @@ Connect to any OpenAI-compatible API service (OpenAI, OpenRouter, z.ai, Ollama, 
 |-------|------|---------|-------------|
 | `apiKey` | string | *(required)* | Your API key. Get OpenRouter keys at https://openrouter.ai/keys |
 | `apiBase` | string | `https://openrouter.ai/api/v1` | API base URL. See examples below. |
+| `reasoningEffort` | string | *(none)* | Value sent as the `reasoning_effort` request parameter for reasoning models. Must be in `reasoningLevels`. |
+| `reasoningLevels` | string[] | `["none","minimal","low","medium","high"]` | Allowed vocabulary for `reasoningEffort`. Levels vary by model family — set this to match your model (e.g. gpt-5: `["minimal","low","medium","high"]`). Invalid values are rejected, never remapped. |
 
 **Common API base URLs:**
 
@@ -151,6 +154,34 @@ Connect to any OpenAI-compatible API service (OpenAI, OpenRouter, z.ai, Ollama, 
   }
 }
 ```
+
+**Reasoning models** — the `reasoning_effort` parameter:
+
+```json
+{
+  "providers": {
+    "openai": {
+      "apiKey": "sk-or-v1-your-key-here",
+      "apiBase": "https://openrouter.ai/api/v1",
+      "reasoningEffort": "high",
+      "reasoningLevels": ["none", "minimal", "low", "medium", "high"]
+    }
+  }
+}
+```
+
+`reasoningLevels` is the validation vocabulary — levels are **not consistent between model families**, so the operator declares what the target model actually accepts:
+
+| Model family | reasoningLevels |
+|--------------|-----------------|
+| OpenAI o-series | `["low","medium","high"]` |
+| OpenAI gpt-5 | `["minimal","low","medium","high"]` |
+| GLM (z.ai) | `["none","low","medium","high"]` |
+| Ollama thinking models | `["none"]` (`none` disables thinking) |
+
+`agents.defaults.reasoningEffort` applies the same parameter at the agent level (provider config wins; validated against the provider's `reasoningLevels`). Runtime: `gino chat -R <level>`, `gino agent -R <level>`, `/reasoning <level>` in the TUI. Env: `GINO_REASONING_EFFORT` + `GINO_REASONING_LEVELS` (comma-separated).
+
+Each fallback entry also accepts `reasoningEffort` + its own `reasoningLevels` — the fallback chain may target a different model family than the primary, so vocabularies are per-provider.
 
 ### Provider Fallback
 

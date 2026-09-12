@@ -98,6 +98,24 @@ func (f *FallbackProvider) SetAnalytics(v bool) {
 	}
 }
 
+// GetReasoningLevels returns the primary provider's effective vocabulary.
+func (f *FallbackProvider) GetReasoningLevels() []string {
+	if c, ok := f.primary.(interface{ GetReasoningLevels() []string }); ok {
+		return c.GetReasoningLevels()
+	}
+	return DefaultReasoningLevels
+}
+
+// ReasoningEffortAllowed reports whether effort is allowed by the primary
+// provider's vocabulary. Used for runtime validation on the FallbackProvider.
+func (f *FallbackProvider) ReasoningEffortAllowed(effort string) bool {
+	if c, ok := f.primary.(interface{ ReasoningEffortAllowed(string) bool }); ok {
+		return c.ReasoningEffortAllowed(effort)
+	}
+	_, ok := NormalizeReasoningEffortIn(effort, nil)
+	return ok
+}
+
 // GetReasoningEffort reports the primary provider's current reasoning setting.
 func (f *FallbackProvider) GetReasoningEffort() string {
 	effort, _ := GetReasoningEffort(f.primary)
