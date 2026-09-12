@@ -176,8 +176,12 @@ Connect to any OpenAI-compatible API service (OpenAI, OpenRouter, z.ai, Ollama, 
 |--------------|-----------------|
 | OpenAI o-series | `["low","medium","high"]` |
 | OpenAI gpt-5 | `["minimal","low","medium","high"]` |
-| GLM (z.ai) | `["none","low","medium","high"]` |
+| GLM-5.3 / 5.3-FLASH (z.ai) | `["low","high","max"]` — only these three; anything else is a hard API error. `max` is the default |
+| GLM-5.2 (z.ai) | `["none","minimal","low","medium","high","xhigh","max"]` — server remaps `low`/`medium`→`high`, `xhigh`→`max`; `none`/`minimal` stop thinking |
+| GLM-5.1 and older | `["none"]` — no `reasoning_effort` support; control via `thinking.type` |
 | Ollama thinking models | `["none"]` (`none` disables thinking) |
+
+Note: z.ai's **Coding Plan** endpoint (`/api/coding/paas/v4`) is the exception — it accepts the broad vocabulary (`none`…`max`) and remaps server-side per model (`none`/`minimal`/`low`→`low`, `medium`/`high`→`high`, `xhigh`/`max`→`max` on GLM-5.3). The direct API endpoint (`/api/paas/v4`) does **not** — it hard-errors on out-of-vocabulary values.
 
 `agents.defaults.reasoningEffort` applies the same parameter at the agent level (provider config wins; validated against the provider's `reasoningLevels`). Runtime: `gino chat -R <level>`, `gino agent -R <level>`, `/reasoning <level>` in the TUI. Env: `GINO_REASONING_EFFORT` + `GINO_REASONING_LEVELS` (comma-separated).
 
