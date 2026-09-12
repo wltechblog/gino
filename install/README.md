@@ -46,7 +46,14 @@ your keyboard.
    provider credentials they're stored as a `providers.presets` entry
    (`subagent-provider`) and wired into `spawn.agents`; if you reuse the same
    credentials only the model is overridden.
-3. **Channel** —
+3. **Memory brain** —
+   - *Advanced* (default): installs a local Ollama container (`gino-ollama`,
+     ~2 GB) for semantic-search embeddings. On devices with under 2 GB RAM a
+     warning is printed that local Ollama probably won't work suitably.
+   - *Basic*: skips Ollama entirely; the brain runs in keyword-only (FTS5)
+     mode — search still works, just without semantic ranking. It upgrades
+     automatically if an Ollama appears on the configured URL later.
+4. **Channel** —
    - *Telegram*: bot token + numeric `allowFrom` user ID (format-validated),
      installs a `gino-gateway` systemd service ordered after Ollama.
    - *TUI*: no credentials needed; run `gino chat` when installation finishes.
@@ -57,7 +64,9 @@ your keyboard.
 - `/opt/gino` — cloned source (build directory)
 - `/root/.gino/config.json` — generated config (existing configs are backed
   up, and overwrite requires confirmation)
-- `gino-ollama` container + systemd unit — brain
+- `gino-ollama` container + systemd unit — brain (advanced mode only)
+- `gino doctor` — post-install health check (binary, config, provider
+  reachability, brain tier, gateway service state)
 - `gino-gateway` systemd unit — Telegram gateway mode only
 
 ## Testing without side effects

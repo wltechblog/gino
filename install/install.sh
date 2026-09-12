@@ -11,7 +11,7 @@
 #   - Go toolchain (official tarball if system Go is too old)
 #   - podman + an Ollama container for brain embeddings (localhost only)
 #   - Gino, cloned from GitHub and built from source
-#   - config.json with sandbox.mode=yolo and the brain enabled
+#   - config.json with sandbox.mode=yolo and the brain enabled (advanced or basic)
 #   - Telegram gateway systemd service if Telegram is chosen; else TUI mode
 #
 # All prompts read from /dev/tty so the script works through `curl | bash`
@@ -184,69 +184,7 @@ mkdir -p "$BIN_DIR"
 [ -x "${BIN_DIR}/gino" ] || die "build produced no binary"
 log "installed ${BIN_DIR}/gino"
 
-# ── 5. Ollama container for the brain ───────────────────────────────────────
-ollama_up() { curl -sf "${OLLAMA_URL}/api/version" >/dev/null 2>&1; }
-
-write_ollama_unit() {
-    cat > "${UNIT_DIR}/gino-ollama.service" <<EOF
-[Unit]
-Description=Gino Ollama (brain embeddings)
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-ExecStart=/usr/bin/podman start -a ${OLLAMA_NAME}
-ExecStop=/usr/bin/podman stop -t 10 ${OLLAMA_NAME}
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-EOF
-}
-
-if [ "$TEST" != "1" ]; then
-    if ollama_up; then
-        warn "something already answers on ${OLLAMA_URL} — reusing it, skipping container setup"
-    else
-        mkdir -p "$OLLAMA_DATA"
-        if ! podman container exists "$OLLAMA_NAME"; then
-            log "creating Ollama container (localhost-only port)"
-            retry 3 "podman create" podman create \
-                --name "$OLLAMA_NAME" \
-                -v "${OLLAMA_DATA}:/root/.ollama:Z" \
-                -p 127.0.0.1:11434:11434 \
-                "$OLLAMA_IMAGE" >&2
-        else
-            log "Ollama container '$OLLAMA_NAME' already exists — reusing"
-        fi
-
-        log "pulling Ollama image (may take a while)"
-        retry 3 "podman pull" podman pull "$OLLAMA_IMAGE" >&2
-
-        if command -v systemctl >/dev/null 2>&1; then
-            write_ollama_unit
-            systemctl daemon-reload
-            log "starting gino-ollama service"
-            systemctl enable --now gino-ollama >/dev/null 2>&1 || systemctl restart gino-ollama
-        else
-            warn "systemd not available — starting container directly (no boot persistence)"
-            podman start "$OLLAMA_NAME" >&2
-        fi
-
-        log "waiting for Ollama API"
-        waited=0
-        until ollama_up; do
-            sleep 2; waited=$((waited + 2))
-            [ "$waited" -ge 120 ] && die "Ollama did not come up within 120s — check: podman logs $OLLAMA_NAME"
-        done
-
-        log "pulling embedding model '${EMBED_MODEL}'"
-        retry 3 "model pull" podman exec "$OLLAMA_NAME" ollama pull "$EMBED_MODEL" >&2
-    fi
-fi
-
-# ── 6. questions (all via /dev/tty) ─────────────────────────────────────────
+# ── 5. questions (all via /dev/tty) ─────────────────────────────────────────
 printf '\n' >&3
 printf '\033[1m── Provider ──────────────────────────────────────\033[0m\n' >&3
 
@@ -343,6 +281,23 @@ if [ "$REPLY" = "y" ]; then
     fi
 fi
 
+# memory brain (advanced vs basic)
+BRAIN_ADVANCED="true"
+printf '\n' >&3
+printf '\033[1m── Memory brain ──────────────────────────────────\033[0m\n' >&3
+# low-RAM heads-up: local Ollama does not work suitably on small devices
+MEM_KB="$(awk '/^MemTotal:/{print $2; exit}' /proc/meminfo 2>/dev/null || true)"
+if [ -n "$MEM_KB" ] && [ "$MEM_KB" -gt 0 ] && [ "$MEM_KB" -lt $((2 * 1024 * 1024)) ]; then
+    warn "this device has ~$((MEM_KB / 1024)) MB RAM — local Ollama probably won't work suitably here; the basic brain is recommended"
+fi
+ask "Install local Ollama for the advanced memory brain? (yes = advanced brain, no = basic brain)" "Y"
+yes_no "$REPLY"
+BRAIN_ADVANCED="$REPLY"
+[ "$BRAIN_ADVANCED" = "y" ] && BRAIN_ADVANCED="true" || BRAIN_ADVANCED="false"
+if [ "$BRAIN_ADVANCED" = "false" ]; then
+    log "basic brain selected — keyword search only, no Ollama container"
+fi
+
 # telegram
 TG_ENABLED="false"; TG_TOKEN=""; TG_FROM=""
 printf '\n' >&3
@@ -359,6 +314,80 @@ if [ "$REPLY" = "y" ]; then
         if printf '%s' "$TG_FROM" | grep -Eq '^-?[0-9]+$'; then break; fi
         printf '  must be numeric (e.g. 8113382039; groups may be negative)\n' >&3
     done
+fi
+
+# ── 6. Ollama container (advanced brain / Ollama-LLM only) ─────────────────
+ollama_up() { curl -sf "${OLLAMA_URL}/api/version" >/dev/null 2>&1; }
+
+write_ollama_unit() {
+    cat > "${UNIT_DIR}/gino-ollama.service" <<EOF
+[Unit]
+Description=Gino Ollama (brain embeddings)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/podman start -a ${OLLAMA_NAME}
+ExecStop=/usr/bin/podman stop -t 10 ${OLLAMA_NAME}
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+OLLAMA_MODE="none"   # none | existing | installed
+if [ "$TEST" != "1" ]; then
+    if [ "$BRAIN_ADVANCED" = "false" ] && [ "$PROVIDER_CHOICE" != "5" ]; then
+        if ollama_up; then
+            log "note: an existing server answers on ${OLLAMA_URL} — the brain will use it automatically if reachable at runtime"
+        fi
+    elif ollama_up; then
+        log "something already answers on ${OLLAMA_URL} — reusing it for the brain, skipping container setup"
+        OLLAMA_MODE="existing"
+    elif [ "$PROVIDER_CHOICE" = "5" ]; then
+        # Ollama selected as the LLM provider: the container is required
+        log "Ollama LLM mode requires the local container — installing it"
+        BRAIN_ADVANCED="true"
+    fi
+    if [ "$BRAIN_ADVANCED" = "true" ] && [ "$OLLAMA_MODE" != "existing" ]; then
+        mkdir -p "$OLLAMA_DATA"
+        if ! podman container exists "$OLLAMA_NAME"; then
+            log "creating Ollama container (localhost-only port)"
+            retry 3 "podman create" podman create \
+                --name "$OLLAMA_NAME" \
+                -v "${OLLAMA_DATA}:/root/.ollama:Z" \
+                -p 127.0.0.1:11434:11434 \
+                "$OLLAMA_IMAGE" >&2
+        else
+            log "Ollama container '$OLLAMA_NAME' already exists — reusing"
+        fi
+
+        log "pulling Ollama image (may take a while)"
+        retry 3 "podman pull" podman pull "$OLLAMA_IMAGE" >&2
+
+        if command -v systemctl >/dev/null 2>&1; then
+            write_ollama_unit
+            systemctl daemon-reload
+            log "starting gino-ollama service"
+            systemctl enable --now gino-ollama >/dev/null 2>&1 || systemctl restart gino-ollama
+        else
+            warn "systemd not available — starting container directly (no boot persistence)"
+            podman start "$OLLAMA_NAME" >&2
+        fi
+
+        log "waiting for Ollama API"
+        waited=0
+        until ollama_up; do
+            sleep 2; waited=$((waited + 2))
+            [ "$waited" -ge 120 ] && die "Ollama did not come up within 120s — check: podman logs $OLLAMA_NAME"
+        done
+
+        log "pulling embedding model '${EMBED_MODEL}'"
+        retry 3 "model pull" podman exec "$OLLAMA_NAME" ollama pull "$EMBED_MODEL" >&2
+        OLLAMA_MODE="installed"
+    fi
 fi
 
 # ── 7. config.json ──────────────────────────────────────────────────────────
@@ -382,6 +411,15 @@ fi
 
 if [ "${CONFIG_ACTION:-new}" != "kept" ]; then
     log "writing $CONFIG"
+
+    # brain fragment: advanced mode points at local Ollama; basic mode omits
+    # the URL so the runtime degrades to keyword search (and auto-upgrades
+    # if Ollama appears later)
+    BRAIN_CFG_EXTRA=""
+    if [ "$BRAIN_ADVANCED" = "true" ]; then
+        BRAIN_CFG_EXTRA=",
+        \"ollamaBaseURL\": \"${OLLAMA_URL}\""
+    fi
 
     # reasoning vocabulary fragment (empty = omit reasoningLevels)
     PROVIDER_EXTRA=""
@@ -469,8 +507,7 @@ ${TELEGRAM_JSON}
     "brain": {
         "enabled": true,
         "embeddingModel": "${EMBED_MODEL}",
-        "embeddingDims": 768,
-        "ollamaBaseURL": "${OLLAMA_URL}"
+        "embeddingDims": 768${BRAIN_CFG_EXTRA}
     }
 }
 EOF
@@ -494,12 +531,15 @@ fi
 # ── 8. gateway service (Telegram mode) ──────────────────────────────────────
 if [ "$TEST" != "1" ] && [ "$TG_ENABLED" = "true" ]; then
     log "installing gino-gateway systemd service"
+    GATEWAY_OLLAMA_DEPS=""
+    if [ "$OLLAMA_MODE" = "installed" ] || [ "$OLLAMA_MODE" = "existing" ]; then
+        GATEWAY_OLLAMA_DEPS=" gino-ollama.service"
+    fi
     cat > "${UNIT_DIR}/gino-gateway.service" <<EOF
 [Unit]
 Description=Gino gateway (Telegram)
-After=network-online.target gino-ollama.service
-Wants=network-online.target
-Wants=gino-ollama.service
+After=network-online.target
+Wants=network-online.target${GATEWAY_OLLAMA_DEPS}
 
 [Service]
 ExecStart=${BIN_DIR}/gino gateway
@@ -524,7 +564,11 @@ printf '\033[1m── Install complete ─────────────�
     printf '  repo       : %s\n' "$REPO_DIR"
     printf '  config     : %s (%s)\n' "$CONFIG" "${CONFIG_ACTION:-new}"
     printf '  sandbox    : yolo\n'
-    printf '  brain      : enabled (%s @ %s)\n' "$EMBED_MODEL" "$OLLAMA_URL"
+    if [ "$BRAIN_ADVANCED" = "true" ]; then
+        printf '  brain      : advanced (%s @ %s)\n' "$EMBED_MODEL" "$OLLAMA_URL"
+    else
+        printf '  brain      : basic (keyword search, no Ollama)\n'
+    fi
     if [ "$TG_ENABLED" = "true" ]; then
         printf '  channel    : Telegram (gateway service running)\n'
         printf '\n  logs       : journalctl -u gino-gateway -f\n'
@@ -532,6 +576,7 @@ printf '\033[1m── Install complete ─────────────�
         printf '  channel    : TUI\n'
         printf '\n  start      : gino chat\n'
     fi
+    printf '\n  verify     : gino doctor\n'
     if [ "$TEST" = "1" ]; then printf '  mode       : TEST (packages/podman/systemd skipped)\n'; fi
 } >&3
 printf '\n' >&3

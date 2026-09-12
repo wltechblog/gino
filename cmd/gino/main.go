@@ -59,6 +59,7 @@ func usage() {
 	fmt.Fprintf(os.Stderr, "Commands:\n")
 	fmt.Fprintf(os.Stderr, "  version          Print version\n")
 	fmt.Fprintf(os.Stderr, "  onboard          Create default config and workspace\n")
+	fmt.Fprintf(os.Stderr, "  doctor           Post-install health check\n")
 	fmt.Fprintf(os.Stderr, "  channels login   Interactively connect a channel\n")
 	fmt.Fprintf(os.Stderr, "  agent            Run a single-shot agent query\n")
 	fmt.Fprintf(os.Stderr, "  chat             Start interactive TUI chat session\n")
@@ -105,6 +106,9 @@ func main() {
 
 	case "onboard":
 		runOnboard(homeFlag)
+
+	case "doctor":
+		runDoctor(homeFlag)
 
 	case "channels":
 		if len(rest) == 0 {
