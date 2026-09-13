@@ -1,9 +1,7 @@
 package tui
 
 import (
-	"bytes"
 	"context"
-	"io"
 	"strings"
 	"testing"
 	"time"
@@ -44,58 +42,48 @@ func (p *blockingProvider) GetModelContext(ctx context.Context, model string) (i
 
 func TestStartRuntimeConsumesInboundMessages(t *testing.T) {
 	ws := t.TempDir()
+	buf := &syncBuffer{}
 	s := New(config.Config{}, providers.NewStubProvider(), ws, ws)
-	s.out = io.Discard
+	s.out = buf
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	cliOut := s.startRuntime(ctx)
+	s.startRuntime(ctx)
 	defer s.agent.Close()
 
-	s.hub.In <- chat.Inbound{
-		Channel:   "cli",
-		SenderID:  "tui-user",
-		ChatID:    s.chatID,
-		Content:   "hello from tui test",
-		Timestamp: time.Now(),
+	done := make(chan struct{})
+	go func() {
+		s.sendMessage(ctx, "hello from tui test")
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("agent loop did not consume the inbound TUI message")
 	}
 
-	deadline := time.After(2 * time.Second)
-	for {
-		select {
-		case out, ok := <-cliOut:
-			if !ok {
-				t.Fatal("cli subscriber closed before a response arrived")
-			}
-			if isActivityNotification(out) {
-				continue
-			}
-			if !strings.Contains(out.Content, "hello from tui test") {
-				t.Fatalf("unexpected response %q", out.Content)
-			}
-			return
-		case <-deadline:
-			t.Fatal("agent loop did not consume the inbound TUI message")
-		}
+	if !strings.Contains(buf.String(), "hello from tui test") {
+		t.Fatalf("expected stub echo in TUI output, got %q", buf.String())
 	}
 }
 
 func TestSendMessageReceivesStubResponse(t *testing.T) {
 	ws := t.TempDir()
-	var buf bytes.Buffer
+	buf := &syncBuffer{}
 	s := New(config.Config{}, providers.NewStubProvider(), ws, ws)
-	s.out = &buf
+	s.out = buf
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	cliOut := s.startRuntime(ctx)
+	s.startRuntime(ctx)
 	defer s.agent.Close()
 
 	done := make(chan struct{})
 	go func() {
-		s.sendMessage(ctx, cliOut, "direct tui works")
+		s.sendMessage(ctx, "direct tui works")
 		close(done)
 	}()
 
@@ -113,20 +101,20 @@ func TestSendMessageReceivesStubResponse(t *testing.T) {
 func TestSendMessageTimeoutCancelsActiveTurn(t *testing.T) {
 	ws := t.TempDir()
 	p := newBlockingProvider()
-	var buf bytes.Buffer
+	buf := &syncBuffer{}
 	s := New(config.Config{}, p, ws, ws)
-	s.out = &buf
+	s.out = buf
 	s.responseWait = 400 * time.Millisecond
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	cliOut := s.startRuntime(ctx)
+	s.startRuntime(ctx)
 	defer s.agent.Close()
 
 	done := make(chan struct{})
 	go func() {
-		s.sendMessage(ctx, cliOut, "please hang")
+		s.sendMessage(ctx, "please hang")
 		close(done)
 	}()
 

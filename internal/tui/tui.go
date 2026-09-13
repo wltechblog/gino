@@ -448,6 +448,10 @@ type ChatSession struct {
 	// responseWait is how long sendMessage waits for a reply before cancelling
 	// the active turn. Zero means the default of fifteen minutes.
 	responseWait time.Duration
+
+	// turnSink receives cliOut traffic while a turn is active. When nil, the
+	// pump prints arrivals immediately (idle display) instead. Guarded by mu.
+	turnSink chan chat.Outbound
 }
 
 // defaultResponseWait is the fallback wait for a final reply. Agentic turns
@@ -512,6 +516,68 @@ func (s *ChatSession) writeAbove(text string) {
 	}
 }
 
+// pumpCliOut owns the "cli" subscriber stream for the whole session. Every
+// outbound message is either forwarded to the active turn's sink (so the
+// prompt wait sees it) or — when no turn is active — printed immediately
+// above the input line. This is what makes background-origin replies (signal
+// triggers, background jobs, async spawns, cron) visible in chat mode without
+// the user having to send another message first.
+func (s *ChatSession) pumpCliOut(ctx context.Context, cliOut <-chan chat.Outbound) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case out, ok := <-cliOut:
+			if !ok {
+				return
+			}
+			if sink := s.getTurnSink(); sink != nil {
+				select {
+				case sink <- out:
+					continue
+				default:
+					// Turn not keeping up; fall through to idle display so
+					// the pump can never stall.
+				}
+			}
+			s.printIdleArrival(out)
+		}
+	}
+}
+
+func (s *ChatSession) getTurnSink() chan chat.Outbound {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.turnSink
+}
+
+func (s *ChatSession) setTurnSink(ch chan chat.Outbound) {
+	s.mu.Lock()
+	s.turnSink = ch
+	s.mu.Unlock()
+}
+
+// printIdleArrival renders an agent message that arrived outside an active
+// prompt wait. Printed above the input line so in-progress typing survives.
+func (s *ChatSession) printIdleArrival(out chat.Outbound) {
+	if isActivityNotification(out) {
+		s.writeAbove(fmt.Sprintf("%s%s%s\n", dim, out.Content, reset))
+		return
+	}
+	s.writeAbove(fmt.Sprintf("%s📢 %s%s\n\n", cyan, out.Content, reset))
+}
+
+// isSignalReply reports whether an outbound message is the final reply of a
+// signal-originated turn (tagged by the agent loop), as opposed to the answer
+// to the user's current prompt.
+func isSignalReply(out chat.Outbound) bool {
+	if out.Metadata == nil {
+		return false
+	}
+	b, ok := out.Metadata["signal"].(bool)
+	return ok && b
+}
+
 // startStdinReader launches a single goroutine that owns os.Stdin and
 // feeds raw bytes into the rawBytes channel. This ensures only one
 // goroutine ever reads from stdin.
@@ -538,7 +604,7 @@ func (s *ChatSession) startStdinReader(ctx context.Context) {
 // startRuntime constructs the hub and agent loop, then starts both the
 // outbound router and AgentLoop.Run. Messages written to hub.In are not
 // processed until this returns.
-func (s *ChatSession) startRuntime(ctx context.Context) <-chan chat.Outbound {
+func (s *ChatSession) startRuntime(ctx context.Context) {
 	s.hub = chat.NewHub(100)
 
 	maxIter := s.cfg.Agents.Defaults.MaxToolIterations
@@ -572,7 +638,7 @@ func (s *ChatSession) startRuntime(ctx context.Context) <-chan chat.Outbound {
 	cliOut := s.hub.Subscribe("cli")
 	s.hub.StartRouter(ctx)
 	go s.agent.Run(ctx)
-	return cliOut
+	go s.pumpCliOut(ctx, cliOut)
 }
 
 // Run starts the interactive chat loop.
@@ -580,7 +646,7 @@ func (s *ChatSession) Run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	cliOut := s.startRuntime(ctx)
+	s.startRuntime(ctx)
 	defer s.agent.Close()
 
 	s.herdr.report("idle", "ready")
@@ -640,7 +706,7 @@ func (s *ChatSession) Run(ctx context.Context) error {
 		}
 
 		// Send message to agent and wait for response.
-		s.sendMessage(ctx, cliOut, line)
+		s.sendMessage(ctx, line)
 		// Re-render the input prompt after the turn completes.
 		s.mu.Lock()
 		s.rl.render()
@@ -652,7 +718,7 @@ func (s *ChatSession) Run(ctx context.Context) error {
 
 // sendMessage sends a message to the agent loop and waits for the response.
 // During the wait, it reads from the shared rawBytes channel to detect /stop.
-func (s *ChatSession) sendMessage(ctx context.Context, cliOut <-chan chat.Outbound, text string) {
+func (s *ChatSession) sendMessage(ctx context.Context, text string) {
 	msg := chat.Inbound{
 		Channel:   "cli",
 		SenderID:  "tui-user",
@@ -663,15 +729,41 @@ func (s *ChatSession) sendMessage(ctx context.Context, cliOut <-chan chat.Outbou
 
 	s.herdr.report("working", "thinking")
 
+	// Claim the cliOut stream for this turn BEFORE injecting the message:
+	// while the sink is set, the pump forwards every arrival into the wait
+	// loop below. Arrivals outside a turn (signal replies, background job
+	// reports, async spawn results, cron reminders) are printed immediately
+	// by the pump instead of sitting in the channel until the next prompt
+	// misreads them as its answer.
+	sink := make(chan chat.Outbound, 16)
+	s.setTurnSink(sink)
+	defer func() {
+		s.setTurnSink(nil)
+		// Survivors (arrivals that landed after the wait loop exited) are
+		// displayed rather than lost or leaked to a later prompt.
+		for {
+			select {
+			case out := <-sink:
+				s.printIdleArrival(out)
+			default:
+				return
+			}
+		}
+	}()
+
 	s.hub.In <- msg
 
-	// Mark busy.
+	// Mark busy (under mu — the pump goroutine reads busy via writeAbove).
 	waitCtx, waitCancel := context.WithCancel(context.Background())
+	s.mu.Lock()
 	s.busy = true
 	s.busyCancel = waitCancel
+	s.mu.Unlock()
 	defer func() {
+		s.mu.Lock()
 		s.busy = false
 		s.busyCancel = nil
+		s.mu.Unlock()
 		s.herdr.report("idle", "ready")
 	}()
 
@@ -709,20 +801,17 @@ func (s *ChatSession) sendMessage(ctx context.Context, cliOut <-chan chat.Outbou
 	abort := func() {
 		s.agent.StopTurn(s.sessionKey())
 		stopSpinner()
-		// Drain remaining messages.
-		drainTimer := time.NewTimer(2 * time.Second)
-	drainLoop:
+		// Release the turn stream and discard anything already forwarded —
+		// the user aborted; racing replies are dropped, not displayed.
+		s.setTurnSink(nil)
+	drainSink:
 		for {
 			select {
-			case out, ok := <-cliOut:
-				if !ok || !isActivityNotification(out) {
-					break drainLoop
-				}
-			case <-drainTimer.C:
-				break drainLoop
+			case <-sink:
+			default:
+				break drainSink
 			}
 		}
-		drainTimer.Stop()
 		s.writeAbove(fmt.Sprintf("%s✓ Interrupted.%s\n", yellow, reset))
 	}
 
@@ -739,7 +828,7 @@ func (s *ChatSession) sendMessage(ctx context.Context, cliOut <-chan chat.Outbou
 			// stopped flag (suppressing the queue), but a reply may already
 			// be sitting in cliOut from the instant before the stop landed;
 			// consume it so it cannot leak into the next prompt's wait loop.
-			awaitRacingReply(cliOut, 2*time.Second)
+			awaitRacingReply(sink, 2*time.Second)
 			return
 
 		case c, ok := <-s.rawBytes:
@@ -790,7 +879,7 @@ func (s *ChatSession) sendMessage(ctx context.Context, cliOut <-chan chat.Outbou
 				lineBuf = append(lineBuf, c)
 			}
 
-		case out, ok := <-cliOut:
+		case out, ok := <-sink:
 			if !ok {
 				stopSpinner()
 				return
@@ -800,6 +889,16 @@ func (s *ChatSession) sendMessage(ctx context.Context, cliOut <-chan chat.Outbou
 				stopSpinner()
 				s.writeAbove(fmt.Sprintf("%s%s%s\n", dim, out.Content, reset))
 				// Restart spinner.
+				stopSpinner = startSpinner()
+				continue
+			}
+
+			// Background-origin replies (signal triggers, job reports) ride
+			// the same stream while a turn is active. Show them, but never
+			// mistake one for the answer to this prompt.
+			if isSignalReply(out) {
+				stopSpinner()
+				s.writeAbove(fmt.Sprintf("%s📢 %s%s\n\n", cyan, out.Content, reset))
 				stopSpinner = startSpinner()
 				continue
 			}
@@ -816,7 +915,7 @@ func (s *ChatSession) sendMessage(ctx context.Context, cliOut <-chan chat.Outbou
 			// reply, but one may have been queued in the instant before the
 			// stop landed (turn finished normally, timer fired mid-queue) —
 			// deliver it instead of letting it leak to the next prompt.
-			if out, ok := awaitRacingReply(cliOut, 2*time.Second); ok {
+			if out, ok := awaitRacingReply(sink, 2*time.Second); ok {
 				s.writeAbove(fmt.Sprintf("%sgino%s ❯ %s\n\n", magenta+bold, reset, out.Content))
 				return
 			}

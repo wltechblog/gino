@@ -2685,6 +2685,11 @@ done:
 		}()
 	}
 
+	// Tag the reply's origin: signal turns (signal triggers, job reports,
+	// async spawns) answer a background trigger, not the user's prompt.
+	// Channel frontends use this to avoid misattributing the reply.
+	signalOrigin := isSignalMessage(msg)
+
 	// Suppress reply for silent signals unless the agent has something substantive to say.
 	// Silent signals (e.g., check_messages) process in the background but shouldn't
 	// spam the channel with "no new messages" acknowledgments. The agent's response
@@ -2733,6 +2738,16 @@ done:
 			out.Metadata = map[string]interface{}{}
 		}
 		out.Metadata["sender_id"] = msg.SenderID
+	}
+	// Tag signal-originated turns so channel frontends can distinguish a
+	// background reply (signal trigger, job report, async spawn) from the
+	// answer to the user's current prompt. The TUI uses this to avoid
+	// misattributing signal responses.
+	if signalOrigin {
+		if out.Metadata == nil {
+			out.Metadata = map[string]interface{}{}
+		}
+		out.Metadata["signal"] = true
 	}
 	// Suppress reply for stopped turns: the TUI's response timeout (or an
 	// explicit /stop) may fire while the final LLM call is in flight. The
