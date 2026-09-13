@@ -370,6 +370,17 @@ External trigger system. When enabled, Gino listens on a Unix domain socket for 
 | `defaultChannel` | string | `""` | Fallback channel for signals that don't specify one. |
 | `defaultChatID` | string | `""` | Fallback chat ID for signals that don't specify one. |
 
+### Signal routing
+
+When multiple sessions are live (e.g. several Discord threads), signals route by this priority:
+
+1. **Explicit** — `channel`/`chat_id` fields in the signal payload itself
+2. **Per-source binding** — the session that most recently called a tool on the originating MCP server; gino stamps `channel`/`chat_id` into every tools/call request's `_meta`, and records the binding after each successful MCP tool call (persisted in `~/.gino/signal_routes.json`, survives restarts)
+3. **Last known** — the channel/chatID of the most recent non-signal message
+4. **Config defaults** — `defaultChannel`/`defaultChatID`
+
+The per-source binding fixes multi-session misrouting: a trigger armed from thread A routes back to thread A even if thread B messaged more recently. Cooperating servers can echo the `_meta` origin in their signal payloads for exact routing (priority 1); without cooperation the binding (priority 2) applies.
+
 ### Signal actions
 
 User-defined actions that external sources can send. The key is the action name, the value describes the safe response template injected into the agent.

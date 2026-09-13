@@ -182,6 +182,24 @@ type Listener struct {
 	lastMu     sync.RWMutex
 	lastChan   string
 	lastChatID string
+
+	// Per-source routing bindings: MCP source name → (channel, chatID) of
+	// the session that most recently called a tool on that server. A session
+	// that arms a trigger via a tools/call does so on a specific server, so
+	// signals from that server should return to that session, not to
+	// whichever chat messaged most recently. Populated by the agent loop
+	// after successful MCP tool calls.
+	sourceMu      sync.RWMutex
+	sourceTargets map[string]sourceTarget
+
+	// persistPath, when set, survives source bindings across restarts.
+	persistPath string
+}
+
+// sourceTarget is one per-source routing binding.
+type sourceTarget struct {
+	Channel string `json:"channel"`
+	ChatID  string `json:"chat_id"`
 }
 
 // NewListener creates a new signal listener.
@@ -192,6 +210,7 @@ func NewListener(socketPath string, hub *chat.Hub, registry *Registry, defaultCh
 		registry:       registry,
 		defaultChannel: defaultChannel,
 		defaultChatID:  defaultChatID,
+		sourceTargets:  map[string]sourceTarget{},
 	}
 }
 
@@ -221,9 +240,94 @@ func (l *Listener) getLastTarget() (string, string) {
 	return l.lastChan, l.lastChatID
 }
 
+// BindSource records that the session at (channel, chatID) most recently
+// called a tool on the named MCP server. Signals originating from that
+// server route to this session before falling back to last-known/default.
+func (l *Listener) BindSource(source, channel, chatID string) {
+	if source == "" || channel == "" || chatID == "" {
+		return
+	}
+	l.sourceMu.Lock()
+	defer l.sourceMu.Unlock()
+	l.sourceTargets[source] = sourceTarget{Channel: channel, ChatID: chatID}
+	l.persistLocked()
+}
+
+// UnbindSource removes a source binding (e.g., when its MCP server is removed).
+func (l *Listener) UnbindSource(source string) {
+	l.sourceMu.Lock()
+	defer l.sourceMu.Unlock()
+	if _, ok := l.sourceTargets[source]; !ok {
+		return
+	}
+	delete(l.sourceTargets, source)
+	l.persistLocked()
+}
+
+// getSourceTarget returns the bound target for a source, if any.
+func (l *Listener) getSourceTarget(source string) (string, string, bool) {
+	l.sourceMu.RLock()
+	defer l.sourceMu.RUnlock()
+	t, ok := l.sourceTargets[source]
+	return t.Channel, t.ChatID, ok
+}
+
+// SetPersistencePath enables disk persistence for per-source routing
+// bindings at the given path (JSON, atomic write). Follows the same pattern
+// as cron_jobs.json / background_jobs.json.
+func (l *Listener) SetPersistencePath(path string) {
+	l.sourceMu.Lock()
+	defer l.sourceMu.Unlock()
+	// No immediate persist: at startup the in-memory map may be empty and
+	// must not clobber the file before loadBindings() reads it. Writes
+	// happen on mutation only.
+	l.persistPath = path
+}
+
+// persistLocked writes bindings to disk; caller must hold sourceMu.
+func (l *Listener) persistLocked() {
+	if l.persistPath == "" {
+		return
+	}
+	data, err := json.Marshal(l.sourceTargets)
+	if err != nil {
+		return
+	}
+	tmp := l.persistPath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return
+	}
+	_ = os.Rename(tmp, l.persistPath)
+}
+
+// loadBindings restores persisted bindings from disk. Called at startup.
+func (l *Listener) loadBindings() {
+	if l.persistPath == "" {
+		return
+	}
+	data, err := os.ReadFile(l.persistPath)
+	if err != nil {
+		return // missing file = fresh start
+	}
+	var m map[string]sourceTarget
+	if err := json.Unmarshal(data, &m); err != nil {
+		return // corrupt = fresh start
+	}
+	l.sourceMu.Lock()
+	defer l.sourceMu.Unlock()
+	for k, v := range m {
+		if k != "" && v.Channel != "" && v.ChatID != "" {
+			l.sourceTargets[k] = v
+		}
+	}
+}
+
 // Start begins listening for signals on the Unix domain socket.
 // It blocks until the context is cancelled.
 func (l *Listener) Start(ctx context.Context) error {
+	// Restore per-source routing bindings persisted by a previous run.
+	l.loadBindings()
+
 	l.mu.Lock()
 	// Ensure the directory exists
 	dir := filepath.Dir(l.socketPath)
@@ -328,10 +432,22 @@ func (l *Listener) handleConnection(conn net.Conn) {
 
 	// Resolve channel/chatID with full fallback chain:
 	// 1. Explicit values from signal
-	// 2. Last known real channel/chatID (from previous non-signal messages)
-	// 3. Config defaults (SignalConfig.DefaultChannel/DefaultChatID)
+	// 2. Per-source binding: the session that most recently called a tool
+	//    on the originating MCP server (the session that armed the trigger)
+	// 3. Last known real channel/chatID (from previous non-signal messages)
+	// 4. Config defaults (SignalConfig.DefaultChannel/DefaultChatID)
 	channel := sig.Channel
 	chatID := sig.ChatID
+	if channel == "" || chatID == "" {
+		if srcChan, srcID, ok := l.getSourceTarget(sig.Source); ok {
+			if channel == "" {
+				channel = srcChan
+			}
+			if chatID == "" {
+				chatID = srcID
+			}
+		}
+	}
 	if channel == "" || chatID == "" {
 		lastChan, lastID := l.getLastTarget()
 		if channel == "" {
@@ -370,7 +486,7 @@ func (l *Listener) handleConnection(conn net.Conn) {
 		Metadata: map[string]interface{}{
 			"signal_source": sig.Source,
 			"signal_action": sig.Action,
-			"signal_silent":  l.registry.IsSilent(sig.Action),
+			"signal_silent": l.registry.IsSilent(sig.Action),
 		},
 	}
 

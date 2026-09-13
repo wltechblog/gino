@@ -529,6 +529,8 @@ type AgentLoop struct {
 	analytics               bool                   // dump per-turn token usage as JSON
 	signalSocketPath        string                 // GINO_SIGNAL_SOCKET injected into MCP child processes
 	signalListener          SignalTargetRecorder   // optional: records last real channel for signal routing
+	directChannel           string                 // ProcessDirect origin channel for _meta stamping
+	directChatID            string                 // ProcessDirect origin chatID for _meta stamping
 	compactor               *compactor             // nil = use legacy trimTurnMessages
 	spTool                  *tools.SpawnTool       // subagent spawn tool (disabled until SetSpawnConfig)
 	sessComp                *sessionCompactor      // nil = session-history compaction disabled
@@ -622,10 +624,14 @@ type activeTurn struct {
 	resumeLastRes string
 }
 
-// SignalTargetRecorder is implemented by signal.Listener to record the last
-// real channel/chatID so that signal-triggered messages can be routed correctly.
+// SignalTargetRecorder is implemented by signal.Listener to record routing
+// targets for signal-triggered messages.
 type SignalTargetRecorder interface {
 	SetLastTarget(channel, chatID string)
+	// BindSource records that the session at (channel, chatID) most
+	// recently called a tool on the named MCP server, so signals from that
+	// server route back to that session.
+	BindSource(source, channel, chatID string)
 }
 
 func NewAgentLoop(b *chat.Hub, provider providers.LLMProvider, model string, maxIterations int, workspace string, scheduler *cron.Scheduler, mcpServers map[string]config.MCPServerConfig, allowedDirs []string, disableTools []string, brainCfg *config.BrainConfig, homeDir string, sandbox config.SandboxConfig, signalSocketPath string, maxTurnMessages int, maxToolResultChars int, compactionCfg *config.CompactionConfig, webCfg config.WebConfig, searchCfg config.SearchConfig, visionModel string) *AgentLoop {
@@ -947,6 +953,42 @@ func (a *AgentLoop) SetSignalSocketPath(path string) {
 // SetSignalListener sets the signal listener for recording last target.
 func (a *AgentLoop) SetSignalListener(l SignalTargetRecorder) {
 	a.signalListener = l
+}
+
+// SetDirectOrigin sets the channel/chatID used to stamp MCP _meta origin
+// for ProcessDirect turns (which have no inbound channel message).
+func (a *AgentLoop) SetDirectOrigin(channel, chatID string) {
+	a.mu.Lock()
+	a.directChannel = channel
+	a.directChatID = chatID
+	a.mu.Unlock()
+}
+
+// ctxWithOrigin stamps the turn's channel/chatID into the context so MCP
+// tools/call requests carry _meta origin. Cooperating servers echo this in
+// their signal payloads for exact routing; all clients honor the same
+// package-level context key.
+func (a *AgentLoop) ctxWithOrigin(ctx context.Context, channel, chatID string) context.Context {
+	if channel == "" || chatID == "" {
+		return ctx
+	}
+	return mcp.WithTurnOrigin(ctx, channel, chatID)
+}
+
+// recordSourceBinding notes that this session just called a tool on the
+// named MCP server. Called after every successful MCP tool call; signals
+// originating from that server route back to this session.
+func (a *AgentLoop) recordSourceBinding(toolName, channel, chatID string) {
+	if a.signalListener == nil || channel == "" || chatID == "" {
+		return
+	}
+	// Resolve the owning server via the registry rather than parsing the
+	// tool name — server names may themselves contain underscores.
+	mt, ok := a.tools.Get(toolName).(interface{ ServerName() string })
+	if !ok {
+		return
+	}
+	a.signalListener.BindSource(mt.ServerName(), channel, chatID)
 }
 
 // Close shuts down all MCP server connections and the brain.
@@ -2512,7 +2554,7 @@ func (a *AgentLoop) processTurn(ctx context.Context, at *activeTurn, sessionKey 
 				}
 
 				start := time.Now()
-				res, err := a.tools.Execute(ctx, tc.Name, tc.Arguments)
+				res, err := a.tools.Execute(a.ctxWithOrigin(ctx, msg.Channel, msg.ChatID), tc.Name, tc.Arguments)
 				elapsed := time.Since(start).Round(time.Millisecond)
 
 				if err != nil {
@@ -2525,6 +2567,7 @@ func (a *AgentLoop) processTurn(ctx context.Context, at *activeTurn, sessionKey 
 					}
 					res = "(tool error) " + err.Error()
 				} else {
+					a.recordSourceBinding(tc.Name, msg.Channel, msg.ChatID)
 					if a.enableToolCallMessages && !isGroup {
 						sendChannelNotification(a.hub, msg.Channel, msg.ChatID,
 							fmt.Sprintf("📢 %s done (%s)", tc.Name, elapsed), msg.Metadata)
@@ -2874,7 +2917,7 @@ func (a *AgentLoop) ProcessDirectWithSessionAndSystemPrompt(content string, time
 
 		messages = append(messages, providers.Message{Role: "assistant", Content: resp.Content, ToolCalls: resp.ToolCalls})
 		for _, tc := range resp.ToolCalls {
-			result, err := a.tools.Execute(ctx, tc.Name, tc.Arguments)
+			result, err := a.tools.Execute(a.ctxWithOrigin(ctx, a.directChannel, a.directChatID), tc.Name, tc.Arguments)
 			if err != nil {
 				result = "(tool error) " + err.Error()
 			}

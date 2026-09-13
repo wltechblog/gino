@@ -83,6 +83,12 @@ func (t *MCPTool) Name() string {
 	return fmt.Sprintf("mcp_%s_%s", t.serverName, t.tool.Name)
 }
 
+// ServerName returns the MCP server this tool belongs to. The agent loop
+// uses it to bind signal routing to the session that called the server.
+func (t *MCPTool) ServerName() string {
+	return t.serverName
+}
+
 func (t *MCPTool) Description() string {
 	desc := t.tool.Description
 	if desc == "" {

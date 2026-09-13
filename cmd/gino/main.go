@@ -492,6 +492,7 @@ func runGateway(homeFlag string, args []string) {
 		socketPath := cfg.Signal.GetSocketPath(homeDir, ws)
 		sigRegistry := picosignal.NewRegistry(cfg.Signal.Actions)
 		sigListener := picosignal.NewListener(socketPath, hub, sigRegistry, cfg.Signal.DefaultChannel, cfg.Signal.DefaultChatID)
+		sigListener.SetPersistencePath(filepath.Join(homeDir, "signal_routes.json"))
 		go func() {
 			if err := sigListener.Start(ctx); err != nil {
 				log.Printf("Signal: listener error: %v", err)

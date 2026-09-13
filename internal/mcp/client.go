@@ -167,12 +167,46 @@ func (c *Client) CallTool(ctx context.Context, toolName string, arguments map[st
 	return text, err
 }
 
+// originKey is the context key for turn origin (channel, chatID) stamped
+// into tools/call requests as _meta, so cooperating MCP servers can route
+// their signal events back to the session that armed them.
+type originKeyType struct{}
+
+var originKey originKeyType
+
+// TurnOrigin carries the channel/chatID a tools/call originates from.
+type TurnOrigin struct {
+	Channel string
+	ChatID  string
+}
+
+// WithTurnOrigin returns a context carrying the turn origin. The value is
+// per-context (per-turn), so concurrent sessions sharing one client cannot
+// race each other's origin stamps.
+func WithTurnOrigin(ctx context.Context, channel, chatID string) context.Context {
+	return context.WithValue(ctx, originKey, TurnOrigin{Channel: channel, ChatID: chatID})
+}
+
+// originFromContext extracts the turn origin, if any.
+func originFromContext(ctx context.Context) (TurnOrigin, bool) {
+	o, ok := ctx.Value(originKey).(TurnOrigin)
+	return o, ok
+}
+
 // CallToolWithImages invokes a tool and returns both the concatenated text
 // result and any image content blocks, base64-decoded and format-sniffed.
-func (c *Client) CallToolWithImages(_ context.Context, toolName string, arguments map[string]interface{}) (string, []ToolImage, error) {
+func (c *Client) CallToolWithImages(ctx context.Context, toolName string, arguments map[string]interface{}) (string, []ToolImage, error) {
 	params := map[string]interface{}{
 		"name":      toolName,
 		"arguments": arguments,
+	}
+	// Stamp turn origin into _meta when known. Per-turn context value:
+	// concurrent sessions sharing one client get their own origin.
+	if o, ok := originFromContext(ctx); ok && o.Channel != "" && o.ChatID != "" {
+		params["_meta"] = map[string]interface{}{
+			"channel": o.Channel,
+			"chat_id": o.ChatID,
+		}
 	}
 	result, err := c.request("tools/call", params)
 	if err != nil {
