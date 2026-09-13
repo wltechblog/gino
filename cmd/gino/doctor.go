@@ -301,6 +301,16 @@ func checkReasoning(checks *[]doctorCheck, cfg config.Config) {
 	}
 }
 
+// checkVision reports whether the vision analysis tool is configured.
+func checkVision(checks *[]doctorCheck, cfg config.Config) {
+	vm := cfg.Agents.Defaults.VisionModel
+	if vm == "" {
+		*checks = append(*checks, doctorCheck{"vision", statusSkip, "not configured — image analysis tool unavailable (set agents.defaults.visionModel)"})
+		return
+	}
+	*checks = append(*checks, doctorCheck{"vision", statusOK, fmt.Sprintf("vision model %q — image analysis tool active", vm)})
+}
+
 // runDoctor is the `gino doctor` subcommand: post-install health check that
 // verifies everything a working Gino needs, without spending tokens.
 func runDoctor(homeFlag string) {
@@ -317,6 +327,7 @@ func runDoctor(homeFlag string) {
 		checkWorkspace(&checks, homeDir, cfg)
 		checkProvider(&checks, cfg)
 		checkReasoning(&checks, cfg)
+		checkVision(&checks, cfg)
 		checkBrain(&checks, cfg)
 		checkService(&checks, cfg)
 	}

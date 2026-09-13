@@ -206,7 +206,7 @@ while :; do
     ask "Choice" "1"
     case "$REPLY" in
         1)  API_BASE="https://api.z.ai/api/coding/paas/v4"
-            MODEL="glm-5.2"; SUB_MODEL_DEFAULT="glm-4.5-air"
+            MODEL="glm-5.3-flash"; SUB_MODEL_DEFAULT="glm-5.3-flash"
             # coding endpoint accepts the broad vocabulary and remaps per model
             REASONING_LEVELS='["none", "minimal", "low", "medium", "high", "xhigh", "max"]'
             ;;
@@ -252,6 +252,21 @@ fi
 
 ask_required "Model name" "$MODEL"
 MODEL="$(json_sanitize "$REPLY")"
+
+# vision: if the chosen model accepts image input, offer it as the vision
+# model (agents.defaults.visionModel — powers the vision analysis tool).
+VISION_MODEL=""
+printf '\n' >&3
+ask "Does ${MODEL} support image input (vision)?" "N"
+yes_no "$REPLY"
+if [ "$REPLY" = "y" ]; then
+    ask "Configure it as the vision model for image analysis?" "Y"
+    yes_no "$REPLY"
+    if [ "$REPLY" = "y" ]; then
+        VISION_MODEL="$MODEL"
+        log "vision model: ${MODEL}"
+    fi
+fi
 
 # optional subagent
 SUB_ENABLED="false"; SUB_NAME=""; SUB_MODEL=""; SUB_USES_PRESET="false"
@@ -429,6 +444,11 @@ if [ "${CONFIG_ACTION:-new}" != "kept" ]; then
     fi
 
     # subagent JSON fragments
+    VISION_EXTRA=""
+    if [ -n "$VISION_MODEL" ]; then
+        VISION_EXTRA='
+            "visionModel": "'"${VISION_MODEL}"'",'
+    fi
     SPAWN_AGENTS_JSON="[]"
     PRESETS_JSON=""
     if [ "$SUB_ENABLED" = "true" ]; then
@@ -483,7 +503,7 @@ EOF
             "heartbeatIntervalS": 30,
             "requestTimeoutS": 300,
             "enableToolActivityIndicator": true,
-            "enableToolErrorMessages": true,
+            "enableToolErrorMessages": true,${VISION_EXTRA}
             "sandbox": {
                 "mode": "yolo"
             },
@@ -561,6 +581,7 @@ printf '\033[1m── Install complete ─────────────�
     printf '  binary     : %s/gino\n' "$BIN_DIR"
     printf '  provider   : %s\n' "$API_BASE"
     printf '  model      : %s\n' "$MODEL"
+    [ -n "$VISION_MODEL" ] && printf '  vision     : %s\n' "$VISION_MODEL"
     printf '  repo       : %s\n' "$REPO_DIR"
     printf '  config     : %s (%s)\n' "$CONFIG" "${CONFIG_ACTION:-new}"
     printf '  sandbox    : yolo\n'
