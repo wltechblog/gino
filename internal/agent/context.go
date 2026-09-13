@@ -225,6 +225,22 @@ Do NOT use: # headings, --- rulers, *-bullet-lists, --dash-lists, 1.-numbered-li
 		}
 	}
 
+	// Discord deep-link coordinates — guild_id/channel_id ride in metadata but
+	// never reached the prompt, so the model could not construct
+	// https://discord.com/channels/<guild>/<channel> thread links on its own.
+	if channel == "discord" && metadata != nil {
+		guildID, _ := metadata["guild_id"].(string)
+		chanID, _ := metadata["channel_id"].(string)
+		if guildID != "" {
+			if chanID == "" {
+				chanID = chatID
+			}
+			volatileParts = append(volatileParts, fmt.Sprintf(
+				"Discord context: this conversation is at https://discord.com/channels/%s/%s (guild %s, channel %s). Use this link when referencing the thread in replies, documents, or issue/PR text.",
+				guildID, chanID, guildID, chanID))
+		}
+	}
+
 	// Privilege level — if metadata marks the user as unprivileged, inject
 	// restrictions. This applies to Telegram group users and any other
 	// channel that sets privileged=false.
