@@ -520,6 +520,7 @@ type AgentLoop struct {
 	maxToolResultChars      int
 	running                 bool
 	mcpClients              []*mcp.Client
+	mcpMu                   sync.Mutex // guards mcpClients for signal-registry sweeps
 	mcpConfigs              map[string]config.MCPServerConfig
 	tokenStore              *mcp.TokenStore
 	enableToolActivity      bool
@@ -528,6 +529,7 @@ type AgentLoop struct {
 	verbose                 bool                   // dump final reply + stats as JSON
 	analytics               bool                   // dump per-turn token usage as JSON
 	signalSocketPath        string                 // GINO_SIGNAL_SOCKET injected into MCP child processes
+	signalRegistry          SignalRegistry         // optional: receives MCP self-declared signal actions
 	signalListener          SignalTargetRecorder   // optional: records last real channel for signal routing
 	directChannel           string                 // ProcessDirect origin channel for _meta stamping
 	directChatID            string                 // ProcessDirect origin chatID for _meta stamping
@@ -798,6 +800,8 @@ func NewAgentLoopWithProfileWorkspace(b *chat.Hub, provider providers.LLMProvide
 			register(tools.NewMCPTool(client, name, tool))
 		}
 		log.Printf("MCP server %q: registered %d tools", name, len(client.Tools()))
+		// Self-declared signal actions register when SetSignalRegistry
+		// wires the registry (post-construction) via its client sweep.
 	}
 
 	// Register MCP management tools (callback will be set after AgentLoop is created)
@@ -953,6 +957,42 @@ func (a *AgentLoop) SetSignalSocketPath(path string) {
 }
 
 // SetSignalListener sets the signal listener for recording last target.
+// SignalRegistry receives signal-action declarations from MCP servers.
+type SignalRegistry interface {
+	RegisterMCPDecls(source string, decls []mcp.SignalAction)
+	UnregisterMCP(source string)
+}
+
+// SetSignalRegistry wires the signal registry so MCP servers' self-declared
+// signal actions get registered. Sweeps already-connected clients (covers
+// main.go ordering where the loop constructs before the registry exists)
+// and registers every future AddMCPServer at connect time.
+func (a *AgentLoop) SetSignalRegistry(r SignalRegistry) {
+	a.signalRegistry = r
+	if r == nil {
+		return
+	}
+	a.mcpMu.Lock()
+	clients := append([]*mcp.Client(nil), a.mcpClients...)
+	a.mcpMu.Unlock()
+	for _, c := range clients {
+		if decls := c.Signals(); len(decls) > 0 {
+			r.RegisterMCPDecls(c.Name(), decls)
+		}
+	}
+}
+
+// registerClientSignals registers the signal actions declared by a single
+// MCP client (no-op when no registry is wired or the server declared none).
+func (a *AgentLoop) registerClientSignals(c *mcp.Client) {
+	if a.signalRegistry == nil || c == nil {
+		return
+	}
+	if decls := c.Signals(); len(decls) > 0 {
+		a.signalRegistry.RegisterMCPDecls(c.Name(), decls)
+	}
+}
+
 func (a *AgentLoop) SetSignalListener(l SignalTargetRecorder) {
 	a.signalListener = l
 }
@@ -1595,6 +1635,7 @@ func (a *AgentLoop) restartMCPServer(serverName string) (string, error) {
 	}
 
 	// Replace in the clients slice
+	a.mcpMu.Lock()
 	newClients := make([]*mcp.Client, 0, len(a.mcpClients))
 	replaced := false
 	for _, c := range a.mcpClients {
@@ -1609,11 +1650,14 @@ func (a *AgentLoop) restartMCPServer(serverName string) (string, error) {
 		newClients = append(newClients, newClient)
 	}
 	a.mcpClients = newClients
+	a.mcpMu.Unlock()
 
 	// Register new tools
 	for _, t := range newClient.Tools() {
 		a.tools.Register(tools.NewMCPTool(newClient, serverName, t))
 	}
+	// Re-register self-declared signal actions from the fresh initialize.
+	a.registerClientSignals(newClient)
 
 	toolNames := make([]string, 0, len(newClient.Tools()))
 	for _, t := range newClient.Tools() {

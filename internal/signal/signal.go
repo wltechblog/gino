@@ -14,6 +14,7 @@ import (
 
 	"github.com/wltechblog/gino/internal/chat"
 	"github.com/wltechblog/gino/internal/config"
+	"github.com/wltechblog/gino/internal/mcp"
 )
 
 // Signal represents an external trigger received via Unix domain socket.
@@ -59,6 +60,10 @@ type registeredAction struct {
 	mcpAction string // the action name as declared by the MCP
 	response  string // response template
 	silent    bool   // suppress channel reply
+	// hasExplicitSilent distinguishes MCP declarations that carried an
+	// explicit silent flag from those that didn't (the latter default to
+	// silent so MCP wake-ups never spam the channel).
+	hasExplicitSilent bool
 }
 
 // NewRegistry creates a signal registry with user-defined actions from config.
@@ -82,7 +87,12 @@ func NewRegistry(userActions map[string]config.SignalActionConfig) *Registry {
 	return r
 }
 
-// RegisterMCP registers actions declared by an MCP server at startup.
+// SignalDeclaration is the rich form of an MCP server's signal action
+// declaration (type alias of mcp.SignalAction — signal imports mcp, mcp has
+// no internal imports, so no cycle).
+type SignalDeclaration = mcp.SignalAction
+
+// RegisterMCP registers plain action names for an MCP source (compat).
 func (r *Registry) RegisterMCP(source string, actions []string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -113,12 +123,76 @@ func (r *Registry) RegisterMCP(source string, actions []string) {
 	log.Printf("Signal: registered MCP source %q with %d actions: %s", source, len(actions), strings.Join(actions, ", "))
 }
 
-// IsAllowed checks if an action is registered (from user config or MCP).
-func (r *Registry) IsAllowed(action string) bool {
+// RegisterMCPDecls registers rich signal declarations from an MCP server
+// (captured from its initialize result). Re-registering a source replaces
+// its previous declarations. User-defined actions always take priority —
+// an MCP declaration that collides with a config action is skipped.
+func (r *Registry) RegisterMCPDecls(source string, decls []SignalDeclaration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	names := make([]string, 0, len(decls))
+	valid := decls[:0:0]
+	for _, d := range decls {
+		if d.Name == "" {
+			continue
+		}
+		valid = append(valid, d)
+		names = append(names, d.Name)
+	}
+
+	// Remove old registrations for this source
+	if oldActions, ok := r.mcpNames[source]; ok {
+		for _, a := range oldActions {
+			// Only remove if it was registered by this MCP source
+			if entry, exists := r.actions[a]; exists && entry.mcpSource == source {
+				delete(r.actions, a)
+			}
+		}
+	}
+
+	r.mcpNames[source] = names
+	for _, d := range valid {
+		// Don't overwrite user-defined actions
+		if entry, exists := r.actions[d.Name]; exists && entry.mcpSource == "" {
+			log.Printf("Signal: MCP action %q from %q skipped (user-defined action takes priority)", d.Name, source)
+			continue
+		}
+		resp := d.Response
+		if resp == "" {
+			resp = fmt.Sprintf("External signal from %s: action %s triggered", source, d.Name)
+		}
+		desc := d.Description
+		r.actions[d.Name] = &registeredAction{
+			mcpSource:         source,
+			mcpAction:         d.Name,
+			response:          resp,
+			silent:            d.Silent,
+			hasExplicitSilent: d.Silent,
+		}
+		if desc != "" {
+			log.Printf("Signal: registered %q from %q — %s", d.Name, source, desc)
+		}
+	}
+	if len(names) > 0 {
+		log.Printf("Signal: registered MCP source %q with %d actions: %s", source, len(names), strings.Join(names, ", "))
+	}
+}
+
+// IsAllowed checks if an action is registered (from user config or MCP)
+// AND, for MCP-declared actions, that the sender's source matches the
+// declaring server (server A cannot fire server B's action).
+func (r *Registry) IsAllowed(action, source string) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	_, ok := r.actions[action]
-	return ok
+	entry, ok := r.actions[action]
+	if !ok {
+		return false
+	}
+	if entry.mcpSource != "" && entry.mcpSource != source {
+		return false
+	}
+	return true
 }
 
 // GetResponse returns the response template for a given action.
@@ -132,6 +206,21 @@ func (r *Registry) GetResponse(action string) string {
 	return ""
 }
 
+// GetSilentResponse returns the silent flag for an action (MCP-declared
+// actions default to silent so they never spam the channel; config
+// actions use their explicit setting).
+func (r *Registry) GetSilentResponse(action string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if entry, ok := r.actions[action]; ok {
+		if entry.mcpSource != "" && !entry.hasExplicitSilent {
+			return true
+		}
+		return entry.silent
+	}
+	return false
+}
+
 // GetSource returns the MCP source for an action, or empty string if user-defined.
 func (r *Registry) GetSource(action string) string {
 	r.mu.RLock()
@@ -140,6 +229,22 @@ func (r *Registry) GetSource(action string) string {
 		return entry.mcpSource
 	}
 	return ""
+}
+
+// UnregisterMCP removes all declarations from an MCP source (server
+// disconnected or removed at runtime). User-defined actions untouched.
+func (r *Registry) UnregisterMCP(source string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if actions, ok := r.mcpNames[source]; ok {
+		for _, a := range actions {
+			if entry, exists := r.actions[a]; exists && entry.mcpSource == source {
+				delete(r.actions, a)
+			}
+		}
+		delete(r.mcpNames, source)
+		log.Printf("Signal: unregistered MCP source %q (%d actions)", source, len(actions))
+	}
 }
 
 // IsSilent reports whether a signal action should suppress channel replies.
@@ -447,7 +552,7 @@ func (l *Listener) handleConnection(conn net.Conn) {
 	}
 
 	// Validate action against registry
-	if !l.registry.IsAllowed(sig.Action) {
+	if !l.registry.IsAllowed(sig.Action, sig.Source) {
 		log.Printf("Signal: unknown action %q from source %q, rejecting", sig.Action, sig.Source)
 		conn.Write([]byte(fmt.Sprintf(`{"status":"error","error":"unknown action: %s"}`, sig.Action)))
 		return

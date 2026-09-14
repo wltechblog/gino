@@ -246,8 +246,11 @@ func TestMCPRegistration(t *testing.T) {
 	// Register an MCP source
 	registry.RegisterMCP("agentchat-mcp", []string{"check_messages", "new_mail"})
 
-	if !registry.IsAllowed("new_mail") {
-		t.Error("new_mail should be allowed after MCP registration")
+	if !registry.IsAllowed("new_mail", "agentchat-mcp") {
+		t.Error("new_mail should be allowed for its declaring source")
+	}
+	if registry.IsAllowed("new_mail", "other-server") {
+		t.Error("server B must not fire server A's MCP action")
 	}
 
 	// User-defined action still takes priority
@@ -266,16 +269,16 @@ func TestMCPRegistrationOverwrite(t *testing.T) {
 
 	// Register MCP source A
 	registry.RegisterMCP("source-a", []string{"task_done"})
-	if !registry.IsAllowed("task_done") {
+	if !registry.IsAllowed("task_done", "source-a") {
 		t.Error("task_done should be allowed")
 	}
 
 	// Re-register source A with different actions
 	registry.RegisterMCP("source-a", []string{"task_complete"})
-	if registry.IsAllowed("task_done") {
+	if registry.IsAllowed("task_done", "source-a") {
 		t.Error("task_done should be removed after re-registration")
 	}
-	if !registry.IsAllowed("task_complete") {
+	if !registry.IsAllowed("task_complete", "source-a") {
 		t.Error("task_complete should be allowed after re-registration")
 	}
 }

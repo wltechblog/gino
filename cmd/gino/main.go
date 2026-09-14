@@ -502,8 +502,9 @@ func runGateway(homeFlag string, args []string) {
 	// Binding first eliminates the startup race where the bridge's first
 	// dial hits a socket that does not exist yet.
 	var sigListener *picosignal.Listener
+	var sigRegistry *picosignal.Registry
 	if signalSocketPath != "" {
-		sigRegistry := picosignal.NewRegistry(cfg.Signal.Actions)
+		sigRegistry = picosignal.NewRegistry(cfg.Signal.Actions)
 		sigListener = picosignal.NewListener(signalSocketPath, hub, sigRegistry, cfg.Signal.DefaultChannel, cfg.Signal.DefaultChatID)
 		sigListener.SetPersistencePath(filepath.Join(homeDir, "signal_routes.json"))
 		if err := sigListener.Bind(); err != nil {
@@ -555,6 +556,9 @@ func runGateway(homeFlag string, args []string) {
 
 	// Accept connections on the socket bound before NewAgentLoop spawned
 	// any MCP children (early-bind eliminates the bridge startup race).
+	if sigRegistry != nil {
+		ag.SetSignalRegistry(sigRegistry)
+	}
 	if sigListener != nil {
 		go func() {
 			if err := sigListener.Serve(ctx); err != nil {

@@ -26,12 +26,34 @@ type Tool struct {
 	InputSchema map[string]interface{} `json:"inputSchema,omitempty"`
 }
 
+// SignalAction describes a signal action self-declared by an MCP server
+// in its initialize result. The host agent registers these so the server's
+// wake-up signals are accepted, routed, and rendered safely.
+type SignalAction struct {
+	// Name is the signal action name (e.g. "check_messages").
+	Name string `json:"name"`
+
+	// Description is a human-readable description of what the signal means.
+	Description string `json:"description,omitempty"`
+
+	// Response is the safe response template injected into the agent when
+	// the signal fires. Supports {{.Source}}, {{.Timestamp}}, {{.Action}},
+	// {{.Channel}}, {{.ChatID}}. When empty a generic default is used.
+	// The raw signal payload is never exposed to the agent.
+	Response string `json:"response,omitempty"`
+
+	// Silent suppresses the channel reply (agent still processes the signal).
+	Silent bool `json:"silent,omitempty"`
+}
+
 // Client connects to a single MCP server and exposes its tools.
 type Client struct {
 	name      string
 	transport transport
 	nextID    atomic.Int64
 	tools     []Tool
+	// signals holds self-declared signal actions from the initialize result.
+	signals []SignalAction
 	// oauth is non-nil when the HTTP transport has an OAuth manager.
 	oauth *oauthManager
 	// url is the server URL (set for HTTP transports, used for token storage).
@@ -367,7 +389,8 @@ func (c *Client) initialize() error {
 		},
 		"capabilities": map[string]interface{}{},
 	}
-	if _, err := c.request("initialize", params); err != nil {
+	result, err := c.request("initialize", params)
+	if err != nil {
 		// If this is a 401/403 and we have an OAuth manager, return ErrOAuthRequired
 		var oauthErr *oauthHTTPError
 		if errors.As(err, &oauthErr) && c.oauth != nil {
@@ -378,10 +401,52 @@ func (c *Client) initialize() error {
 		}
 		return fmt.Errorf("initialize: %w", err)
 	}
+	// Parse self-declared signal actions from the initialize result:
+	//   "signals": {"actions": [{"name": "...", "description": "...",
+	//                             "response": "...", "silent": false}]}
+	// Older servers that don't declare signals simply have no entry —
+	// parse errors are non-fatal (the server's tools still register).
+	var init struct {
+		Signals struct {
+			Actions []SignalAction `json:"actions"`
+		} `json:"signals"`
+	}
+	if len(result) > 0 {
+		if err := json.Unmarshal(result, &init); err != nil {
+			log.Printf("mcp %s: ignoring unparseable signals declaration: %v", c.name, err)
+		} else {
+			for _, sa := range init.Signals.Actions {
+				if strings.TrimSpace(sa.Name) == "" {
+					log.Printf("mcp %s: skipping signal declaration with empty name", c.name)
+					continue
+				}
+				c.signals = append(c.signals, sa)
+			}
+			if len(c.signals) > 0 {
+				log.Printf("mcp %s: declared %d signal action(s): %s", c.name, len(c.signals), c.signalNames())
+			}
+		}
+	}
 	// Send the required initialized notification (fire-and-forget).
 	notif := rpcRequest{JSONRPC: "2.0", Method: "notifications/initialized"}
 	b, _ := json.Marshal(notif)
 	return c.transport.notify(b)
+}
+
+// signalNames returns a comma-separated list of declared signal action names.
+func (c *Client) signalNames() string {
+	names := make([]string, 0, len(c.signals))
+	for _, sa := range c.signals {
+		names = append(names, sa.Name)
+	}
+	return strings.Join(names, ", ")
+}
+
+// Signals returns the signal actions self-declared by this server.
+func (c *Client) Signals() []SignalAction {
+	out := make([]SignalAction, len(c.signals))
+	copy(out, c.signals)
+	return out
 }
 
 func (c *Client) loadTools() error {
