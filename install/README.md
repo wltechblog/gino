@@ -83,7 +83,7 @@ GINO_INSTALL_TEST=1 bash install/install.sh
 
 with `GINO_INSTALL_{REPO_DIR,GINO_HOME,BIN_DIR,OLLAMA_DATA,UNIT_DIR}`
 environment overrides redirecting every write path. In test mode the script
-skips apt/podman/systemd entirely — it exercises the prompts and config
+skips apt/container/systemd setup entirely — it exercises the prompts and config
 generation against a scratch directory.
 
 ## Assumptions & caveats

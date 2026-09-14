@@ -125,12 +125,29 @@ log "Gino installer — root + yolo + brain profile"
 # container runtime detection: prefer podman, fall back to docker, else none
 # (skips the Ollama container gracefully rather than hard-faulting)
 CONTAINER_RT=""
+CRT_BIN=""
 detect_container_runtime() {
-    if command -v podman >/dev/null 2>&1; then
-        CONTAINER_RT="podman"
-    elif command -v docker >/dev/null 2>&1; then
-        CONTAINER_RT="docker"
+    # Candidate binary locations beyond sudo's secure_path (snap, /usr/local,
+    # docker-ce static installs) plus whatever `command -v` finds.
+    local cands
+    cands="$( { command -v podman docker 2>/dev/null || true; } ) /snap/bin/docker /snap/bin/podman /usr/local/bin/docker /usr/local/bin/podman /opt/docker/bin/docker /usr/bin/docker /usr/bin/podman"
+    for c in $cands; do
+        [ -x "$c" ] || continue
+        if "${c}" info >/dev/null 2>&1 || "${c}" version >/dev/null 2>&1; then
+            if basename "$(readlink -f "$c")" | grep -q '^podman'; then
+                CONTAINER_RT="podman"
+            else
+                CONTAINER_RT="docker"
+            fi
+            CRT_BIN="$c"
+            return 0
+        fi
+    done
+    # daemon present but CLI missing/unusable: warn, caller decides
+    if [ -e /var/run/docker.sock ]; then
+        warn "docker daemon socket exists (/var/run/docker.sock) but no usable docker CLI was found — install the docker CLI or add its directory to PATH"
     fi
+    return 1
 }
 
 # ── 1. base packages (deb-based assumption) ─────────────────────────────────
@@ -139,19 +156,25 @@ if [ "$TEST" != "1" ]; then
     export DEBIAN_FRONTEND=noninteractive
     log "updating package lists"
     apt-get update -y </dev/null >/dev/null
-    # try to install a container runtime but never fail the install on it
+    # probe for an existing runtime FIRST: never install podman over an
+    # existing docker (or vice versa) — respect what the operator already has
     RUNTIME_PKGS="git curl ca-certificates"
-    if apt-get install -y --no-install-recommends podman </dev/null >/dev/null 2>&1; then
+    if detect_container_runtime; then
+        log "using existing container runtime: ${CONTAINER_RT} (${CRT_BIN})"
+    elif apt-get install -y --no-install-recommends podman </dev/null >/dev/null 2>&1; then
         RUNTIME_PKGS="$RUNTIME_PKGS podman"
+        log "installed podman as the container runtime"
     elif apt-get install -y --no-install-recommends docker.io </dev/null >/dev/null 2>&1; then
         RUNTIME_PKGS="$RUNTIME_PKGS docker.io"
+        log "installed docker.io as the container runtime"
     else
         log "no container runtime installable — the Ollama brain container will be skipped if requested"
     fi
     log "installing base packages (${RUNTIME_PKGS})"
     apt-get install -y $RUNTIME_PKGS </dev/null >/dev/null
+    detect_container_runtime || true
 fi
-detect_container_runtime
+detect_container_runtime || true
 
 # ── 2. Go toolchain ─────────────────────────────────────────────────────────
 install_go() {
@@ -323,7 +346,7 @@ BRAIN_ADVANCED="true"
 printf '\n' >&3
 printf '\033[1m── Memory brain ──────────────────────────────────\033[0m\n' >&3
 # container-runtime + low-RAM heads-up before the brain question
-detect_container_runtime
+detect_container_runtime || true
 MEM_KB="$(awk '/^MemTotal:/{print $2; exit}' /proc/meminfo 2>/dev/null || true)"
 if [ -n "$MEM_KB" ] && [ "$MEM_KB" -gt 0 ] && [ "$MEM_KB" -lt $((2 * 1024 * 1024)) ]; then
     warn "this device has ~$((MEM_KB / 1024)) MB RAM — local Ollama probably won't work suitably here; the basic brain is recommended"
@@ -364,7 +387,8 @@ fi
 ollama_up() { curl -sf "${OLLAMA_URL}/api/version" >/dev/null 2>&1; }
 
 write_ollama_unit() {
-    CRT_BIN="$(command -v "$CONTAINER_RT")"
+    [ -n "$CRT_BIN" ] || CRT_BIN="$(command -v "$CONTAINER_RT" || true)"
+    [ -n "$CRT_BIN" ] || die "cannot resolve container runtime binary for systemd unit"
     cat > "${UNIT_DIR}/gino-ollama.service" <<EOF
 [Unit]
 Description=Gino Ollama (brain embeddings)
@@ -383,7 +407,10 @@ EOF
 }
 
 OLLAMA_MODE="none"   # none | existing | installed
-detect_container_runtime   # runtime may have been installed by section 1
+detect_container_runtime || true   # runtime may have been installed by section 1
+if [ -n "$CONTAINER_RT" ]; then
+    log "container runtime detected: ${CONTAINER_RT} (${CRT_BIN})"
+fi
 if [ "$TEST" != "1" ]; then
     if [ "$BRAIN_ADVANCED" = "false" ] && [ "$PROVIDER_CHOICE" != "5" ]; then
         if ollama_up; then
@@ -403,10 +430,10 @@ if [ "$TEST" != "1" ]; then
     if [ "$BRAIN_ADVANCED" = "true" ] && [ "$OLLAMA_MODE" != "existing" ]; then
         [ -n "$CONTAINER_RT" ] || die "advanced brain selected but no container runtime (podman/docker) available"
         mkdir -p "$OLLAMA_DATA"
-        if ! "$CONTAINER_RT" container exists "$OLLAMA_NAME" 2>/dev/null \
-           && ! "$CONTAINER_RT" ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$OLLAMA_NAME"; then
+        if ! "$CRT_BIN" container exists "$OLLAMA_NAME" 2>/dev/null \
+           && ! "$CRT_BIN" ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$OLLAMA_NAME"; then
             log "creating Ollama container (localhost-only port) via ${CONTAINER_RT}"
-            retry 3 "container create" "$CONTAINER_RT" create \
+            retry 3 "container create" "$CRT_BIN" create \
                 --name "$OLLAMA_NAME" \
                 -v "${OLLAMA_DATA}:/root/.ollama:Z" \
                 -p 127.0.0.1:11434:11434 \
@@ -416,7 +443,7 @@ if [ "$TEST" != "1" ]; then
         fi
 
         log "pulling Ollama image (may take a while)"
-        retry 3 "image pull" "$CONTAINER_RT" pull "$OLLAMA_IMAGE" >&2
+        retry 3 "image pull" "$CRT_BIN" pull "$OLLAMA_IMAGE" >&2
 
         if command -v systemctl >/dev/null 2>&1; then
             write_ollama_unit
@@ -425,18 +452,18 @@ if [ "$TEST" != "1" ]; then
             systemctl enable --now gino-ollama >/dev/null 2>&1 || systemctl restart gino-ollama
         else
             warn "systemd not available — starting container directly (no boot persistence)"
-            "$CONTAINER_RT" start "$OLLAMA_NAME" >&2
+            "$CRT_BIN" start "$OLLAMA_NAME" >&2
         fi
 
         log "waiting for Ollama API"
         waited=0
         until ollama_up; do
             sleep 2; waited=$((waited + 2))
-            [ "$waited" -ge 120 ] && die "Ollama did not come up within 120s — check: ${CONTAINER_RT} logs $OLLAMA_NAME"
+            [ "$waited" -ge 120 ] && die "Ollama did not come up within 120s — check: ${CRT_BIN} logs $OLLAMA_NAME"
         done
 
         log "pulling embedding model '${EMBED_MODEL}'"
-        retry 3 "model pull" "$CONTAINER_RT" exec "$OLLAMA_NAME" ollama pull "$EMBED_MODEL" >&2
+        retry 3 "model pull" "$CRT_BIN" exec "$OLLAMA_NAME" ollama pull "$EMBED_MODEL" >&2
         OLLAMA_MODE="installed"
     fi
 fi
