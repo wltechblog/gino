@@ -568,7 +568,8 @@ EOF
             "enableToolActivityIndicator": true,
             "enableToolErrorMessages": true,${VISION_EXTRA}
             "sandbox": {
-                "mode": "yolo"
+                "mode": "yolo",
+                "allowStringCommands": true
             },
             "spawn": {
                 "enabled": ${SUB_ENABLED},
@@ -612,8 +613,18 @@ if [ "$PROVIDER_CHOICE" = "5" ] && [ "${CONFIG_ACTION:-new}" != "kept" ]; then
 fi
 
 # ── 8. gateway service (Telegram mode) ──────────────────────────────────────
-if [ "$TEST" != "1" ] && [ "$TG_ENABLED" = "true" ]; then
-    log "installing gino-gateway systemd service"
+# The installer owns the gino-gateway unit file: refresh it whenever it
+# already exists (a re-run that answers "N" to Telegram must still update
+# the unit of an existing install), and only install it fresh when the
+# user opts into Telegram this run.
+GATEWAY_UNIT_INSTALLED=0
+if [ -f "${UNIT_DIR}/gino-gateway.service" ] || { [ "$TEST" != "1" ] && [ "$TG_ENABLED" = "true" ]; }; then
+    GATEWAY_UNIT_INSTALLED=1
+    if [ "$TEST" != "1" ]; then
+        log "writing gino-gateway systemd service"
+    else
+        log "TEST mode: gino-gateway unit would be written here (systemd skipped)"
+    fi
     GATEWAY_OLLAMA_DEPS=""
     if [ "$OLLAMA_MODE" = "installed" ] || [ "$OLLAMA_MODE" = "existing" ]; then
         GATEWAY_OLLAMA_DEPS=" gino-ollama.service"
@@ -642,9 +653,14 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
-    systemctl daemon-reload
-    systemctl enable --now gino-gateway >/dev/null 2>&1 || systemctl restart gino-gateway
-    log "gateway started"
+    if [ "$TEST" != "1" ]; then
+        systemctl daemon-reload
+        # enable --now alone won't restart an already-running service onto a
+        # changed unit — restart explicitly so the new unit takes effect.
+        systemctl enable gino-gateway >/dev/null 2>&1 || true
+        systemctl restart gino-gateway
+        log "gateway (re)started with updated unit"
+    fi
 fi
 
 # ── 9. summary ──────────────────────────────────────────────────────────────
@@ -657,7 +673,7 @@ printf '\033[1m── Install complete ─────────────�
     [ -n "$VISION_MODEL" ] && printf '  vision     : %s\n' "$VISION_MODEL"
     printf '  repo       : %s\n' "$REPO_DIR"
     printf '  config     : %s (%s)\n' "$CONFIG" "${CONFIG_ACTION:-new}"
-    printf '  sandbox    : yolo\n'
+    printf '  sandbox    : yolo (string commands on)\n'
     if [ "$BRAIN_ADVANCED" = "true" ]; then
         printf '  brain      : advanced (%s @ %s)\n' "$EMBED_MODEL" "$OLLAMA_URL"
     else

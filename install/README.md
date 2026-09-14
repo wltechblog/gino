@@ -3,7 +3,8 @@
 A one-command installer that sets up [Gino](https://github.com/wltechblog/gino)
 on a fresh Debian-based system, configured for the **root + yolo + brain**
 profile: running as root, full unrestricted tool access (`sandbox.mode:
-"yolo"`), and local brain embeddings via a Podman-hosted Ollama container.
+"yolo"` with `allowStringCommands: true` — string-form shell commands work),
+and local brain embeddings via a Podman-hosted Ollama container.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/wltechblog/gino/main/install/install.sh | sudo bash
@@ -61,6 +62,10 @@ your keyboard.
    - *Telegram*: bot token + numeric `allowFrom` user ID (format-validated),
      installs a `gino-gateway` systemd service ordered after Ollama.
    - *TUI*: no credentials needed; run `gino chat` when installation finishes.
+   - Either way, if a `gino-gateway` unit already exists from a previous
+     install it is rewritten to the current template (with
+     `daemon-reload` + restart), so re-running the installer refreshes the
+     unit instead of leaving a stale one behind.
 
 ## Where things land
 
@@ -71,7 +76,8 @@ your keyboard.
 - `gino-ollama` container + systemd unit — brain (advanced mode only)
 - `gino doctor` — post-install health check (binary, config, provider
   reachability, brain tier, gateway service state)
-- `gino-gateway` systemd unit — Telegram gateway mode only
+- `gino-gateway` systemd unit — Telegram gateway mode only (refreshed on
+  re-runs when present)
 
 ## Testing without side effects
 
