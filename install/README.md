@@ -47,18 +47,23 @@ your keyboard.
    support image input (vision)?" and, if yes, "Configure it as the vision
    model for image analysis?" — writes `agents.defaults.visionModel`, which
    enables the `vision` analysis tool. Answering no leaves the key absent.
-3. **Subagent (optional)** — a dedicated worker agent. If it gets its own
+3. **Logging** — "Enable debug logging?" (default N). Installs write
+   `agents.defaults.logLevel: "off"` — routine runtime logs (tool activity,
+   MCP chatter, heartbeat) are hidden; only fatal startup errors surface
+   (stderr). Re-enable at any time with `GINO_LOG_LEVEL=info` or by editing
+   config.json.
+4. **Subagent (optional)** — a dedicated worker agent. If it gets its own
    provider credentials they're stored as a `providers.presets` entry
    (`subagent-provider`) and wired into `spawn.agents`; if you reuse the same
    credentials only the model is overridden.
-4. **Memory brain** —
+5. **Memory brain** —
    - *Advanced* (default): installs a local Ollama container (`gino-ollama`,
      ~2 GB) for semantic-search embeddings. On devices with under 2 GB RAM a
      warning is printed that local Ollama probably won't work suitably.
    - *Basic*: skips Ollama entirely; the brain runs in keyword-only (FTS5)
      mode — search still works, just without semantic ranking. It upgrades
      automatically if an Ollama appears on the configured URL later.
-5. **Channel** —
+6. **Channel** —
    - *Telegram*: bot token + numeric `allowFrom` user ID (format-validated),
      installs a `gino-gateway` systemd service ordered after Ollama.
    - *TUI*: no credentials needed; run `gino chat` when installation finishes.

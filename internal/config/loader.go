@@ -85,6 +85,16 @@ func applyEnvOverrides(cfg *Config) {
 			cfg.Channels.Discord.ThreadCooldownS = &n
 		}
 	}
+	if v := os.Getenv("GINO_LOG_LEVEL"); v != "" {
+		cfg.Agents.Defaults.LogLevel = strings.ToLower(strings.TrimSpace(v))
+	}
+}
+
+// LogsSilenced reports whether routine logging is disabled
+// (agents.defaults.logLevel = "off"). Fatal startup errors are still
+// printed to stderr regardless.
+func (d AgentDefaults) LogsSilenced() bool {
+	return d.LogLevel == "off"
 }
 
 // parseLevelsEnv splits a comma-separated reasoning-levels env value into a

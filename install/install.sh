@@ -313,6 +313,17 @@ if [ "$REPLY" = "y" ]; then
     fi
 fi
 
+# logging: default OFF (clean installs stay quiet — routine tool chatter,
+# heartbeats and MCP logs hidden; fatal startup errors still print).
+# GINO_LOG_LEVEL=info (or editing config.json) re-enables logging.
+DEBUG_LOGS="off"
+ask "Enable debug logging (verbose runtime logs)?" "N"
+yes_no "$REPLY"
+if [ "$REPLY" = "y" ]; then
+    DEBUG_LOGS="info"
+    log "debug logging enabled"
+fi
+
 # optional subagent
 SUB_ENABLED="false"; SUB_NAME=""; SUB_MODEL=""; SUB_USES_PRESET="false"
 printf '\n' >&3
@@ -512,6 +523,11 @@ if [ "${CONFIG_ACTION:-new}" != "kept" ]; then
         VISION_EXTRA='
             "visionModel": "'"${VISION_MODEL}"'",'
     fi
+    LOG_EXTRA=""
+    if [ -n "$DEBUG_LOGS" ]; then
+        LOG_EXTRA='
+            "logLevel": "'"${DEBUG_LOGS}"'",'
+    fi
     SPAWN_AGENTS_JSON="[]"
     PRESETS_JSON=""
     if [ "$SUB_ENABLED" = "true" ]; then
@@ -566,7 +582,7 @@ EOF
             "heartbeatIntervalS": 30,
             "requestTimeoutS": 300,
             "enableToolActivityIndicator": true,
-            "enableToolErrorMessages": true,${VISION_EXTRA}
+            "enableToolErrorMessages": true,${VISION_EXTRA}${LOG_EXTRA}
             "sandbox": {
                 "mode": "yolo",
                 "allowStringCommands": true
@@ -671,6 +687,11 @@ printf '\033[1m── Install complete ─────────────�
     printf '  provider   : %s\n' "$API_BASE"
     printf '  model      : %s\n' "$MODEL"
     [ -n "$VISION_MODEL" ] && printf '  vision     : %s\n' "$VISION_MODEL"
+    if [ "$DEBUG_LOGS" = "off" ]; then
+        printf '  logging    : off (GINO_LOG_LEVEL=info to enable)\n'
+    else
+        printf '  logging    : info\n'
+    fi
     printf '  repo       : %s\n' "$REPO_DIR"
     printf '  config     : %s (%s)\n' "$CONFIG" "${CONFIG_ACTION:-new}"
     printf '  sandbox    : yolo (string commands on)\n'

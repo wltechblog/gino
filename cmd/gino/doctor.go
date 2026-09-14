@@ -314,6 +314,18 @@ func checkVision(checks *[]doctorCheck, cfg config.Config) {
 	*checks = append(*checks, doctorCheck{"vision", statusOK, fmt.Sprintf("vision model %q — image analysis tool active", vm)})
 }
 
+// checkLogging reports the configured runtime log level.
+func checkLogging(checks *[]doctorCheck, cfg config.Config) {
+	switch cfg.Agents.Defaults.LogLevel {
+	case "off":
+		*checks = append(*checks, doctorCheck{"logging", statusWarn, "off — routine logs hidden (GINO_LOG_LEVEL=info or agents.defaults.logLevel to change)"})
+	case "":
+		*checks = append(*checks, doctorCheck{"logging", statusOK, "info (default)"})
+	default:
+		*checks = append(*checks, doctorCheck{"logging", statusOK, cfg.Agents.Defaults.LogLevel})
+	}
+}
+
 // runDoctor is the `gino doctor` subcommand: post-install health check that
 // verifies everything a working Gino needs, without spending tokens.
 func runDoctor(homeFlag string) {
@@ -331,6 +343,7 @@ func runDoctor(homeFlag string) {
 		checkProvider(&checks, cfg)
 		checkReasoning(&checks, cfg)
 		checkVision(&checks, cfg)
+		checkLogging(&checks, cfg)
 		checkBrain(&checks, cfg)
 		checkService(&checks, cfg)
 	}

@@ -49,6 +49,7 @@
         "keepRecent": 16
       },
       "verbose": false,
+      "logLevel": "info",
       "analytics": false,
       "allowedDirs": [],
       "disableTools": [],

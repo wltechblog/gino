@@ -72,6 +72,7 @@ Agent behavior settings.
 | `maxToolIterations` | int | `100` | Maximum number of tool-calling iterations per request. Prevents infinite loops. |
 | `heartbeatIntervalS` | int | `60` | How often (in seconds) the heartbeat checks `HEARTBEAT.md` for periodic tasks. Only used in gateway mode. |
 | `requestTimeoutS` | int | `60` | HTTP timeout in seconds for each LLM API request. Increase for slow models or poor network conditions. |
+| `logLevel` | string | `info` | Runtime logging: `"off"` silences routine logs entirely — only fatal startup errors print (to stderr, so `journalctl` still shows why a gateway died). `"info"` keeps normal logging. Override at runtime with `GINO_LOG_LEVEL`. The installer default is `"off"` (opt-in debug). |
 | `enableToolActivityIndicator` | bool | `true` | When `true`, sends interim `🤖 Running` / `📢 done` messages to the chat channel as tools are called. Set to `false` for IoT or headless deployments where only the final response should be delivered. |
 | `allowedDirs` | string[] | `[]` | Additional directories the filesystem and exec tools can access beyond the workspace. |
 | `disableTools` | string[] | `[]` | List of tool names to disable (e.g., `["exec", "web"]`). |

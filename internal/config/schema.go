@@ -107,6 +107,12 @@ type AgentDefaults struct {
 	EnableToolCallMessages      *bool         `json:"enableToolCallMessages,omitempty"`
 	EnableToolErrorMessages     *bool         `json:"enableToolErrorMessages,omitempty"`
 	VisionModel                 string        `json:"visionModel,omitempty"`
+
+	// LogLevel controls the runtime log stream. "off" silences routine
+	// logging entirely (only fatal startup errors surface, on stderr);
+	// "info" (or empty) keeps the default log output. GINO_LOG_LEVEL
+	// overrides at runtime for troubleshooting.
+	LogLevel string `json:"logLevel,omitempty"`
 	AllowedDirs                 []string      `json:"allowedDirs"`
 	DisableTools                []string      `json:"disableTools"`
 	Sandbox                     SandboxConfig `json:"sandbox"`

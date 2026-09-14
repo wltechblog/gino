@@ -5,6 +5,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -278,6 +279,7 @@ func runAgent(homeFlag string, args []string) {
 	homeDir := resolveHomeDir(homeFlag)
 	hub := chat.NewHub(100)
 	cfg, _ := config.LoadConfig(homeDir)
+	configureLogging(cfg)
 	provider := providers.NewProviderFromConfig(cfg)
 
 	if *reasoningFlag != "" {
@@ -382,6 +384,7 @@ func runChat(homeFlag string, args []string) {
 		fmt.Fprintf(os.Stderr, "failed to load config: %v\n", err)
 		os.Exit(1)
 	}
+	configureLogging(cfg)
 
 	provider := providers.NewProviderFromConfig(cfg)
 
@@ -433,6 +436,24 @@ func requireGatewayConfig(homeDir string) error {
 	return nil
 }
 
+
+// configureLogging silences the runtime log stream when
+// agents.defaults.logLevel="off" (installer default). Fatal startup errors
+// still surface: they print straight to stderr (see fatalf) instead of the
+// discarded log stream, so journald keeps showing why a gateway died.
+func configureLogging(cfg config.Config) {
+	if cfg.Agents.Defaults.LogsSilenced() {
+		log.SetOutput(io.Discard)
+	}
+}
+
+// fatalf prints a startup error to stderr and exits. Unlike log.Fatalf it
+// does not depend on the log stream, so it stays visible with logging off.
+func fatalf(format string, args ...interface{}) {
+	fmt.Fprintf(os.Stderr, "gino: "+format+"\n", args...)
+	os.Exit(1)
+}
+
 func runGateway(homeFlag string, args []string) {
 	fs := flag.NewFlagSet("gateway", flag.ExitOnError)
 	modelFlag := fs.String("M", "", "Model to use (overrides config/provider default)")
@@ -445,6 +466,7 @@ func runGateway(homeFlag string, args []string) {
 	}
 	hub := chat.NewHub(200)
 	cfg, _ := config.LoadConfig(homeDir)
+	configureLogging(cfg)
 	provider := providers.NewProviderFromConfig(cfg)
 
 	model := *modelFlag
@@ -508,7 +530,7 @@ func runGateway(homeFlag string, args []string) {
 		sigListener = picosignal.NewListener(signalSocketPath, hub, sigRegistry, cfg.Signal.DefaultChannel, cfg.Signal.DefaultChatID)
 		sigListener.SetPersistencePath(filepath.Join(homeDir, "signal_routes.json"))
 		if err := sigListener.Bind(); err != nil {
-			log.Fatalf("Signal: %v", err)
+			fatalf("signal listener: %v", err)
 		}
 	}
 
@@ -572,7 +594,7 @@ func runGateway(homeFlag string, args []string) {
 	if cfg.Channels.Telegram.Enabled {
 		showTyping := cfg.Agents.Defaults.EnableToolActivityIndicator == nil || *cfg.Agents.Defaults.EnableToolActivityIndicator
 		if err := channels.StartTelegram(ctx, hub, cfg.Channels.Telegram.Token, cfg.Channels.Telegram.AllowFrom, showTyping, ws, cfg.Channels.Telegram.MonitorGroups); err != nil {
-			log.Fatalf("Telegram: %v", err)
+			fatalf("telegram: %v", err)
 		}
 	}
 
@@ -587,7 +609,7 @@ func runGateway(homeFlag string, args []string) {
 			threadCooldown = *cfg.Channels.Discord.ThreadCooldownS
 		}
 		if err := channels.StartDiscord(ctx, hub, cfg.Channels.Discord.Token, cfg.Channels.Discord.AllowFrom, cfg.Channels.Discord.AllowDMs, cfg.Channels.Discord.MonitorChannels, cfg.Channels.Discord.SendAttachments, cfg.Channels.Discord.AdminRoleID, threadCooldown, rl); err != nil {
-			log.Fatalf("Discord: %v", err)
+			fatalf("discord: %v", err)
 		}
 	}
 
