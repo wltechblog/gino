@@ -705,7 +705,8 @@ func NewAgentLoopWithProfileWorkspace(b *chat.Hub, provider providers.LLMProvide
 		register(tools.NewWebSearchTool())
 		log.Println("Web search: using DuckDuckGo (no API key required)")
 	}
-	register(tools.NewSpawnToolDisabled(homeDir, workspace, b))
+	spTool := tools.NewSpawnToolDisabled(homeDir, workspace, b)
+	register(spTool)
 
 	// Register vision tool if a vision model is configured
 	if visionModel != "" {
@@ -865,6 +866,7 @@ func NewAgentLoopWithProfileWorkspace(b *chat.Hub, provider providers.LLMProvide
 		fsTool:                  fsTool,
 		execTool:                execTool,
 		bgTool:                  bgTool,
+		spTool:                  spTool,
 		profileWorkspace:        profileWorkspace,
 	}
 	if ownedSkillRoot != nil {
