@@ -324,7 +324,12 @@ func (l *Listener) loadBindings() {
 
 // Start begins listening for signals on the Unix domain socket.
 // It blocks until the context is cancelled.
-func (l *Listener) Start(ctx context.Context) error {
+// Bind creates the Unix domain socket and starts listening without yet
+// accepting connections. It is safe to call before any MCP child process
+// is spawned: the socket file exists the moment Bind returns, so bridges
+// receiving GINO_SIGNAL_SOCKET in their environment can dial immediately
+// instead of racing the gateway's slower construction path.
+func (l *Listener) Bind() error {
 	// Restore per-source routing bindings persisted by a previous run.
 	l.loadBindings()
 
@@ -356,6 +361,27 @@ func (l *Listener) Start(ctx context.Context) error {
 	}
 
 	log.Printf("Signal: listening on %s (registered actions: %s, default: %s:%s)", l.socketPath, strings.Join(l.registry.ListActions(), ", "), l.defaultChannel, l.defaultChatID)
+	return nil
+}
+
+// Start begins listening for signals on the Unix domain socket.
+// It blocks until the context is cancelled. Deprecated in favor of
+// Bind + Serve for callers that must create the socket before spawning
+// MCP children.
+func (l *Listener) Start(ctx context.Context) error {
+	if err := l.Bind(); err != nil {
+		return err
+	}
+	return l.Serve(ctx)
+}
+
+// Serve accepts connections on an already-bound listener. It blocks until
+// the context is cancelled.
+func (l *Listener) Serve(ctx context.Context) error {
+	listener := l.listener
+	if listener == nil {
+		return fmt.Errorf("signal: Serve called before Bind")
+	}
 
 	// Accept connections in a goroutine, shutdown on context cancel
 	go func() {

@@ -494,6 +494,23 @@ func runGateway(homeFlag string, args []string) {
 		signalSocketPath = cfg.Signal.GetSocketPath(homeDir, ws)
 	}
 
+	// ─── Signal listener (early bind) ───────────────────────────────────
+	// Bind the socket BEFORE constructing the agent loop: MCP child
+	// processes receive GINO_SIGNAL_SOCKET in their environment when
+	// they are spawned inside NewAgentLoop, and agentchat-style bridges
+	// dial it immediately on boot (SSE watcher starts within ~200ms).
+	// Binding first eliminates the startup race where the bridge's first
+	// dial hits a socket that does not exist yet.
+	var sigListener *picosignal.Listener
+	if signalSocketPath != "" {
+		sigRegistry := picosignal.NewRegistry(cfg.Signal.Actions)
+		sigListener = picosignal.NewListener(signalSocketPath, hub, sigRegistry, cfg.Signal.DefaultChannel, cfg.Signal.DefaultChatID)
+		sigListener.SetPersistencePath(filepath.Join(homeDir, "signal_routes.json"))
+		if err := sigListener.Bind(); err != nil {
+			log.Fatalf("Signal: %v", err)
+		}
+	}
+
 	ag := agent.NewAgentLoop(hub, provider, model, maxIter, ws, scheduler, cfg.MCPServers, cfg.Agents.Defaults.AllowedDirs, cfg.Agents.Defaults.DisableTools, cfg.Brain, homeDir, cfg.Agents.Defaults.Sandbox, signalSocketPath, cfg.Agents.Defaults.MaxTurnMessages, cfg.Agents.Defaults.MaxToolResultChars, cfg.Agents.Defaults.Compaction, cfg.Agents.Defaults.Web, cfg.Agents.Defaults.Search, cfg.Agents.Defaults.VisionModel)
 	defer ag.Close()
 
@@ -536,18 +553,15 @@ func runGateway(homeFlag string, args []string) {
 	}
 	heartbeat.StartHeartbeat(ctx, ws, hbInterval, hub)
 
-	// Start external signal listener (Unix domain socket)
-	if cfg.Signal.Enabled {
-		socketPath := cfg.Signal.GetSocketPath(homeDir, ws)
-		sigRegistry := picosignal.NewRegistry(cfg.Signal.Actions)
-		sigListener := picosignal.NewListener(socketPath, hub, sigRegistry, cfg.Signal.DefaultChannel, cfg.Signal.DefaultChatID)
-		sigListener.SetPersistencePath(filepath.Join(homeDir, "signal_routes.json"))
+	// Accept connections on the socket bound before NewAgentLoop spawned
+	// any MCP children (early-bind eliminates the bridge startup race).
+	if sigListener != nil {
 		go func() {
-			if err := sigListener.Start(ctx); err != nil {
+			if err := sigListener.Serve(ctx); err != nil {
 				log.Printf("Signal: listener error: %v", err)
 			}
 		}()
-		log.Printf("Signal: external trigger system enabled on %s", socketPath)
+		log.Printf("Signal: external trigger system enabled on %s", sigListener.SocketPath())
 		ag.SetSignalListener(sigListener)
 	}
 
