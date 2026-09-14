@@ -106,7 +106,10 @@ func checkSystem(checks *[]doctorCheck) {
 // expandTilde expands a leading ~/ the same way the agent does.
 func expandTilde(p string) string {
 	if strings.HasPrefix(p, "~/") {
-		home, _ := os.UserHomeDir()
+		home, err := userHomeDir()
+		if err != nil {
+			return p
+		}
 		return filepath.Join(home, p[2:])
 	}
 	return p

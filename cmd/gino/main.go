@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -28,17 +29,50 @@ import (
 
 const version = "0.4.0"
 
-// resolveHomeDir resolves the gino home directory.
+// userHomeDir resolves the user's home directory with a fallback chain:
+// $HOME first, then the user database. Under systemd system services $HOME
+// is typically unset; user.Current still resolves via /etc/passwd (pure Go,
+// no cgo needed), so root-run gateways keep working.
+func userHomeDir() (string, error) {
+	if h := os.Getenv("HOME"); h != "" {
+		return h, nil
+	}
+	if u, err := user.Current(); err == nil && u.HomeDir != "" {
+		return u.HomeDir, nil
+	}
+	return "", fmt.Errorf("cannot determine home directory ($HOME unset and user lookup failed) — pass -home <dir>")
+}
+
+// resolveHomeDir resolves the gino home directory, always returning an
+// absolute path. Falls back hard (exit 1) when no home can be determined,
+// with an actionable message instead of a confusing downstream failure.
 func resolveHomeDir(homeFlag string) string {
-	if homeFlag == "" {
-		userHome, _ := os.UserHomeDir()
-		return filepath.Join(userHome, ".gino")
+	resolve := func() (string, error) {
+		if homeFlag == "" {
+			userHome, err := userHomeDir()
+			if err != nil {
+				return "", err
+			}
+			return filepath.Join(userHome, ".gino"), nil
+		}
+		if strings.HasPrefix(homeFlag, "~/") {
+			userHome, err := userHomeDir()
+			if err != nil {
+				return "", err
+			}
+			return filepath.Join(userHome, homeFlag[2:]), nil
+		}
+		return homeFlag, nil
 	}
-	if strings.HasPrefix(homeFlag, "~/") {
-		userHome, _ := os.UserHomeDir()
-		return filepath.Join(userHome, homeFlag[2:])
+	dir, err := resolve()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "gino: %v\n", err)
+		os.Exit(1)
 	}
-	return homeFlag
+	if abs, absErr := filepath.Abs(dir); absErr == nil {
+		return abs
+	}
+	return dir
 }
 
 func expandWorkspace(ws, homeDir string) string {
@@ -388,12 +422,27 @@ func runChat(homeFlag string, args []string) {
 
 // ─── gateway ────────────────────────────────────────────────────────────────
 
+// requireGatewayConfig errors when the gateway home has no config.json.
+// A gateway is a long-running service: silently proceeding with defaults
+// (empty workspace, no provider key) produces confusing failures — better
+// to refuse to start with an actionable message.
+func requireGatewayConfig(homeDir string) error {
+	if _, err := os.Stat(filepath.Join(homeDir, "config.json")); err != nil {
+		return fmt.Errorf("no config.json under %s — run `gino onboard` or re-run the installer", homeDir)
+	}
+	return nil
+}
+
 func runGateway(homeFlag string, args []string) {
 	fs := flag.NewFlagSet("gateway", flag.ExitOnError)
 	modelFlag := fs.String("M", "", "Model to use (overrides config/provider default)")
 	_ = fs.Parse(args)
 
 	homeDir := resolveHomeDir(homeFlag)
+	if err := requireGatewayConfig(homeDir); err != nil {
+		fmt.Fprintf(os.Stderr, "gino gateway: %v\n", err)
+		os.Exit(1)
+	}
 	hub := chat.NewHub(200)
 	cfg, _ := config.LoadConfig(homeDir)
 	provider := providers.NewProviderFromConfig(cfg)

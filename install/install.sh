@@ -618,6 +618,14 @@ if [ "$TEST" != "1" ] && [ "$TG_ENABLED" = "true" ]; then
     if [ "$OLLAMA_MODE" = "installed" ] || [ "$OLLAMA_MODE" = "existing" ]; then
         GATEWAY_OLLAMA_DEPS=" gino-ollama.service"
     fi
+    # systemd services run with $HOME unset; pin it (plus -home on the
+    # ExecStart) so the gateway never resolves a relative home dir.
+    HOME_PARENT="${GINO_HOME%/*}"
+    UNIT_HOME_ENV=""
+    if [ -n "$HOME_PARENT" ] && [ "$HOME_PARENT" != "$GINO_HOME" ]; then
+        UNIT_HOME_ENV="Environment=HOME=${HOME_PARENT}
+"
+    fi
     cat > "${UNIT_DIR}/gino-gateway.service" <<EOF
 [Unit]
 Description=Gino gateway (Telegram)
@@ -625,7 +633,9 @@ After=network-online.target
 Wants=network-online.target${GATEWAY_OLLAMA_DEPS}
 
 [Service]
-ExecStart=${BIN_DIR}/gino gateway
+Type=simple
+${UNIT_HOME_ENV}ExecStart=${BIN_DIR}/gino gateway -home ${GINO_HOME}
+WorkingDirectory=${GINO_HOME}
 Restart=on-failure
 RestartSec=5
 
