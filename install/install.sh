@@ -9,7 +9,8 @@
 #
 # Assumes a Debian-based system with network access. Installs:
 #   - Go toolchain (official tarball if system Go is too old)
-#   - podman + an Ollama container for brain embeddings (localhost only)
+#   - an Ollama container (podman or docker) for brain embeddings (localhost only,
+#     skipped gracefully when no container runtime is available)
 #   - Gino, cloned from GitHub and built from source
 #   - config.json with sandbox.mode=yolo and the brain enabled (advanced or basic)
 #   - Telegram gateway systemd service if Telegram is chosen; else TUI mode
@@ -121,15 +122,36 @@ go_version_ok() { # go_version_ok MINIMUM
 # ════════════════════════════════════════════════════════════════════════════
 log "Gino installer — root + yolo + brain profile"
 
+# container runtime detection: prefer podman, fall back to docker, else none
+# (skips the Ollama container gracefully rather than hard-faulting)
+CONTAINER_RT=""
+detect_container_runtime() {
+    if command -v podman >/dev/null 2>&1; then
+        CONTAINER_RT="podman"
+    elif command -v docker >/dev/null 2>&1; then
+        CONTAINER_RT="docker"
+    fi
+}
+
 # ── 1. base packages (deb-based assumption) ─────────────────────────────────
 if [ "$TEST" != "1" ]; then
     command -v apt-get >/dev/null 2>&1 || die "apt-get not found — this installer targets Debian-based systems"
     export DEBIAN_FRONTEND=noninteractive
     log "updating package lists"
     apt-get update -y </dev/null >/dev/null
-    log "installing base packages (git curl ca-certificates podman)"
-    apt-get install -y git curl ca-certificates podman </dev/null >/dev/null
+    # try to install a container runtime but never fail the install on it
+    RUNTIME_PKGS="git curl ca-certificates"
+    if apt-get install -y --no-install-recommends podman </dev/null >/dev/null 2>&1; then
+        RUNTIME_PKGS="$RUNTIME_PKGS podman"
+    elif apt-get install -y --no-install-recommends docker.io </dev/null >/dev/null 2>&1; then
+        RUNTIME_PKGS="$RUNTIME_PKGS docker.io"
+    else
+        log "no container runtime installable — the Ollama brain container will be skipped if requested"
+    fi
+    log "installing base packages (${RUNTIME_PKGS})"
+    apt-get install -y $RUNTIME_PKGS </dev/null >/dev/null
 fi
+detect_container_runtime
 
 # ── 2. Go toolchain ─────────────────────────────────────────────────────────
 install_go() {
@@ -300,17 +322,24 @@ fi
 BRAIN_ADVANCED="true"
 printf '\n' >&3
 printf '\033[1m── Memory brain ──────────────────────────────────\033[0m\n' >&3
-# low-RAM heads-up: local Ollama does not work suitably on small devices
+# container-runtime + low-RAM heads-up before the brain question
+detect_container_runtime
 MEM_KB="$(awk '/^MemTotal:/{print $2; exit}' /proc/meminfo 2>/dev/null || true)"
 if [ -n "$MEM_KB" ] && [ "$MEM_KB" -gt 0 ] && [ "$MEM_KB" -lt $((2 * 1024 * 1024)) ]; then
     warn "this device has ~$((MEM_KB / 1024)) MB RAM — local Ollama probably won't work suitably here; the basic brain is recommended"
 fi
-ask "Install local Ollama for the advanced memory brain? (yes = advanced brain, no = basic brain)" "Y"
-yes_no "$REPLY"
-BRAIN_ADVANCED="$REPLY"
-[ "$BRAIN_ADVANCED" = "y" ] && BRAIN_ADVANCED="true" || BRAIN_ADVANCED="false"
-if [ "$BRAIN_ADVANCED" = "false" ]; then
-    log "basic brain selected — keyword search only, no Ollama container"
+if [ -z "$CONTAINER_RT" ] && [ "$TEST" != "1" ]; then
+    warn "no container runtime (podman/docker) found or installable — the advanced brain needs one; the basic brain will be used"
+    BRAIN_ADVANCED="false"
+    log "no container runtime available — basic brain selected, keyword search only"
+else
+    ask "Install local Ollama for the advanced memory brain? (yes = advanced brain, no = basic brain)" "Y"
+    yes_no "$REPLY"
+    BRAIN_ADVANCED="$REPLY"
+    [ "$BRAIN_ADVANCED" = "y" ] && BRAIN_ADVANCED="true" || BRAIN_ADVANCED="false"
+    if [ "$BRAIN_ADVANCED" = "false" ]; then
+        log "basic brain selected — keyword search only, no Ollama container"
+    fi
 fi
 
 # telegram
@@ -335,6 +364,7 @@ fi
 ollama_up() { curl -sf "${OLLAMA_URL}/api/version" >/dev/null 2>&1; }
 
 write_ollama_unit() {
+    CRT_BIN="$(command -v "$CONTAINER_RT")"
     cat > "${UNIT_DIR}/gino-ollama.service" <<EOF
 [Unit]
 Description=Gino Ollama (brain embeddings)
@@ -342,8 +372,8 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=/usr/bin/podman start -a ${OLLAMA_NAME}
-ExecStop=/usr/bin/podman stop -t 10 ${OLLAMA_NAME}
+ExecStart=${CRT_BIN} start -a ${OLLAMA_NAME}
+ExecStop=${CRT_BIN} stop -t 10 ${OLLAMA_NAME}
 Restart=on-failure
 RestartSec=5
 
@@ -353,6 +383,7 @@ EOF
 }
 
 OLLAMA_MODE="none"   # none | existing | installed
+detect_container_runtime   # runtime may have been installed by section 1
 if [ "$TEST" != "1" ]; then
     if [ "$BRAIN_ADVANCED" = "false" ] && [ "$PROVIDER_CHOICE" != "5" ]; then
         if ollama_up; then
@@ -361,16 +392,21 @@ if [ "$TEST" != "1" ]; then
     elif ollama_up; then
         log "something already answers on ${OLLAMA_URL} — reusing it for the brain, skipping container setup"
         OLLAMA_MODE="existing"
+    elif [ "$PROVIDER_CHOICE" = "5" ] && [ -z "$CONTAINER_RT" ]; then
+        # Ollama-LLM without any container runtime: cannot proceed with local LLM
+        die "Ollama selected as LLM provider but no container runtime (podman/docker) is available — install one or choose a different provider"
     elif [ "$PROVIDER_CHOICE" = "5" ]; then
         # Ollama selected as the LLM provider: the container is required
         log "Ollama LLM mode requires the local container — installing it"
         BRAIN_ADVANCED="true"
     fi
     if [ "$BRAIN_ADVANCED" = "true" ] && [ "$OLLAMA_MODE" != "existing" ]; then
+        [ -n "$CONTAINER_RT" ] || die "advanced brain selected but no container runtime (podman/docker) available"
         mkdir -p "$OLLAMA_DATA"
-        if ! podman container exists "$OLLAMA_NAME"; then
-            log "creating Ollama container (localhost-only port)"
-            retry 3 "podman create" podman create \
+        if ! "$CONTAINER_RT" container exists "$OLLAMA_NAME" 2>/dev/null \
+           && ! "$CONTAINER_RT" ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$OLLAMA_NAME"; then
+            log "creating Ollama container (localhost-only port) via ${CONTAINER_RT}"
+            retry 3 "container create" "$CONTAINER_RT" create \
                 --name "$OLLAMA_NAME" \
                 -v "${OLLAMA_DATA}:/root/.ollama:Z" \
                 -p 127.0.0.1:11434:11434 \
@@ -380,7 +416,7 @@ if [ "$TEST" != "1" ]; then
         fi
 
         log "pulling Ollama image (may take a while)"
-        retry 3 "podman pull" podman pull "$OLLAMA_IMAGE" >&2
+        retry 3 "image pull" "$CONTAINER_RT" pull "$OLLAMA_IMAGE" >&2
 
         if command -v systemctl >/dev/null 2>&1; then
             write_ollama_unit
@@ -389,18 +425,18 @@ if [ "$TEST" != "1" ]; then
             systemctl enable --now gino-ollama >/dev/null 2>&1 || systemctl restart gino-ollama
         else
             warn "systemd not available — starting container directly (no boot persistence)"
-            podman start "$OLLAMA_NAME" >&2
+            "$CONTAINER_RT" start "$OLLAMA_NAME" >&2
         fi
 
         log "waiting for Ollama API"
         waited=0
         until ollama_up; do
             sleep 2; waited=$((waited + 2))
-            [ "$waited" -ge 120 ] && die "Ollama did not come up within 120s — check: podman logs $OLLAMA_NAME"
+            [ "$waited" -ge 120 ] && die "Ollama did not come up within 120s — check: ${CONTAINER_RT} logs $OLLAMA_NAME"
         done
 
         log "pulling embedding model '${EMBED_MODEL}'"
-        retry 3 "model pull" podman exec "$OLLAMA_NAME" ollama pull "$EMBED_MODEL" >&2
+        retry 3 "model pull" "$CONTAINER_RT" exec "$OLLAMA_NAME" ollama pull "$EMBED_MODEL" >&2
         OLLAMA_MODE="installed"
     fi
 fi
@@ -545,7 +581,7 @@ EOF
 fi
 
 if [ "$PROVIDER_CHOICE" = "5" ] && [ "${CONFIG_ACTION:-new}" != "kept" ]; then
-    warn "Ollama LLM mode: pull your model first — podman exec $OLLAMA_NAME ollama pull $MODEL"
+    warn "Ollama LLM mode: pull your model first — ${CONTAINER_RT:-podman} exec $OLLAMA_NAME ollama pull $MODEL"
 fi
 
 # ── 8. gateway service (Telegram mode) ──────────────────────────────────────

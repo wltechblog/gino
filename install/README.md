@@ -16,11 +16,11 @@ being the package manager) and is safe to re-run.
 
 | Component | Detail |
 |---|---|
-| Base packages | git, curl, ca-certificates, podman (via apt) |
+| Base packages | git, curl, ca-certificates; container runtime (podman, or docker.io fallback) if installable |
 | Go toolchain | 1.26.4 from the official tarball — only if system Go is older than 1.26.3 |
 | Gino source | Cloned to `/opt/gino` (updated in place if it already exists) |
 | Gino binary | Built with `CGO_ENABLED=0` and vendored dependencies, installed to `/usr/local/bin/gino` |
-| Brain (Ollama) | `gino-ollama` Podman container bound to `127.0.0.1:11434` + systemd unit; pulls the `nomic-embed-text` embedding model |
+| Brain (Ollama) | `gino-ollama` container (podman or docker, whichever is detected) bound to `127.0.0.1:11434` + systemd unit; pulls the `nomic-embed-text` embedding model. Skipped entirely when no container runtime exists — the install continues with the basic (keyword-search) brain |
 
 ## What it asks
 
