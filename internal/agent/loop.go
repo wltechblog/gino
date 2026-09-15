@@ -546,9 +546,10 @@ type AgentLoop struct {
 	profileWorkspace        string
 
 	// Per-session turn management for async processing and cancellation.
-	mu      sync.Mutex
-	active  map[string]*activeTurn  // sessionKey -> active turn (nil = idle)
-	pending map[string][]pendingMsg // sessionKey -> queued messages for active turn
+	mu          sync.Mutex
+	active      map[string]*activeTurn    // sessionKey -> active turn (nil = idle)
+	pending     map[string][]pendingMsg   // sessionKey -> queued messages for active turn
+	signalQueue map[string][]chat.Inbound // sessionKey -> signals deferred while a turn ran
 
 	// bgWG tracks background goroutines (e.g. turn memory extraction) so
 	// tests can wait for them to finish before cleaning up temp dirs.
@@ -865,6 +866,7 @@ func NewAgentLoopWithProfileWorkspace(b *chat.Hub, provider providers.LLMProvide
 		enableToolErrorMessages: true,
 		active:                  make(map[string]*activeTurn),
 		pending:                 make(map[string][]pendingMsg),
+		signalQueue:             make(map[string][]chat.Inbound),
 		paused:                  make(map[string]*pausedTurn),
 		compactor:               comp,
 		fsTool:                  fsTool,
@@ -1873,6 +1875,25 @@ func (a *AgentLoop) dispatchMessage(ctx context.Context, msg chat.Inbound) {
 		signalSessionKey = "signal:" + sessionKey
 	}
 
+	if isSignal {
+		// A signal arriving while the session's interactive turn — or an
+		// earlier deferred signal's turn — is still running must NOT start
+		// a parallel turn: the agent would race itself for the mailbox
+		// drain (receive_messages is destructive), re-do work the live
+		// turn is mid-way through, and reply twice. Defer it instead. The
+		// user's queuing path (below) can't be reused for signals because
+		// it injects raw content as an additional user prompt — signals
+		// need their full metadata (source/action/silent) preserved so
+		// routing, reply suppression, and result injection keep working.
+		if a.hasActiveTurn(sessionKey) || a.hasActiveTurn(signalSessionKey) {
+			a.mu.Lock()
+			a.signalQueue[sessionKey] = append(a.signalQueue[sessionKey], msg)
+			a.mu.Unlock()
+			log.Printf("Turn active for %s — signal deferred (queued: %d)", sessionKey, len(a.signalQueue[sessionKey]))
+			return
+		}
+	}
+
 	// Handle harness-level "continue": when a previous turn was paused at
 	// the iteration limit, a bare "continue" (or "/continue") resumes that
 	// stashed turn in-process. The user's gating is preserved — nothing runs
@@ -2344,7 +2365,28 @@ func (a *AgentLoop) dispatchMessage(ctx context.Context, msg chat.Inbound) {
 	// attributed separately by drainPendingMsgs, so the raw content is queued.
 	queuedContent := userContent
 	userContent = labelSharedContent(msg.Channel, msg.Metadata, userContent)
-	messages := a.context.BuildMessages(sess.GetHistory(), userContent, msg.Channel, msg.ChatID, msg.SenderID, memCtx, memories, msg.Metadata)
+
+	// Signal turns run in their own namespace session, but they must not be
+	// blind to the main conversation: when a wake-up (e.g. agentchat
+	// check_messages) fires right after the interactive turn completed a
+	// task, the signal-turn agent would otherwise re-do work it can't see
+	// was already done. Build signal turns from a READ-ONLY snapshot of the
+	// main session history plus the signal's own namespace history — the
+	// main conversation first, then a divider, then the signal session
+	// (which accumulates prior signal results). Writes still go to the
+	// signal session only; the main session is never mutated by signal turns.
+	buildHistory := sess.GetHistory()
+	if isSignal && !isSystemChannel(msg.Channel) {
+		if mainHist, ok := a.sessions.SnapshotHistory(sessionKey); ok && len(mainHist) > 0 {
+			div := "system: [The entries above are the main conversation for this chat. What follows is the history of prior signal wake-ups handled separately.]"
+			merged := make([]string, 0, len(mainHist)+len(buildHistory)+1)
+			merged = append(merged, mainHist...)
+			merged = append(merged, div)
+			merged = append(merged, buildHistory...)
+			buildHistory = merged
+		}
+	}
+	messages := a.context.BuildMessages(buildHistory, userContent, msg.Channel, msg.ChatID, msg.SenderID, memCtx, memories, msg.Metadata)
 
 	// For signals, do NOT cancel the active interactive turn — run in parallel.
 	// For regular user messages, queue if a turn is already running (don't interrupt).
@@ -2394,6 +2436,35 @@ func (a *AgentLoop) dispatchMessage(ctx context.Context, msg chat.Inbound) {
 		a.mu.Lock()
 		delete(a.active, signalSessionKey)
 		a.mu.Unlock()
+
+		// Flush any signals that were deferred while this turn ran. Each is
+		// re-dispatched through the normal path — now that no turn is
+		// active, the signal gets its own namespace session, full metadata,
+		// and result injection. Re-dispatch happens on a fresh goroutine so
+		// a slow signal turn can't block this cleanup path. Only ONE signal
+		// per session is released per flush: the re-dispatched signal turn
+		// itself runs under a signal: namespace key, so a storm of deferred
+		// signals would otherwise all fire concurrently — re-creating the
+		// parallel-race this queue exists to prevent. The next flush (or
+		// the signal turn's own completion) releases the rest.
+		a.mu.Lock()
+		deferred := a.signalQueue[sessionKey]
+		if len(deferred) > 0 {
+			remaining := len(deferred) - 1
+			if remaining == 0 {
+				delete(a.signalQueue, sessionKey)
+			} else {
+				a.signalQueue[sessionKey] = deferred[1:]
+			}
+			a.mu.Unlock()
+			// Detach from this turn's cancellation: the re-dispatched
+			// signal must outlive the turn that flushed it (context
+			// values — workspace, user — are preserved).
+			go a.dispatchMessage(context.WithoutCancel(ctx), deferred[0])
+			log.Printf("Signal: released deferred signal for %s (%d still queued)", sessionKey, remaining)
+		} else {
+			a.mu.Unlock()
+		}
 
 		// If this was a signal turn, inject the result into the main
 		// interactive session so the next user message has context about
