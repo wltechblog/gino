@@ -83,7 +83,10 @@ func NewWebPostTool(timeoutS, maxBytes int, userAgent string, fs *FilesystemTool
 
 func (t *WebPostTool) Name() string { return "web_post" }
 func (t *WebPostTool) Description() string {
-	return "HTTP POST/PUT/PATCH with inline body or multipart file upload streamed from disk (file contents never enter the conversation)"
+	return "HTTP POST/PUT/PATCH with custom headers (Authorization, Bearer tokens, API keys), JSON or raw body, or multipart file upload streamed from disk. " +
+		"Prefer this over curl for API calls: headers, auth tokens, and bodies stay in one structured call. " +
+		"For LARGE payloads, first write the body to a file, then send it with bodyFile (bytes go disk-to-socket, never through the conversation). " +
+		"Pass json as an OBJECT, not a string."
 }
 
 func (t *WebPostTool) Parameters() map[string]interface{} {
@@ -122,7 +125,11 @@ func (t *WebPostTool) Parameters() map[string]interface{} {
 			},
 			"json": map[string]interface{}{
 				"type":        "object",
-				"description": "JSON request body (marshaled and sent with application/json content type)",
+				"description": "JSON request body (marshaled and sent with application/json content type). Pass an object, not a string.",
+			},
+			"bodyFile": map[string]interface{}{
+				"type":        "string",
+				"description": "Path to a file whose contents are sent as the raw request body (streamed from disk — use for large payloads; sandboxed like the filesystem tool)",
 			},
 			"files": map[string]interface{}{
 				"type":        "array",
@@ -161,10 +168,40 @@ func (t *WebPostTool) Execute(ctx context.Context, args map[string]interface{}) 
 	files := fileSpecs(args["files"])
 	fields, _ := args["fields"].(map[string]interface{})
 	bodyStr, hasBody := args["body"].(string)
-	jsonVal, hasJSON := args["json"]
+	bodyFile, hasBodyFile := args["bodyFile"].(string)
+	if hasBodyFile && bodyFile == "" {
+		return "", fmt.Errorf("web_post: 'bodyFile' must be a non-empty file path")
+	}
 
-	if len(files) > 0 && (hasBody || hasJSON) {
-		return "", fmt.Errorf("web_post: 'files' cannot be combined with 'body' or 'json' (multipart vs inline)")
+	// LLMs frequently pass a JSON body as a string ("json": "{\"a\":1}")
+	// instead of an object. Sending that string as-is double-encodes it.
+	// Detect and re-marshal so the server receives the intended object.
+	jsonVal, hasJSON := args["json"]
+	if !hasJSON && hasBody {
+		if obj, ok := bodyStrAsJSONCandidate(bodyStr); ok {
+			// body was a JSON object serialized as a string — promote it to
+			// the json path so it is marshaled once, not double-encoded.
+			jsonVal, hasJSON = obj, true
+			hasBody = false
+		}
+	}
+	if hasJSON {
+		if jsonStr, ok := jsonVal.(string); ok {
+			var probe map[string]interface{}
+			if err := json.Unmarshal([]byte(jsonStr), &probe); err == nil {
+				// Valid JSON object passed as string — parse and re-marshal
+				// through the normal path so it is not double-encoded.
+				jsonVal = probe
+			}
+			_ = jsonStr
+		}
+	}
+
+	if len(files) > 0 && (hasBody || hasJSON || hasBodyFile) {
+		return "", fmt.Errorf("web_post: 'files' cannot be combined with 'body', 'json' or 'bodyFile' (multipart vs inline)")
+	}
+	if hasBodyFile && (hasBody || hasJSON) {
+		return "", fmt.Errorf("web_post: use either 'bodyFile' or 'body'/'json', not both")
 	}
 	if hasBody && hasJSON {
 		return "", fmt.Errorf("web_post: use either 'body' or 'json', not both")
@@ -179,7 +216,7 @@ func (t *WebPostTool) Execute(ctx context.Context, args map[string]interface{}) 
 	// Deadline: uploads get a floor so big streams aren't cut by the
 	// default web timeout. Context governs; client has no Timeout.
 	deadline := t.timeout
-	if len(files) > 0 && deadline < minUploadTimeoutS*time.Second {
+	if (len(files) > 0 || hasBodyFile) && deadline < minUploadTimeoutS*time.Second {
 		deadline = minUploadTimeoutS * time.Second
 	}
 	ctx, cancel := context.WithTimeout(ctx, deadline)
@@ -226,6 +263,16 @@ func (t *WebPostTool) Execute(ctx context.Context, args map[string]interface{}) 
 		}()
 
 		reader = pr
+	} else if hasBodyFile {
+		if t.fs == nil {
+			return "", fmt.Errorf("web_post: bodyFile unavailable (filesystem tool not wired)")
+		}
+		src, err := t.fs.openSandboxed(bodyFile)
+		if err != nil {
+			return "", fmt.Errorf("web_post: open bodyFile %q: %w", bodyFile, err)
+		}
+		defer func() { _ = src.Close() }()
+		reader = src
 	} else if hasJSON {
 		buf, err := json.Marshal(jsonVal)
 		if err != nil {
@@ -242,6 +289,13 @@ func (t *WebPostTool) Execute(ctx context.Context, args map[string]interface{}) 
 		}
 		reader = strings.NewReader(bodyStr)
 	} // else: empty body
+
+	if contentType == "" && hasBodyFile {
+		contentType = detectContentTypeFor(bodyFile)
+		if contentType == "" {
+			contentType = "application/octet-stream"
+		}
+	}
 
 	req, err := http.NewRequestWithContext(ctx, method, u, reader)
 	if err != nil {
@@ -371,6 +425,19 @@ func stringArg(args map[string]interface{}, key, def string) string {
 		return v
 	}
 	return def
+}
+
+// bodyStrAsJSONCandidate returns the parsed object when bodyStr parses as a
+// JSON object (LLMs often serialize JSON bodies as plain strings).
+func bodyStrAsJSONCandidate(bodyStr string) (interface{}, bool) {
+	if len(bodyStr) < 2 || bodyStr[0] != '{' || bodyStr[len(bodyStr)-1] != '}' {
+		return nil, false
+	}
+	var probe map[string]interface{}
+	if err := json.Unmarshal([]byte(bodyStr), &probe); err != nil || len(probe) == 0 {
+		return nil, false
+	}
+	return probe, true
 }
 
 // multipartEscapeQuotes sanitizes a form name/filename for the

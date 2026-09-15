@@ -201,7 +201,7 @@ Gino includes a built-in tool set:
 | `filesystem` | Read, write, edit, and list files in the workspace |
 | `exec` | Execute shell commands |
 | `web` | Fetch web content (with timeout, size limit, and content-type filtering) |
-| `web_post` | HTTP POST/PUT/PATCH with inline body or multipart file upload streamed from disk (file contents never enter the conversation) |
+ | `web_post` | HTTP POST/PUT/PATCH with custom headers (Bearer tokens, API keys), JSON/raw/body-file bodies, or multipart uploads streamed from disk — prefer over curl for API calls | 
 | `message` | Send messages to the current channel |
 | `write_memory` / `read_memory` | Persist and recall information |
 | `cron` | Schedule one-time, recurring, or cron-expression tasks |
