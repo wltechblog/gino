@@ -9,8 +9,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/wltechblog/gino/internal/config"
@@ -22,20 +24,41 @@ import (
 //   - "permissive": block truly dangerous commands (dd, mkfs, shutdown), allow absolute paths, array-only
 //   - "yolo":       no restrictions — string commands allowed, no path validation, no blacklist
 
+const (
+	// defaultExecTimeoutS applies when no explicit timeout is configured.
+	// Foreground exec must never run unbounded — long jobs belong to the
+	// background tool.
+	defaultExecTimeoutS = 300
+	// maxPerCallExecTimeoutS caps the per-call "timeout" argument. Calls may
+	// never request an infinite or absurdly long foreground timeout.
+	maxPerCallExecTimeoutS = 3600
+)
+
 type ExecTool struct {
 	mu          sync.RWMutex
 	timeout     time.Duration
 	allowedDir  string
 	allowedDirs []string
 	sandbox     config.SandboxConfig
+
+	// inFlight tracks live commands by turn-origin session key
+	// ("channel:chatID") so /abort can kill a session's foreground execs
+	// without stopping the turn itself.
+	inFlight map[string]map[*inflightCmd]struct{}
+}
+
+// inflightCmd is one live exec command registered for abort tracking.
+type inflightCmd struct {
+	cmd     *exec.Cmd
+	aborted bool // set when AbortSession targeted this command
 }
 
 func NewExecTool(timeoutSecs int) *ExecTool {
-	return &ExecTool{timeout: time.Duration(timeoutSecs) * time.Second, sandbox: config.SandboxConfig{}}
+	return &ExecTool{timeout: time.Duration(timeoutSecs) * time.Second, sandbox: config.SandboxConfig{}, inFlight: make(map[string]map[*inflightCmd]struct{})}
 }
 
 func NewExecToolWithWorkspace(timeoutSecs int, allowedDir string) *ExecTool {
-	return &ExecTool{timeout: time.Duration(timeoutSecs) * time.Second, allowedDir: allowedDir, sandbox: config.SandboxConfig{}}
+	return &ExecTool{timeout: time.Duration(timeoutSecs) * time.Second, allowedDir: allowedDir, sandbox: config.SandboxConfig{}, inFlight: make(map[string]map[*inflightCmd]struct{})}
 }
 
 func NewExecToolWithAllowedDirs(timeoutSecs int, allowedDir string, allowedDirs []string) *ExecTool {
@@ -45,18 +68,21 @@ func NewExecToolWithAllowedDirs(timeoutSecs int, allowedDir string, allowedDirs 
 			dirs = append(dirs, filepath.Clean(d))
 		}
 	}
-	return &ExecTool{timeout: time.Duration(timeoutSecs) * time.Second, allowedDir: allowedDir, allowedDirs: dirs, sandbox: config.SandboxConfig{Mode: "permissive"}}
+	return &ExecTool{timeout: time.Duration(timeoutSecs) * time.Second, allowedDir: allowedDir, allowedDirs: dirs, sandbox: config.SandboxConfig{Mode: "permissive"}, inFlight: make(map[string]map[*inflightCmd]struct{})}
 }
 
 // NewExecToolWithSandbox creates an ExecTool with full sandbox configuration.
 func NewExecToolWithSandbox(timeoutSecs int, allowedDir string, allowedDirs []string, sandbox config.SandboxConfig) *ExecTool {
+	if timeoutSecs <= 0 {
+		timeoutSecs = defaultExecTimeoutS
+	}
 	dirs := make([]string, 0, len(allowedDirs))
 	for _, d := range allowedDirs {
 		if d != "" {
 			dirs = append(dirs, filepath.Clean(d))
 		}
 	}
-	return &ExecTool{timeout: time.Duration(timeoutSecs) * time.Second, allowedDir: allowedDir, allowedDirs: dirs, sandbox: sandbox}
+	return &ExecTool{timeout: time.Duration(timeoutSecs) * time.Second, allowedDir: allowedDir, allowedDirs: dirs, sandbox: sandbox, inFlight: make(map[string]map[*inflightCmd]struct{})}
 }
 
 func (t *ExecTool) Name() string { return "exec" }
@@ -81,6 +107,15 @@ func (t *ExecTool) Parameters() map[string]interface{} {
 			"type":        "string",
 			"description": "Working directory for the command. Must be within an allowed directory. Defaults to the workspace root.",
 		},
+	}
+	// Per-call timeout: capped by maxPerCallExecTimeoutS; there is no
+	// "infinite" option by design. Long-running work belongs to the
+	// background tool.
+	props["timeout"] = map[string]interface{}{
+		"type":        "integer",
+		"description": fmt.Sprintf("Per-call timeout in seconds (default %d, hard max %d — never infinite; use the background tool for longer jobs).", defaultExecTimeoutS, maxPerCallExecTimeoutS),
+		"minimum":     1,
+		"maximum":     maxPerCallExecTimeoutS,
 	}
 	// In yolo mode, accept string commands too
 	if t.sandbox.IsYolo() {
@@ -295,8 +330,27 @@ func (t *ExecTool) Validate(argv []string, cwd string) error {
 }
 
 func (t *ExecTool) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
+	// Per-call timeout override, clamped to the hard ceiling.
+	if raw, ok := args["timeout"]; ok {
+		secs := 0
+		switch v := raw.(type) {
+		case float64:
+			secs = int(v)
+		case int:
+			secs = v
+		case string:
+			if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+				secs = n
+			}
+		}
+		if secs > 0 {
+			if secs > maxPerCallExecTimeoutS {
+				secs = maxPerCallExecTimeoutS
+			}
+			ctx = withPerCallTimeout(ctx, time.Duration(secs)*time.Second)
+		}
+	}
 	cmdRaw, ok := args["cmd"]
-	log.Printf("[DEBUG-EXEC] cmdRaw type: %T, value: %v", cmdRaw, cmdRaw)
 
 	if !ok {
 		return "", fmt.Errorf("exec: 'cmd' argument required")
@@ -405,6 +459,21 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]interface{}) (st
 	return t.runCmd(ctx, "sh", []string{"-c", shellCmd}, workDir)
 }
 
+// SetDefaultTimeout updates the tool's default foreground timeout. Zero or
+// negative restores the 300s built-in; anything above the hard ceiling is
+// clamped. There is no infinite setting.
+func (t *ExecTool) SetDefaultTimeout(secs int) {
+	if secs <= 0 {
+		secs = defaultExecTimeoutS
+	}
+	if secs > maxPerCallExecTimeoutS {
+		secs = maxPerCallExecTimeoutS
+	}
+	t.mu.Lock()
+	t.timeout = time.Duration(secs) * time.Second
+	t.mu.Unlock()
+}
+
 // SetWorkspace atomically updates the default working directory (used when
 // no cwd argument is provided). The allowed-dirs list is left untouched —
 // previously allowed directories remain executable-in. Used by runtime
@@ -449,25 +518,173 @@ func (t *ExecTool) resolveWorkDir(args map[string]interface{}) (string, error) {
 
 func (t *ExecTool) runCmd(ctx context.Context, prog string, args []string, dir string) (string, error) {
 	cctx := ctx
-	if t.timeout > 0 {
-		var cancel context.CancelFunc
-		cctx, cancel = context.WithTimeout(ctx, t.timeout)
-		defer cancel()
+	// Foreground exec is ALWAYS deadline-bounded. The tool default applies
+	// unless the call requested a per-call timeout; requests above the hard
+	// ceiling are clamped, never honored. Zero tool default (legacy callers)
+	// falls back to defaultExecTimeoutS. There is deliberately no "no
+	// timeout" option — unbounded work belongs to the background tool.
+	toolTimeout := t.timeout
+	if toolTimeout <= 0 {
+		toolTimeout = time.Duration(defaultExecTimeoutS) * time.Second
 	}
+	deadline := time.Duration(maxPerCallExecTimeoutS) * time.Second
+	if perCall, ok := perCallTimeoutFromContext(ctx); ok && perCall > 0 && perCall < deadline {
+		deadline = perCall
+	} else if toolTimeout < deadline {
+		deadline = toolTimeout
+	}
+	var cancel context.CancelFunc
+	cctx, cancel = context.WithTimeout(ctx, deadline)
+	defer cancel()
 
 	cmd := exec.CommandContext(cctx, prog, args...)
 	if dir != "" {
 		cmd.Dir = dir
 	}
-	log.Printf("[DEBUG-EXEC] runCmd: prog=%s args=%v dir=%s", prog, args, dir)
+	// Run in its own process group so timeout/cancel kills the whole tree
+	// (sh plus every child it spawned). Killing only the direct child —
+	// the default CommandContext behavior — leaves grandchildren alive
+	// holding the output pipe open, and CombinedOutput then blocks forever
+	// even though the "timeout fired". This is the bug that made /stop
+	// appear dead on runaway commands.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process != nil {
+			// Negative pid = signal the entire process group.
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+		return cmd.Process.Kill()
+	}
+	// Belt and braces: even if something still holds the pipes open, the
+	// call returns shortly after the deadline instead of blocking forever.
+	cmd.WaitDelay = 5 * time.Second
+
+	// Register for /abort tracking keyed by the turn's origin session.
+	ic := &inflightCmd{cmd: cmd}
+	session := sessionKeyFromContext(ctx)
+	t.registerInflight(session, ic)
+	defer t.unregisterInflight(session, ic)
+
 	b, err := cmd.CombinedOutput()
 	if err != nil {
-		log.Printf("[DEBUG-EXEC] error: %v, output: %s", err, string(b))
+		if ic.aborted {
+			return string(b), fmt.Errorf("exec aborted by user: %w", err)
+		}
+		if cctx.Err() == context.DeadlineExceeded {
+			return string(b), fmt.Errorf("exec error: timed out after %s: %w", deadline, err)
+		}
 		return string(b), fmt.Errorf("exec error: %w", err)
 	}
 	out := string(b)
 	out = strings.TrimRight(out, "\n")
 	return out, nil
+}
+
+// perCallTimeoutKey carries the caller-requested per-call timeout through
+// the registry into runCmd.
+type perCallTimeoutKey struct{}
+
+// withPerCallTimeout is set by the registry when the call's arguments
+// include a "timeout" (seconds) field.
+func withPerCallTimeout(ctx context.Context, d time.Duration) context.Context {
+	return context.WithValue(ctx, perCallTimeoutKey{}, d)
+}
+
+func perCallTimeoutFromContext(ctx context.Context) (time.Duration, bool) {
+	d, ok := ctx.Value(perCallTimeoutKey{}).(time.Duration)
+	return d, ok
+}
+
+// execSessionKey carries the turn's channel:chatID for /abort targeting.
+type execSessionKey struct{}
+
+// WithExecSession stamps the turn's origin session key onto a context so
+// in-flight exec commands can be attributed to the chat that started them
+// and aborted selectively.
+func WithExecSession(ctx context.Context, sessionKey string) context.Context {
+	if sessionKey == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, execSessionKey{}, sessionKey)
+}
+
+func sessionKeyFromContext(ctx context.Context) string {
+	s, _ := ctx.Value(execSessionKey{}).(string)
+	return s
+}
+
+func (t *ExecTool) registerInflight(session string, ic *inflightCmd) {
+	if session == "" {
+		return
+	}
+	t.mu.Lock()
+	if t.inFlight == nil {
+		t.inFlight = make(map[string]map[*inflightCmd]struct{})
+	}
+	if t.inFlight[session] == nil {
+		t.inFlight[session] = make(map[*inflightCmd]struct{})
+	}
+	t.inFlight[session][ic] = struct{}{}
+	t.mu.Unlock()
+}
+
+func (t *ExecTool) unregisterInflight(session string, ic *inflightCmd) {
+	if session == "" {
+		return
+	}
+	t.mu.Lock()
+	if m := t.inFlight[session]; m != nil {
+		delete(m, ic)
+		if len(m) == 0 {
+			delete(t.inFlight, session)
+		}
+	}
+	t.mu.Unlock()
+}
+
+// AbortSession kills every in-flight foreground exec attributed to the
+// given origin session key. The calls return with an "aborted by user"
+// error; the turn itself keeps running. Returns the number of commands
+// killed.
+func (t *ExecTool) AbortSession(session string) int {
+	return t.abortMatching(func(k string) bool { return k == session })
+}
+
+// AbortSessionPrefix kills in-flight execs for all sessions whose key
+// starts with the given chat prefix (channel:chatID) — covers the bare
+// key, namespaced project keys, and the signal namespace of one chat.
+func (t *ExecTool) AbortSessionPrefix(chatKey string) int {
+	if chatKey == "" {
+		return 0
+	}
+	// Session keys that belong to one chat share the "channel:chatID" tail:
+	// "telegram:111", "signal:telegram:111", "proj:book:telegram:111".
+	// Match on the tail so an abort from the bare chat key reaches the
+	// signal namespace and project namespaces too.
+	return t.abortMatching(func(k string) bool {
+		return k == chatKey || strings.HasSuffix(k, ":"+chatKey)
+	})
+}
+
+func (t *ExecTool) abortMatching(match func(string) bool) int {
+	t.mu.Lock()
+	killed := 0
+	for key, m := range t.inFlight {
+		if !match(key) {
+			continue
+		}
+		for ic := range m {
+			ic.aborted = true
+			if ic.cmd != nil && ic.cmd.Process != nil {
+				// Process-group kill — same reason as runCmd's Cancel.
+				_ = syscall.Kill(-ic.cmd.Process.Pid, syscall.SIGKILL)
+				killed++
+			}
+		}
+		delete(t.inFlight, key)
+	}
+	t.mu.Unlock()
+	return killed
 }
 
 // shellJoin joins args into a properly quoted shell command string.

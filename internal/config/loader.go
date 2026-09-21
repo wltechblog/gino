@@ -63,6 +63,11 @@ func applyEnvOverrides(cfg *Config) {
 			cfg.Agents.Defaults.MaxToolIterations = n
 		}
 	}
+	if v := os.Getenv("GINO_EXEC_TIMEOUT_S"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.Agents.Defaults.ExecTimeoutS = n
+		}
+	}
 	if v := os.Getenv("GINO_ENABLE_TOOL_ACTIVITY_INDICATOR"); v != "" {
 		b := v != "false" && v != "0" && v != "False" && v != "FALSE"
 		cfg.Agents.Defaults.EnableToolActivityIndicator = &b

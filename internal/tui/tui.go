@@ -871,9 +871,18 @@ func (s *ChatSession) sendMessage(ctx context.Context, text string) {
 			if c == '\n' || c == '\r' {
 				cmd := strings.TrimSpace(string(lineBuf))
 				lineBuf = lineBuf[:0]
-				if cmd == "/stop" || cmd == "/abort" || cmd == "/cancel" {
+				if cmd == "/stop" || cmd == "/cancel" {
 					abort()
 					return
+				}
+				if strings.EqualFold(cmd, "/abort") {
+					// Kill in-flight execs without ending the turn.
+					if n := s.agent.AbortExec(s.sessionKey()); n > 0 {
+						s.writeAbove(fmt.Sprintf("%s⛔ Aborted %d running command(s) — the turn continues.%s\n", yellow, n, reset))
+					} else {
+						s.writeAbove(fmt.Sprintf("%sNo running commands to abort.%s\n", dim, reset))
+					}
+					continue
 				}
 			} else if c >= 0x20 {
 				lineBuf = append(lineBuf, c)
@@ -1095,13 +1104,21 @@ func (s *ChatSession) handleCommand(line string) bool {
 		}
 		s.writeAbove(fmt.Sprintf("\n%sUse /session <N> to switch.%s\n\n", dim, reset))
 
-	case "/stop", "/abort", "/cancel":
+	case "/stop", "/cancel":
 		if !s.busy {
 			s.writeAbove(fmt.Sprintf("%sNothing to stop.%s\n", dim, reset))
 		} else if s.busyCancel != nil {
 			s.agent.StopTurn(s.sessionKey())
 			s.busyCancel()
 			s.writeAbove(fmt.Sprintf("%s✓ Aborting current turn...%s\n", yellow, reset))
+		}
+
+	case "/abort":
+		// Kill in-flight foreground execs WITHOUT ending the turn.
+		if n := s.agent.AbortExec(s.sessionKey()); n > 0 {
+			s.writeAbove(fmt.Sprintf("%s⛔ Aborted %d running command(s) — the turn continues.%s\n", yellow, n, reset))
+		} else {
+			s.writeAbove(fmt.Sprintf("%sNo running commands to abort.%s\n", dim, reset))
 		}
 
 	case "/model":
@@ -1204,6 +1221,7 @@ func (s *ChatSession) printHelp() {
 	s.writeAbove(fmt.Sprintf("  %s/search text%s  Search saved sessions\n", cyan, reset))
 	s.writeAbove(fmt.Sprintf("  %s/purge days%s  Delete sessions older than N days\n", cyan, reset))
 	s.writeAbove(fmt.Sprintf("  %s/stop%s       Abort the current response\n", cyan, reset))
+	s.writeAbove(fmt.Sprintf("  %s/abort%s      Kill running exec commands (turn continues)\n", cyan, reset))
 	s.writeAbove(fmt.Sprintf("  %sEsc Esc%s     Abort the current response (press Esc twice within 1s)\n", cyan, reset))
 	s.writeAbove(fmt.Sprintf("  %s/clear%s      Clear the terminal screen\n", cyan, reset))
 	s.writeAbove(fmt.Sprintf("  %s/model%s      Show or set model (/model gpt-4o)\n", cyan, reset))

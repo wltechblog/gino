@@ -339,6 +339,7 @@ func runAgent(homeFlag string, args []string) {
 	}
 	if cfg.Agents.Defaults.AutoContinue != nil {
 		ag.SetAutoContinue(*cfg.Agents.Defaults.AutoContinue)
+		ag.SetExecTimeout(cfg.Agents.Defaults.ExecTimeoutS)
 	}
 	if cfg.Agents.Defaults.EnableToolActivityIndicator != nil {
 		ag.SetToolActivityIndicator(*cfg.Agents.Defaults.EnableToolActivityIndicator)

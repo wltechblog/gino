@@ -9,6 +9,7 @@
       "maxToolIterations": 50,
       "heartbeatIntervalS": 30,
       "requestTimeoutS": 300,
+      "execTimeoutS": 300,
       "maxRetries": 2,
       "retryBaseWaitS": 2,
       "visionModel": "",

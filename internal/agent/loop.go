@@ -29,8 +29,9 @@ import (
 var rememberRE = regexp.MustCompile(`(?i)^remember(?:\s+to)?\s+(.+)$`)
 
 // stopCommands are message prefixes that trigger immediate cancellation
-// of the current turn for a session.
-var stopCommands = []string{"/stop", "/cancel", "/abort"}
+// of the current turn for a session. /abort is intentionally NOT here —
+// it kills in-flight foreground execs without stopping the turn.
+var stopCommands = []string{"/stop", "/cancel"}
 
 // trimTurnMessages trims the message chain to keep it within maxMsgs.
 // It preserves: system prompt, the last assistant text response (so the LLM
@@ -686,7 +687,9 @@ func NewAgentLoopWithProfileWorkspace(b *chat.Hub, provider providers.LLMProvide
 	// MCP image results are saved under the active workspace so the agent
 	// (and the filesystem tool) can reach them for vision analysis.
 	tools.SetMCPImageDir(filepath.Join(workspace, "uploads", "mcp"))
-	execTool := tools.NewExecToolWithSandbox(60, workspace, allDirs, sandbox)
+	// 0 = defaultExecTimeoutS (300s) inside the constructor; main.go can
+	// refine it via SetExecTimeout from agents.defaults.execTimeoutS.
+	execTool := tools.NewExecToolWithSandbox(0, workspace, allDirs, sandbox)
 	register(execTool)
 	register(tools.NewWebToolWithConfig(webCfg.TimeoutS, webCfg.MaxResponseBytes, webCfg.UserAgent))
 	register(tools.NewWebPostTool(webCfg.TimeoutS, webCfg.MaxResponseBytes, webCfg.UserAgent, fsTool))
@@ -924,6 +927,40 @@ func NewAgentLoopWithProfileWorkspace(b *chat.Hub, provider providers.LLMProvide
 	log.Printf("Sandbox mode: %s", sandbox.GetMode())
 
 	return al
+}
+
+// SetExecTimeout refines the foreground exec tool's default timeout
+// (agents.defaults.execTimeoutS). Zero or negative reverts to the built-in
+// 300s default; values above maxPerCallExecTimeoutS are clamped. Foreground
+// exec is never infinite — long jobs belong to the background tool.
+func (a *AgentLoop) SetExecTimeout(secs int) {
+	if a.execTool != nil {
+		a.execTool.SetDefaultTimeout(secs)
+	}
+}
+
+// AbortExec kills every in-flight foreground exec for a session's current
+// and namespaced keys without stopping the turn. Returns how many commands
+// were killed. Used by /abort.
+func (a *AgentLoop) AbortExec(sessionKey string) int {
+	if a.execTool == nil {
+		return 0
+	}
+	// Exact key first (covers the namespaced key dispatchMessage computed).
+	n := a.execTool.AbortSession(sessionKey)
+	if n > 0 {
+		return n
+	}
+	// Fall back to the chat tail — covers the bare key when a project
+	// namespace is active, and the signal namespace. The chat key is the
+	// LAST two segments ("telegram:111" of "proj:book:telegram:111").
+	if i := strings.LastIndex(sessionKey, ":"); i > 0 {
+		if j := strings.LastIndex(sessionKey[:i], ":"); j > 0 {
+			return a.execTool.AbortSessionPrefix(sessionKey[j+1:])
+		}
+		return a.execTool.AbortSessionPrefix(sessionKey)
+	}
+	return 0
 }
 
 func (a *AgentLoop) SetToolActivityIndicator(enabled bool) {
@@ -1909,6 +1946,21 @@ func (a *AgentLoop) dispatchMessage(ctx context.Context, msg chat.Inbound) {
 		// the ⏳ notice, giving the LLM context for the word).
 	}
 
+	// Handle /abort — kill in-flight foreground execs for this session
+	// WITHOUT stopping the turn. The aborted tool call returns an
+	// "aborted by user" error the agent sees, so it can adapt (retry
+	// differently, use the background tool, or give up gracefully) while
+	// its conversation context stays intact.
+	if c := strings.TrimSpace(msg.Content); strings.EqualFold(c, "/abort") {
+		killed := a.AbortExec(sessionKey)
+		if killed > 0 {
+			sendChannelNotification(a.hub, msg.Channel, msg.ChatID, fmt.Sprintf("⛔ Aborted %d running command(s) — the turn continues.", killed), msg.Metadata)
+		} else {
+			sendChannelNotification(a.hub, msg.Channel, msg.ChatID, "No running commands to abort.", msg.Metadata)
+		}
+		return
+	}
+
 	// Handle /stop — cancel the current turn for this session
 	if isStopCommand(msg.Content) {
 		a.mu.Lock()
@@ -2671,7 +2723,12 @@ func (a *AgentLoop) processTurn(ctx context.Context, at *activeTurn, sessionKey 
 				}
 
 				start := time.Now()
-				res, err := a.tools.Execute(a.ctxWithOrigin(ctx, msg.Channel, msg.ChatID), tc.Name, tc.Arguments)
+				res, err := a.tools.Execute(
+					tools.WithExecSession(
+						a.ctxWithOrigin(ctx, msg.Channel, msg.ChatID),
+						sessionKey,
+					),
+					tc.Name, tc.Arguments)
 				elapsed := time.Since(start).Round(time.Millisecond)
 
 				if err != nil {
@@ -3049,7 +3106,12 @@ func (a *AgentLoop) ProcessDirectWithSessionAndSystemPrompt(content string, time
 
 		messages = append(messages, providers.Message{Role: "assistant", Content: resp.Content, ToolCalls: resp.ToolCalls})
 		for _, tc := range resp.ToolCalls {
-			result, err := a.tools.Execute(a.ctxWithOrigin(ctx, a.directChannel, a.directChatID), tc.Name, tc.Arguments)
+			result, err := a.tools.Execute(
+				tools.WithExecSession(
+					a.ctxWithOrigin(ctx, a.directChannel, a.directChatID),
+					sessionKey,
+				),
+				tc.Name, tc.Arguments)
 			if err != nil {
 				result = "(tool error) " + err.Error()
 			}
