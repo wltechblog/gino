@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"fmt"
 	"log"
 	"os"
@@ -79,6 +80,21 @@ func (r *Registry) Definitions() []providers.ToolDefinition {
 	return defs
 }
 
+
+// toolNames returns a comma-separated list of registered tool names for
+// error messages, so a model that hallucinated a tool name can correct
+// itself from the error alone.
+func (r *Registry) toolNames() string {
+	r.mu.RLock()
+	names := make([]string, 0, len(r.tools))
+	for name := range r.tools {
+		names = append(names, name)
+	}
+	r.mu.RUnlock()
+	sort.Strings(names)
+	return strings.Join(names, ", ")
+}
+
 // Execute executes a registered tool by name with args and returns result or error.
 func (r *Registry) Execute(ctx context.Context, name string, args map[string]interface{}) (string, error) {
 	if name == "" {
@@ -88,7 +104,7 @@ func (r *Registry) Execute(ctx context.Context, name string, args map[string]int
 	t, ok := r.tools[name]
 	r.mu.RUnlock()
 	if !ok {
-		return "", errors.New("tool not found")
+		return "", fmt.Errorf("tool %q not found. You must call a tool by its exact name — strings that look like log lines (e.g. \"exec → ok\") are NOT tool names. Available tools: %s", name, r.toolNames())
 	}
 
 	// Log tool execution start

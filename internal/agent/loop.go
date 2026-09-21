@@ -246,12 +246,20 @@ func summarizeToolCalls(records []toolCallRecord) string {
 				}
 			}
 		case "exec":
-			if cmd, ok := r.Args["command"].([]interface{}); ok {
+			// Exec's argument key is "cmd" (string or []string). "command" is a
+			// legacy key that no tool uses — matching it produced empty
+			// summaries ("exec → ok") that models pattern-matched as literal
+			// tool names in later turns (field incident 2026-09-21).
+			if cmd, ok := r.Args["cmd"].([]interface{}); ok {
 				parts := make([]string, len(cmd))
 				for i, c := range cmd {
 					parts[i], _ = c.(string)
 				}
 				argSummary = " " + strings.Join(parts, " ")
+			} else if cmdStr, ok := r.Args["cmd"].(string); ok {
+				argSummary = " " + cmdStr
+			} else if cmd, ok := r.Args["cmd"].([]string); ok {
+				argSummary = " " + strings.Join(cmd, " ")
 			}
 		default:
 			b, _ := json.Marshal(r.Args)
@@ -2568,6 +2576,8 @@ func (a *AgentLoop) processTurn(ctx context.Context, at *activeTurn, sessionKey 
 	}
 
 	iteration := 0
+	notFoundCalls := 0 // consecutive tool-not-found failures (circuit breaker)
+	errNotifs := 0     // tool-error notifications sent this turn (flood cap)
 	var turnPrompt, turnCompletion, turnCached int
 	var lastUsage *providers.Usage
 	finalContent := ""
@@ -2734,13 +2744,25 @@ func (a *AgentLoop) processTurn(ctx context.Context, at *activeTurn, sessionKey 
 				if err != nil {
 					// Tool errors go to the LLM so it can respond appropriately.
 					// Only surface the error notification in Telegram DMs when enabled.
+					// Repeated not-found failures are circuit-broken: a hallucinated
+					// tool name can NEVER succeed, and retrying it burns the whole
+					// turn budget (field incident 2026-09-21: ~10.6K messages).
+					if strings.Contains(err.Error(), "not found") {
+						notFoundCalls++
+					}
 					isTelegram := msg.Channel == "telegram"
-					if isTelegram && !isGroup && a.enableToolErrorMessages {
+					if isTelegram && !isGroup && a.enableToolErrorMessages && errNotifs < 5 {
 						sendChannelNotification(a.hub, msg.Channel, msg.ChatID,
 							fmt.Sprintf("⚠️ %s failed: %v", tc.Name, err), msg.Metadata)
+						if errNotifs == 4 {
+							sendChannelNotification(a.hub, msg.Channel, msg.ChatID,
+								"(further ⚠️ error notices for this turn suppressed)", msg.Metadata)
+						}
+						errNotifs++
 					}
 					res = "(tool error) " + err.Error()
 				} else {
+					notFoundCalls = 0
 					a.recordSourceBinding(tc.Name, msg.Channel, msg.ChatID)
 					if a.enableToolCallMessages && !isGroup {
 						sendChannelNotification(a.hub, msg.Channel, msg.ChatID,
@@ -2767,6 +2789,15 @@ func (a *AgentLoop) processTurn(ctx context.Context, at *activeTurn, sessionKey 
 
 				toolMsg := providers.Message{Role: "tool", Content: toolResultForLLM, ToolCallID: tc.ID}
 				messages = append(messages, toolMsg)
+			}
+			// Circuit breaker: a hallucinated tool name can never succeed.
+			// After several consecutive not-found failures, abort the turn
+			// with a user-facing explanation instead of looping to the
+			// iteration cap. Reset the counter on ANY successful call.
+			if notFoundCalls >= 5 {
+				log.Printf("Turn %s aborted: %d consecutive tool-not-found failures", sessionKey, notFoundCalls)
+				finalContent = "⛔ I hit a loop calling a tool that doesn't exist. I've stopped rather than burn more of the budget. Please send the request again — if it recurs, check that the tool list above is correct."
+				break
 			}
 			// loop again
 			continue
@@ -3050,6 +3081,8 @@ func (a *AgentLoop) ProcessDirectWithSessionAndSystemPrompt(content string, time
 	var lastToolResult string
 	userMsgIdx := len(messages) - 1
 	iteration := 0
+	notFoundCalls := 0 // consecutive tool-not-found failures (circuit breaker)
+	errNotifs := 0     // tool-error notifications sent this turn (flood cap)
 	for iteration < a.maxIterations {
 		iteration++
 		// Trim/compact messages to keep context manageable
@@ -3113,11 +3146,21 @@ func (a *AgentLoop) ProcessDirectWithSessionAndSystemPrompt(content string, time
 				),
 				tc.Name, tc.Arguments)
 			if err != nil {
+				if strings.Contains(err.Error(), "not found") {
+					notFoundCalls++
+				}
 				result = "(tool error) " + err.Error()
+			} else {
+				notFoundCalls = 0
 			}
 			lastToolResult = result
 			messages = append(messages, providers.Message{Role: "tool", Content: a.overflowToolResult(result), ToolCallID: tc.ID})
 		}
+		if notFoundCalls >= 5 {
+			log.Printf("Turn %s aborted: %d consecutive tool-not-found failures", sessionKey, notFoundCalls)
+			return "⛔ I hit a loop calling a tool that doesn't exist. I've stopped rather than burn more of the budget. Please send the request again.", nil
+		}
+		_ = errNotifs // direct mode has no channel notifications; counter reserved for symmetry
 	}
 
 	maxIterReply := fmt.Sprintf("⏳ Max tool iterations reached (%d) without a final response. Send another message (e.g. 'continue') and I'll pick up where I left off.", iteration)
