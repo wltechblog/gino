@@ -1478,16 +1478,39 @@ func (a *AgentLoop) maybeAutoTitleSession(sessionKey, firstUserMsg, firstAssista
 	}()
 }
 
+// sessionsPerPage is how many archived sessions appear on one /sessions page
+// (Telegram inline keyboard or text listing). With 45+ archives the unpaginated
+// keyboard became unusable (and can exceed Telegram message limits).
+const sessionsPerPage = 10
+
 // buildSessionKeyboard builds a Telegram InlineKeyboardMarkup JSON string
-// from a list of archived sessions. Each session becomes a button row.
-// Callback data is "sw:<N>" (1-indexed) for session switching.
-func buildSessionKeyboard(sessions []*session.Session) string {
+// from one page of archived sessions. Each session becomes a button row with
+// its GLOBAL number (index across the full archive list, 1-indexed) so
+// /session N and /title N remain stable no matter which page is displayed.
+// Callback data is "sw:<N>" for session switching; when more than one page
+// exists, a final nav row offers ◀ / ▶ paging via "swpg:<page>".
+func buildSessionKeyboard(sessions []*session.Session, page int) string {
+	total := len(sessions)
+	pageCount := (total + sessionsPerPage - 1) / sessionsPerPage
+	if page < 1 {
+		page = 1
+	}
+	if page > pageCount {
+		page = pageCount
+	}
+	start := (page - 1) * sessionsPerPage
+	end := start + sessionsPerPage
+	if end > total {
+		end = total
+	}
+
 	type button struct {
 		Text         string `json:"text"`
 		CallbackData string `json:"callback_data"`
 	}
-	rows := make([][]button, 0, len(sessions)+1)
-	for i, s := range sessions {
+	rows := make([][]button, 0, sessionsPerPage+1)
+	for i := start; i < end; i++ {
+		s := sessions[i]
 		title := s.Title
 		if title == "" {
 			title = "Untitled"
@@ -1503,6 +1526,20 @@ func buildSessionKeyboard(sessions []*session.Session) string {
 		}
 		rows = append(rows, []button{{Text: label, CallbackData: fmt.Sprintf("sw:%d", i+1)}})
 	}
+
+	// Nav row: ◀ prev · page indicator · next ▶ (only when paginated).
+	if pageCount > 1 {
+		nav := []button{}
+		if page > 1 {
+			nav = append(nav, button{Text: "◀ " + fmt.Sprint(page-1), CallbackData: fmt.Sprintf("swpg:%d", page-1)})
+		}
+		nav = append(nav, button{Text: fmt.Sprintf("%d/%d", page, pageCount), CallbackData: "swpg:" + fmt.Sprint(page)})
+		if page < pageCount {
+			nav = append(nav, button{Text: fmt.Sprint(page+1) + " ▶", CallbackData: fmt.Sprintf("swpg:%d", page+1)})
+		}
+		rows = append(rows, nav)
+	}
+
 	type inlineKeyboard struct {
 		InlineKeyboard [][]button `json:"inline_keyboard"`
 	}
@@ -1512,6 +1549,29 @@ func buildSessionKeyboard(sessions []*session.Session) string {
 		return ""
 	}
 	return string(data)
+}
+
+// parseSessionsPage extracts the requested 1-based page number from the text
+// following "/sessions" (e.g. "/sessions 3"). Returns (page, true) when a
+// valid number was given, (1, false) for a plain "/sessions".
+func parseSessionsPage(rest string) (int, bool) {
+	rest = strings.TrimSpace(rest)
+	if rest == "" {
+		return 1, false
+	}
+	n, err := strconv.Atoi(rest)
+	if err != nil || n < 1 {
+		return 1, false
+	}
+	return n, true
+}
+
+// nextLabel returns "next" or "previous" for the text-list pagination hint.
+func nextLabel(page, pageCount int) string {
+	if page > 1 && page >= pageCount {
+		return "previous"
+	}
+	return "next"
 }
 
 // displayTitle returns the session title for display, substituting
@@ -2039,6 +2099,43 @@ func (a *AgentLoop) dispatchMessage(ctx context.Context, msg chat.Inbound) {
 	// These arrive as msg.Content with the callback data string.
 	if cbData, ok := msg.Metadata["callback_data"]; ok {
 		if cd, ok := cbData.(string); ok {
+			// Session-list page navigation: swpg:<page> re-renders the /sessions
+			// keyboard at the requested page. Must be checked before "sw:"
+			// (which it prefixes).
+			if strings.HasPrefix(cd, "swpg:") {
+				numStr := strings.TrimPrefix(cd, "swpg:")
+				page, err := strconv.Atoi(numStr)
+				if err != nil || page < 1 {
+					sendChannelNotification(a.hub, msg.Channel, msg.ChatID, "Invalid page.")
+					return
+				}
+				archivePrefix := sessionKey + ":archive:"
+				sessions := a.sessions.ListByPrefix(archivePrefix)
+				pageCount := (len(sessions) + sessionsPerPage - 1) / sessionsPerPage
+				if pageCount == 0 {
+					sendChannelNotification(a.hub, msg.Channel, msg.ChatID, "📋 No saved sessions.")
+					return
+				}
+				if page > pageCount {
+					page = pageCount
+				}
+				var header string
+				if cur := a.sessions.Get(sessionKey); cur != nil && len(cur.History) > 0 {
+					age := "unknown"
+					if !cur.UpdatedAt.IsZero() {
+						age = humanizeDuration(time.Since(cur.UpdatedAt))
+					}
+					header = fmt.Sprintf("📍 *Current:* %s — _%d messages, %s ago_\n\n", displayTitle(cur.Title), len(cur.History), age)
+				}
+				markup := buildSessionKeyboard(sessions, page)
+				meta := map[string]interface{}{"reply_markup": markup}
+				pageHint := ""
+				if pageCount > 1 {
+					pageHint = fmt.Sprintf(" \\(page %d/%d\\)", page, pageCount)
+				}
+				sendChannelNotification(a.hub, msg.Channel, msg.ChatID, header+"📋 *Saved Sessions*"+pageHint+" — tap to switch:", meta)
+				return
+			}
 			if strings.HasPrefix(cd, "sw:") {
 				// Session switch callback: sw:<N>
 				numStr := strings.TrimPrefix(cd, "sw:")
@@ -2097,13 +2194,16 @@ func (a *AgentLoop) dispatchMessage(ctx context.Context, msg chat.Inbound) {
 		return
 	}
 
-	// Handle /sessions — list archived sessions; the CURRENT session is shown
-	// as a header line so its title (e.g. from /title) is visible without
-	// archiving it first. Numbered entries remain archives-only, so /session
-	// N and /title N indexes are unchanged.
-	if strings.TrimSpace(msg.Content) == "/sessions" {
+	// Handle /sessions [page] — list archived sessions, paginated; the CURRENT
+	// session is shown as a header line so its title (e.g. from /title) is
+	// visible without archiving it first. Numbered entries are GLOBAL indexes
+	// across all pages (archives-only), so /session N, /title N and sw:N
+	// callbacks stay stable regardless of which page is displayed.
+	if sessRest, ok := strings.CutPrefix(strings.TrimSpace(msg.Content), "/sessions"); ok && (sessRest == "" || sessRest[0] == ' ') {
+		page, _ := parseSessionsPage(sessRest)
 		archivePrefix := sessionKey + ":archive:"
 		sessions := a.sessions.ListByPrefix(archivePrefix)
+		pageCount := (len(sessions) + sessionsPerPage - 1) / sessionsPerPage
 
 		// Header: current session + title (when it exists).
 		var header string
@@ -2124,19 +2224,36 @@ func (a *AgentLoop) dispatchMessage(ctx context.Context, msg chat.Inbound) {
 			return
 		}
 
-		// For Telegram, send an inline keyboard with session buttons.
+		// Clamp the requested page into range.
+		if page > pageCount {
+			page = pageCount
+		}
+
+		// Page hint appended to the listing header.
+		pageHint := ""
+		if pageCount > 1 {
+			pageHint = fmt.Sprintf(" \\(page %d/%d\\)", page, pageCount)
+		}
+
+		// For Telegram, send an inline keyboard with session buttons + nav row.
 		if msg.Channel == "telegram" {
-			markup := buildSessionKeyboard(sessions)
+			markup := buildSessionKeyboard(sessions, page)
 			meta := map[string]interface{}{"reply_markup": markup}
-			sendChannelNotification(a.hub, msg.Channel, msg.ChatID, header+"📋 *Saved Sessions* — tap to switch:", meta)
+			sendChannelNotification(a.hub, msg.Channel, msg.ChatID, header+"📋 *Saved Sessions*"+pageHint+" — tap to switch:", meta)
 			return
 		}
 
-		// Fallback for non-Telegram channels: text list.
+		// Fallback for non-Telegram channels: paginated text list.
+		start := (page - 1) * sessionsPerPage
+		end := start + sessionsPerPage
+		if end > len(sessions) {
+			end = len(sessions)
+		}
 		var sb strings.Builder
 		sb.WriteString(header)
-		sb.WriteString("📋 *Saved Sessions*\n\n")
-		for i, s := range sessions {
+		sb.WriteString("📋 *Saved Sessions*" + pageHint + "\n\n")
+		for i := start; i < end; i++ {
+			s := sessions[i]
 			title := s.Title
 			if title == "" {
 				title = "Untitled"
@@ -2148,7 +2265,11 @@ func (a *AgentLoop) dispatchMessage(ctx context.Context, msg chat.Inbound) {
 			msgCount := len(s.History)
 			sb.WriteString(fmt.Sprintf("%d\\. %s\n   _%d messages, %s ago_\n   `/session %d`\n\n", i+1, title, msgCount, age, i+1))
 		}
-		sb.WriteString("Use `/session <number>` to switch.")
+		if pageCount > 1 {
+			sb.WriteString(fmt.Sprintf("Use `/sessions %d` for %s page, `/session <number>` to switch.", page+1, nextLabel(page, pageCount)))
+		} else {
+			sb.WriteString("Use `/session <number>` to switch.")
+		}
 		sendChannelNotification(a.hub, msg.Channel, msg.ChatID, sb.String())
 		return
 	}

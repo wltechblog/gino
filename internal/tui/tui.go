@@ -1033,6 +1033,14 @@ func (s *ChatSession) handleCommand(line string) bool {
 		s.writeAbove(fmt.Sprintf("%sUse /sessions to list or /session <N> to switch back%s\n\n", dim, reset))
 
 	case "/sessions":
+		// Pagination: "/sessions [page]" shows 10 per page; numbers stay
+		// GLOBAL so /session <N> matches what's shown regardless of page.
+		page := 1
+		if len(parts) > 1 {
+			if n, err := strconv.Atoi(strings.TrimSpace(parts[1])); err == nil && n >= 1 {
+				page = n
+			}
+		}
 		sessions := s.agent.ListArchivedSessions(s.sessionKey())
 		if cur := s.agent.CurrentSessionSummary(s.sessionKey()); cur != nil {
 			age := humanizeAge(cur.UpdatedAt)
@@ -1046,12 +1054,30 @@ func (s *ChatSession) handleCommand(line string) bool {
 			}
 			return true
 		}
-		s.writeAbove(fmt.Sprintf("%sSaved Sessions:%s\n", bold, reset))
-		for i, si := range sessions {
+		pageCount := (len(sessions) + 9) / 10
+		if page > pageCount {
+			page = pageCount
+		}
+		start := (page - 1) * 10
+		end := start + 10
+		if end > len(sessions) {
+			end = len(sessions)
+		}
+		pageHint := ""
+		if pageCount > 1 {
+			pageHint = fmt.Sprintf(" (page %d/%d)", page, pageCount)
+		}
+		s.writeAbove(fmt.Sprintf("%sSaved Sessions:%s%s\n", bold, reset, pageHint))
+		for i := start; i < end; i++ {
+			si := sessions[i]
 			age := humanizeAge(si.UpdatedAt)
 			s.writeAbove(fmt.Sprintf("  %s%d.%s %s (%d msgs, %s)\n", cyan, i+1, reset, si.Title, si.MessageN, age))
 		}
-		s.writeAbove(fmt.Sprintf("\n%sUse /session <N> to switch.%s\n\n", dim, reset))
+		if pageCount > 1 {
+			s.writeAbove(fmt.Sprintf("\n%sUse /sessions %d for %s page, /session <N> to switch.%s\n\n", dim, page+1, pagePrevOrNext(page, pageCount), reset))
+		} else {
+			s.writeAbove(fmt.Sprintf("\n%sUse /session <N> to switch.%s\n\n", dim, reset))
+		}
 
 	case "/session":
 		if len(parts) < 2 {
@@ -1215,7 +1241,7 @@ func (s *ChatSession) printBanner() {
 func (s *ChatSession) printHelp() {
 	s.writeAbove(fmt.Sprintf("\n%sCommands:%s\n", bold, reset))
 	s.writeAbove(fmt.Sprintf("  %s/new%s        Start new conversation (archives current)\n", cyan, reset))
-	s.writeAbove(fmt.Sprintf("  %s/sessions%s   List saved sessions\n", cyan, reset))
+	s.writeAbove(fmt.Sprintf("  %s/sessions [p]%s List saved sessions (10 per page)\n", cyan, reset))
 	s.writeAbove(fmt.Sprintf("  %s/session N%s  Switch to session #N\n", cyan, reset))
 	s.writeAbove(fmt.Sprintf("  %s/title text%s  Title current session (/title N text renames #N)\n", cyan, reset))
 	s.writeAbove(fmt.Sprintf("  %s/search text%s  Search saved sessions\n", cyan, reset))
@@ -1243,4 +1269,13 @@ func humanizeAge(t time.Time) string {
 		return fmt.Sprintf("%dh ago", int(d.Hours()))
 	}
 	return fmt.Sprintf("%dd ago", int(d.Hours()/24))
+}
+
+// pagePrevOrNext says which direction the hint should point for /sessions
+// pagination in the TUI listing.
+func pagePrevOrNext(page, pageCount int) string {
+	if page > 1 && page >= pageCount {
+		return "previous"
+	}
+	return "next"
 }
