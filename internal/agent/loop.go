@@ -2556,6 +2556,16 @@ func (a *AgentLoop) dispatchMessage(ctx context.Context, msg chat.Inbound) {
 	// main conversation first, then a divider, then the signal session
 	// (which accumulates prior signal results). Writes still go to the
 	// signal session only; the main session is never mutated by signal turns.
+	// Signal turns with the silent flag get an explicit contract in the
+	// prompt: the model may end its turn with the literal marker [silent]
+	// when nothing warrants user attention. The marker is stripped at the
+	// send boundary; a whole-turn [silent] (or empty) reply is never
+	// delivered to the channel. The signal result still lands in the main
+	// session so context continuity is preserved.
+	if isSignal && isSignalSilent(msg) {
+		userContent += "\n\n[Signal handling mode: process this signal. If, after handling it, nothing needs the user's attention or action, end your reply with the exact marker [silent] â it will not be shown to the user. Use it for confirmations, empty mailboxes, acknowledgments, and status echoes of work already done. Only reply normally when the user genuinely needs to see or act on something.]"
+	}
+
 	buildHistory := sess.GetHistory()
 	if isSignal && !isSystemChannel(msg.Channel) {
 		if mainHist, ok := a.sessions.SnapshotHistory(sessionKey); ok && len(mainHist) > 0 {
@@ -2678,6 +2688,21 @@ func isSignalSilent(msg chat.Inbound) bool {
 
 // isSignalMessage checks whether the inbound message originated from the signal
 // listener (as opposed to a direct user message from Telegram/Discord/CLI).
+// silentMarker is the literal token the model ends its reply with when a
+// silent-signal turn produced nothing worth the user's attention.
+const silentMarker = "[silent]"
+
+// stripSilentMarker removes every [silent] marker from a reply. Used at the
+// send boundary for silent signals so the marker never leaks into a
+// delivered message; a reply consisting solely of the marker collapses to
+// "" which the suppression check treats as "nothing to say".
+func stripSilentMarker(s string) string {
+	if !strings.Contains(s, silentMarker) {
+		return s
+	}
+	return strings.TrimSpace(strings.ReplaceAll(s, silentMarker, ""))
+}
+
 func isSignalMessage(msg chat.Inbound) bool {
 	if msg.Metadata == nil {
 		return false
@@ -2974,7 +2999,16 @@ done:
 	// pattern and emit the block in user-visible replies.
 	if !isSystemChannel(msg.Channel) {
 		sess.AddMessage("user", labelSharedContent(msg.Channel, msg.Metadata, msg.Content))
-		sess.AddMessage("assistant", finalContent)
+		// For suppressed silent-signal turns, record the marker itself in
+		// the signal session rather than an empty string: future signal
+		// turns see that the wake-up was handled and deliberately produced
+		// nothing user-facing (an empty assistant entry would look like a
+		// dropped turn and invite re-doing the work).
+		stored := finalContent
+		if isSignalSilent(msg) && strings.TrimSpace(finalContent) == "" {
+			stored = silentMarker
+		}
+		sess.AddMessage("assistant", stored)
 		if summary := summarizeToolCalls(toolCallLog); summary != "" {
 			sess.AddMessage("system", "[Internal context for the model, not part of any user-visible reply. This is a record of tool calls made in the previous turn so you can resume without redoing work. Never quote, reproduce, or append records like this in your responses.]\n"+summary)
 		}
@@ -3016,13 +3050,23 @@ done:
 	// Channel frontends use this to avoid misattributing the reply.
 	signalOrigin := isSignalMessage(msg)
 
-	// Suppress reply for silent signals unless the agent has something substantive to say.
-	// Silent signals (e.g., check_messages) process in the background but shouldn't
-	// spam the channel with "no new messages" acknowledgments. The agent's response
-	// is still saved to the session for context continuity.
-	if isSignalSilent(msg) && iteration == 1 && lastToolResult == "" {
-		log.Printf("Silent signal: suppressing reply for %s (no tool activity)", sessionKey)
-		return finalContent
+	// Silent-signal reply suppression. Contract with the model: when a
+	// silent signal (e.g. an agentchat check_messages wake-up) produces
+	// nothing the user needs to see, END the reply with the literal marker
+	// [silent]. A reply ending in the marker suppresses delivery of the
+	// ENTIRE turn â the model decided nothing warrants attention, so even
+	// its accompanying prose ("Handled, nothing to report") stays out of
+	// the channel. A marker appearing mid-reply is stripped so it can never
+	// leak into a delivered message. The turn itself still ran: tools
+	// executed, results recorded in the signal session, and any non-empty
+	// result is injected into the main session by the caller.
+	if isSignalSilent(msg) {
+		trimmed := strings.TrimSpace(finalContent)
+		if strings.HasSuffix(trimmed, silentMarker) || trimmed == "" {
+			log.Printf("Silent signal: suppressing reply for %s (turn ended with [silent])", sessionKey)
+			return "" // session save in the caller records the marker
+		}
+		finalContent = stripSilentMarker(finalContent)
 	}
 
 	log.Printf("Turn done: sending reply to %s/%s (%d chars, %d iterations)", msg.Channel, msg.ChatID, len(finalContent), iteration)
