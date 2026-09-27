@@ -94,32 +94,32 @@ type AgentsConfig struct {
 }
 
 type AgentDefaults struct {
-	Workspace                   string        `json:"workspace"`
-	Model                       string        `json:"model"`
-	MaxTokens                   int           `json:"maxTokens"`
-	Temperature                 float64       `json:"temperature"`
-	MaxToolIterations           int           `json:"maxToolIterations"`
-	HeartbeatIntervalS          int           `json:"heartbeatIntervalS"`
-	RequestTimeoutS             int           `json:"requestTimeoutS"`
-	ExecTimeoutS                int           `json:"execTimeoutS"`
-	MaxRetries                  int           `json:"maxRetries,omitempty"`     // retries per provider attempt (default: 2)
-	RetryBaseWaitS              int           `json:"retryBaseWaitS,omitempty"` // base wait between retries in seconds (default: 2)
-	EnableToolActivityIndicator *bool         `json:"enableToolActivityIndicator,omitempty"`
-	EnableToolCallMessages      *bool         `json:"enableToolCallMessages,omitempty"`
-	EnableToolErrorMessages     *bool         `json:"enableToolErrorMessages,omitempty"`
-	VisionModel                 string        `json:"visionModel,omitempty"`
+	Workspace                   string  `json:"workspace"`
+	Model                       string  `json:"model"`
+	MaxTokens                   int     `json:"maxTokens"`
+	Temperature                 float64 `json:"temperature"`
+	MaxToolIterations           int     `json:"maxToolIterations"`
+	HeartbeatIntervalS          int     `json:"heartbeatIntervalS"`
+	RequestTimeoutS             int     `json:"requestTimeoutS"`
+	ExecTimeoutS                int     `json:"execTimeoutS"`
+	MaxRetries                  int     `json:"maxRetries,omitempty"`     // retries per provider attempt (default: 2)
+	RetryBaseWaitS              int     `json:"retryBaseWaitS,omitempty"` // base wait between retries in seconds (default: 2)
+	EnableToolActivityIndicator *bool   `json:"enableToolActivityIndicator,omitempty"`
+	EnableToolCallMessages      *bool   `json:"enableToolCallMessages,omitempty"`
+	EnableToolErrorMessages     *bool   `json:"enableToolErrorMessages,omitempty"`
+	VisionModel                 string  `json:"visionModel,omitempty"`
 
 	// LogLevel controls the runtime log stream. "off" silences routine
 	// logging entirely (only fatal startup errors surface, on stderr);
 	// "info" (or empty) keeps the default log output. GINO_LOG_LEVEL
 	// overrides at runtime for troubleshooting.
-	LogLevel string `json:"logLevel,omitempty"`
-	AllowedDirs                 []string      `json:"allowedDirs"`
-	DisableTools                []string      `json:"disableTools"`
-	Sandbox                     SandboxConfig `json:"sandbox"`
-	MaxTurnMessages             int           `json:"maxTurnMessages,omitempty"`
-	MaxToolResultChars          int           `json:"maxToolResultChars,omitempty"`
-	TuiResponseWaitS            int           `json:"tuiResponseWaitS,omitempty"` // TUI: seconds to wait for a turn's final reply (default 900)
+	LogLevel           string        `json:"logLevel,omitempty"`
+	AllowedDirs        []string      `json:"allowedDirs"`
+	DisableTools       []string      `json:"disableTools"`
+	Sandbox            SandboxConfig `json:"sandbox"`
+	MaxTurnMessages    int           `json:"maxTurnMessages,omitempty"`
+	MaxToolResultChars int           `json:"maxToolResultChars,omitempty"`
+	TuiResponseWaitS   int           `json:"tuiResponseWaitS,omitempty"` // TUI: seconds to wait for a turn's final reply (default 900)
 
 	// Verbose enables full LLM traffic logging: the sent prompt (request body),
 	// the raw received response, usage analytics, and the final response sent
@@ -151,6 +151,14 @@ type AgentDefaults struct {
 	// title so /sessions lists are meaningful instead of prompt excerpts.
 	// Manually assigned titles (/title) are never overwritten. Default true.
 	SessionAutoTitle *bool `json:"sessionAutoTitle,omitempty"`
+
+	// SignalBudgetBlocks is how many maxToolIterations blocks a signal /
+	// background turn may consume. Signal turns (agentchat wake-ups, job
+	// reports, async spawn results) have no interactive subscriber who
+	// could reply "continue", so they never pause at the limit: they run
+	// on this extended budget, then a wrap-up pass, then a synthesized
+	// hard-cap reply. 0 = default (4).
+	SignalBudgetBlocks int `json:"signalBudgetBlocks,omitempty"`
 
 	// AutoContinue lets a bare "continue" reply resume a turn that was
 	// paused at the maxToolIterations limit: the harness intercepts the

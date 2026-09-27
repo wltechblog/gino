@@ -339,8 +339,12 @@ func runAgent(homeFlag string, args []string) {
 	}
 	if cfg.Agents.Defaults.AutoContinue != nil {
 		ag.SetAutoContinue(*cfg.Agents.Defaults.AutoContinue)
-		ag.SetExecTimeout(cfg.Agents.Defaults.ExecTimeoutS)
 	}
+	// Exec timeout is independent of autoContinue — it must apply whenever
+	// configured (previously nested inside the AutoContinue nil-check, a
+	// config setting only execTimeoutS silently kept the default).
+	ag.SetExecTimeout(cfg.Agents.Defaults.ExecTimeoutS)
+	ag.SetSignalBudgetBlocks(cfg.Agents.Defaults.SignalBudgetBlocks)
 	if cfg.Agents.Defaults.EnableToolActivityIndicator != nil {
 		ag.SetToolActivityIndicator(*cfg.Agents.Defaults.EnableToolActivityIndicator)
 	}
@@ -436,7 +440,6 @@ func requireGatewayConfig(homeDir string) error {
 	}
 	return nil
 }
-
 
 // configureLogging silences the runtime log stream when
 // agents.defaults.logLevel="off" (installer default). Fatal startup errors

@@ -547,6 +547,7 @@ type AgentLoop struct {
 	sessComp                *sessionCompactor      // nil = session-history compaction disabled
 	autoTitleOff            bool                   // config: disable LLM session auto-titling
 	autoContinueOff         bool                   // config: disable resume-on-"continue" interception
+	signalBudgetBlocks      int                    // config: maxIterations multiplier for signal/background turns (0 = default)
 	paused                  map[string]*pausedTurn // iteration-limit-paused turns awaiting "continue"
 	projects                *ProjectRegistry       // nil = runtime project switching unavailable
 	fsTool                  *tools.FilesystemTool
@@ -1164,6 +1165,18 @@ func (a *AgentLoop) SetSessionAutoTitle(enabled bool) {
 // asking the user to reply "continue".
 func (a *AgentLoop) SetAutoContinue(enabled bool) {
 	a.autoContinueOff = !enabled
+}
+
+// SetSignalBudgetBlocks sets how many maxIterations blocks a signal turn
+// (background trigger: agentchat wake-up, job report, async spawn result)
+// may consume before its wrap-up pass. Signal turns never pause at the
+// limit — nobody can reply "continue" to them — so their budget is bounded
+// multiplicatively instead. Values < 1 are clamped to the default (4).
+func (a *AgentLoop) SetSignalBudgetBlocks(n int) {
+	if n < 1 {
+		n = defaultSignalBudgetBlocks
+	}
+	a.signalBudgetBlocks = n
 }
 
 // SetSessionCompaction enables LLM-based summarization of old persisted
@@ -2692,6 +2705,13 @@ func isSignalSilent(msg chat.Inbound) bool {
 // silent-signal turn produced nothing worth the user's attention.
 const silentMarker = "[silent]"
 
+// defaultSignalBudgetBlocks is the tool-iteration budget multiplier applied
+// to signal/background turns when no config override is set. Signal turns
+// have no interactive subscriber who could reply "continue", so instead of
+// pausing at maxIterations they run on blocks x maxIterations, then one
+// wrap-up pass, then a synthesized hard-cap reply.
+const defaultSignalBudgetBlocks = 4
+
 // stripSilentMarker removes every [silent] marker from a reply. Used at the
 // send boundary for silent signals so the marker never leaks into a
 // delivered message; a reply consisting solely of the marker collapses to
@@ -2741,7 +2761,32 @@ func (a *AgentLoop) processTurn(ctx context.Context, at *activeTurn, sessionKey 
 		lastToolResult = at.resumeLastRes
 	}
 
-	for iteration < a.maxIterations {
+	// Signal turns (background triggers: agentchat wake-ups, job reports,
+	// async spawn results) have no interactive subscriber who could reply
+	// "continue" — pausing them at the iteration limit orphans the turn:
+	// the stash lands under the signal: session key which resumePausedTurn
+	// never probes, and on headless agents the ⏳ notice itself has no
+	// reader. Machine turns therefore never pause. They run on an extended
+	// budget (blocks × maxIterations) and, if that is still not enough,
+	// get one wrap-up pass followed by a synthesized hard-cap reply (see
+	// after the loop). Bounded burn, no dead ends, no human in the loop.
+	signalTurn := isSignalMessage(msg)
+	budget := a.maxIterations
+	if signalTurn {
+		if blocks := a.signalBudgetBlocks; blocks > 0 {
+			budget *= blocks
+		} else {
+			budget *= defaultSignalBudgetBlocks
+		}
+	}
+	wrapUpWindow := a.maxIterations / 4
+	if wrapUpWindow < 5 {
+		wrapUpWindow = 5
+	}
+	wrapUpDone := false
+
+signalLoop:
+	for iteration < budget {
 		iteration++
 
 		// Check for cancellation before each iteration
@@ -2953,13 +2998,41 @@ func (a *AgentLoop) processTurn(ctx context.Context, at *activeTurn, sessionKey 
 		}
 	}
 
+	// Budget exhausted without a final text response. Signal turns (which
+	// have no interactive subscriber who could reply "continue") never
+	// pause: they already ran on an extended budget; give them one
+	// wrap-up pass — a bounded final window whose note tells the model to
+	// stop starting new work, notify whoever assigned the task via its
+	// result tools, and summarize. A turn that burns even the wrap-up
+	// window gets a synthesized hard-cap reply: bounded burn, no orphaned
+	// stash, and the failure is recorded into the main session by the
+	// signal path so the next wake-up sees it.
+	if finalContent == "" && signalTurn && !wrapUpDone {
+		wrapUpDone = true
+		budget += wrapUpWindow
+		messages = append(messages, providers.Message{
+			Role: "user",
+			Content: "[System: The tool-call budget for this background task is nearly exhausted. Stop starting new work. " +
+				"Use this final window to send your result — or an honest incomplete status — to whoever assigned this task " +
+				"(send_message / task_result / broadcast), then end with a short text summary of what was completed and what remains.]",
+		})
+		log.Printf("Signal turn %s: budget exhausted at %d iterations, entering wrap-up pass (+%d)", sessionKey, iteration, wrapUpWindow)
+		goto signalLoop
+	}
+	if finalContent == "" && signalTurn {
+		log.Printf("Signal turn %s: hard budget cap at %d iterations without a final reply", sessionKey, iteration)
+		finalContent = fmt.Sprintf("⛔ Background task stopped: it hit its hard tool-call budget (%d steps) without completing. "+
+			"Its tool log is recorded in the session; the next wake-up can resume from it.", iteration)
+	}
+
 	// Iteration budget exhausted without a final text response: pause the
-	// turn instead of ending it. Stash the live message chain (and the
+	// turn instead of ending it (interactive turns only — signal turns
+	// were handled above). Stash the live message chain (and the
 	// tool-call log) so a follow-up "continue" can resume THIS turn
 	// in-process — same context, no fresh-prompt round-trip, no duplicated
 	// exchange in session history. The user stays in control: nothing
 	// resumes until they say so.
-	if iteration >= a.maxIterations && finalContent == "" {
+	if !signalTurn && iteration >= a.maxIterations && finalContent == "" {
 		a.mu.Lock()
 		a.paused[sessionKey] = &pausedTurn{
 			msg:         msg,

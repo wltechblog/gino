@@ -634,6 +634,7 @@ func (s *ChatSession) startRuntime(ctx context.Context) {
 	if s.cfg.Agents.Defaults.AutoContinue != nil {
 		s.agent.SetAutoContinue(*s.cfg.Agents.Defaults.AutoContinue)
 	}
+	s.agent.SetSignalBudgetBlocks(s.cfg.Agents.Defaults.SignalBudgetBlocks)
 
 	cliOut := s.hub.Subscribe("cli")
 	s.hub.StartRouter(ctx)
