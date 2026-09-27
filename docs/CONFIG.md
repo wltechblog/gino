@@ -390,7 +390,7 @@ User-defined actions that external sources can send. The key is the action name,
 |-------|------|-------------|
 | `description` | string | Human-readable description of the signal. |
 | `response` | string | Message injected into the agent. Supports `{{.Source}}` and `{{.Timestamp}}` template variables. |
-| `silent` | bool | When true, agent processes the signal but only replies if it has something useful to report. |
+| `silent` | bool | When true, the model is offered a `[silent]` end-marker: a turn ending in it is not delivered to the channel. For empty mailboxes / status echoes, signals produce zero chat output. |
 
 ```json
 {
@@ -415,3 +415,41 @@ User-defined actions that external sources can send. The key is the action name,
 ```
 
 MCP servers can also self-declare their own signal actions at startup.
+
+## Headless agents (agentchat-only, no chat channel)
+
+Gino does not require a Telegram/Discord channel. An agent whose only
+interface is agentchat runs the same gateway with zero channels configured:
+
+```json
+{
+  "signal": { "enabled": true },
+  "mcpServers": {
+    "agentchat": {
+      "command": "/usr/local/bin/agentchat-mcp-bridge",
+      "env": {
+        "AGENTCHAT_URL": "https://agentchat.example.com",
+        "AGENTCHAT_TOKEN": "...",
+        "AGENTCHAT_HEADLESS": "1"
+      }
+    }
+  }
+}
+```
+
+How it works without a channel:
+
+- The bridge is an MCP child holding its own HTTPS connection to the agentchat
+  server. Incoming messages fire the `check_messages` signal over the socket,
+  waking the agent; it replies via `send_message` / `task_result` / `broadcast`
+  — none of that touches a chat channel.
+- `signal.enabled` is **required** — without it the socket env is never
+  injected and the bridge skips its SSE watch entirely.
+- Signal turns persist to the `signal:` session namespace like any other, so
+  the agent stays contextful across restarts.
+- The agent's channel-facing prose has no subscriber (it drops with a
+  `no subscriber` log line). `AGENTCHAT_HEADLESS=1` makes the bridge's wake-up
+  template tell the agent this explicitly: respond via agentchat tools, end
+  with `[silent]` unless a human must be reached through another agent.
+- A headless agent cannot ping a human directly — it reaches humans by
+  messaging an agent that has a channel (which fits multi-agent orgs).
