@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"text/template"
 	"time"
 
 	"github.com/wltechblog/gino/internal/chat"
@@ -606,6 +607,10 @@ func (l *Listener) handleConnection(conn net.Conn) {
 	// Log the signal for audit purposes
 	log.Printf("Signal: accepted action %q from source %q → routing to %s:%s (signal had channel=%q, chatID=%q, default=%s:%s)", sig.Action, sig.Source, channel, chatID, sig.Channel, sig.ChatID, l.defaultChannel, l.defaultChatID)
 
+	// Render the safe response template with routing metadata — agents see
+	// which server and chat the signal concerns, never the raw payload.
+	response = renderSignalResponse(response, sig, channel, chatID)
+
 	// Build the inbound message — ONLY the safe response template is injected
 	// Never expose raw signal content, metadata, or any freeform text to the agent
 	inbound := chat.Inbound{
@@ -630,6 +635,43 @@ func (l *Listener) handleConnection(conn net.Conn) {
 		log.Printf("Signal: hub inbound channel full, dropping signal")
 		conn.Write([]byte(`{"status":"error","error":"hub channel full"}`))
 	}
+}
+
+// renderSignalResponse executes a response template with safe routing
+// metadata. Template vars: {{.Source}}, {{.Action}}, {{.Timestamp}},
+// {{.Time}}, {{.Channel}}, {{.ChatID}}. On parse/execute error the raw
+// template text is returned — the agent still gets a bounded,
+// config-authored string, never the signal's freeform payload.
+func renderSignalResponse(tmpl string, sig Signal, channel, chatID string) string {
+	if tmpl == "" {
+		return ""
+	}
+	data := struct {
+		Source    string
+		Action    string
+		Timestamp int64
+		Time      string
+		Channel   string
+		ChatID    string
+	}{
+		Source:    sig.Source,
+		Action:    sig.Action,
+		Timestamp: sig.Timestamp,
+		Time:      time.UnixMilli(sig.Timestamp).UTC().Format(time.RFC3339),
+		Channel:   channel,
+		ChatID:    chatID,
+	}
+	t, err := template.New("signal").Parse(tmpl)
+	if err != nil {
+		log.Printf("Signal: response template parse error: %v (using raw text)", err)
+		return tmpl
+	}
+	var sb strings.Builder
+	if err := t.Execute(&sb, data); err != nil {
+		log.Printf("Signal: response template execute error: %v (using raw text)", err)
+		return tmpl
+	}
+	return sb.String()
 }
 
 // SendSignal is a helper that sends a signal to a Unix domain socket.

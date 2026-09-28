@@ -425,3 +425,23 @@ func TestMultipleSignals(t *testing.T) {
 		}
 	}
 }
+
+// TestRenderSignalResponse pins the template rendering port: vars
+// {{.Source}}/{{.Channel}}/{{.ChatID}} must resolve — without this, gino
+// hosts (and joist subagent children) injected raw "{{.Source}}" text into
+// wake-ups and agents couldn't tell WHICH agentchat server had mail.
+func TestRenderSignalResponse(t *testing.T) {
+	sig := Signal{Source: "agentchat-scs", Action: "check_messages", Timestamp: 1750000000000}
+	out := renderSignalResponse("mail on server {{.Source}} for {{.Channel}}:{{.ChatID}}", sig, "telegram", "12345")
+	if out != "mail on server agentchat-scs for telegram:12345" {
+		t.Fatalf("template vars not rendered: %q", out)
+	}
+	// Empty template → empty
+	if out := renderSignalResponse("", sig, "c", "d"); out != "" {
+		t.Fatalf("empty template must stay empty, got %q", out)
+	}
+	// Bad template → raw text back (bounded, never an error string)
+	if out := renderSignalResponse("{{.Bogus", sig, "c", "d"); out != "{{.Bogus" {
+		t.Fatalf("bad template must return raw text, got %q", out)
+	}
+}
