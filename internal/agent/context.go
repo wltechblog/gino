@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/wltechblog/gino/internal/agent/memory"
 	"github.com/wltechblog/gino/internal/agent/skills"
@@ -302,7 +303,12 @@ Do NOT use: # headings, --- rulers, *-bullet-lists, --dash-lists, 1.-numbered-li
 			searchOpts.Sources = []string{userSource}
 		}
 
-		results, err := cb.brain.Search(context.Background(), currentMessage, searchOpts)
+		// Bounded: this runs synchronously in the agent Run loop's dispatch
+		// path. An unbounded search (slow/stalled embedding backend, hungry
+		// SQLite read lock) would block dispatch of every channel's messages.
+		searchCtx, cancelSearch := context.WithTimeout(context.Background(), 10*time.Second)
+		results, err := cb.brain.Search(searchCtx, currentMessage, searchOpts)
+		cancelSearch()
 		if err == nil && len(results) > 0 {
 			var brainSb strings.Builder
 			brainSb.WriteString("Relevant Brain Context:\n")

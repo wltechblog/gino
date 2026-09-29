@@ -1861,7 +1861,11 @@ func (a *AgentLoop) Run(ctx context.Context) {
 				a.running = false
 				return
 			}
+			dispStart := time.Now()
 			a.dispatchMessage(ctx, msg)
+			if d := time.Since(dispStart); d > 5*time.Second {
+				log.Printf("Agent: dispatch for %s:%s blocked the Run loop for %s - check for stalled session or brain IO", msg.Channel, msg.ChatID, d.Round(time.Millisecond))
+			}
 
 		default:
 			// idle tick

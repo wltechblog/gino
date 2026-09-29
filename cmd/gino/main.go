@@ -494,12 +494,18 @@ func runGateway(homeFlag string, args []string) {
 
 	scheduler := cron.NewScheduler(func(job cron.Job) {
 		log.Printf("cron fired: %s — %s", job.Name, job.Message)
-		hub.In <- chat.Inbound{
+		in := chat.Inbound{
 			Channel:  job.Channel,
 			SenderID: "cron",
 			ChatID:   job.ChatID,
 			Content:  fmt.Sprintf("[Scheduled reminder fired] %s — Please relay this to the user in a friendly way.", job.Message),
 		}
+		select {
+		case hub.In <- in:
+		case <-time.After(10 * time.Second):
+			log.Printf("cron: hub inbound full for %s:%s - dropping reminder %s", job.Channel, job.ChatID, job.Name)
+		}
+
 	})
 	if err := scheduler.SetPersistencePath(filepath.Join(homeDir, "cron_jobs.json")); err != nil {
 		log.Printf("cron: failed to set persistence path: %v", err)

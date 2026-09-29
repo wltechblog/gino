@@ -26,8 +26,39 @@ const (
 	tgMaxRetries     = 3
 	tgRetryBaseDelay = 2 * time.Second
 	tgMaxMessageLen  = 4096 // Telegram sendMessage limit
-	tgMaxCaptionLen  = 1024 // Telegram sendDocument caption limit
+	tgMaxCaptionLen  = 1024 // sendDocument caption limit
+	tgMaxBackoff     = 30 * time.Second
 )
+
+// tgHubSendTimeout is a var so tests can shrink it.
+var tgHubSendTimeout = 10 * time.Second
+
+// tgNextBackoff doubles a poll error backoff duration, capped at tgMaxBackoff.
+func tgNextBackoff(cur time.Duration) time.Duration {
+	next := cur * 2
+	if next > tgMaxBackoff {
+		next = tgMaxBackoff
+	}
+	return next
+}
+
+// deliverInbound hands an inbound message to the agent hub with a hard
+// timeout. The Telegram poller must never block forever on a full hub: a
+// stalled agent loop would otherwise wedge the poll goroutine permanently,
+// turning a transient slowdown into a bot that needs a restart. A dropped
+// update is loud but survivable; a dead poller is neither.
+func deliverInbound(ctx context.Context, hub *chat.Hub, in chat.Inbound) bool {
+	select {
+	case hub.In <- in:
+		return true
+	case <-ctx.Done():
+		return false
+	case <-time.After(tgHubSendTimeout):
+		log.Printf("telegram: hub inbound full for %s:%s after %s - agent loop stalled? dropping update",
+			in.Channel, in.ChatID, tgHubSendTimeout)
+		return false
+	}
+}
 
 // redactToken removes the bot token from a Telegram API URL for safe logging.
 // e.g. "https://api.telegram.org/bot123:ABC/sendMessage" → "https://api.telegram.org/bot***/sendMessage"
@@ -104,7 +135,11 @@ func StartTelegramWithBase(ctx context.Context, hub *chat.Hub, token, base strin
 		monitored[strings.TrimSpace(id)] = struct{}{}
 	}
 
-	client := &http.Client{Timeout: 45 * time.Second}
+	// 80s: getUpdates long-polls for 30s; the old 45s budget left only 15s of
+	// slack, so routine network latency surfaced as spurious
+	// "context deadline exceeded (Client.Timeout ...)" errors.
+	client := &http.Client{Timeout: 80 * time.Second}
+	typingClient := &http.Client{Timeout: 10 * time.Second}
 	fileBase := strings.Replace(base, "/bot"+token, "/file/bot"+token, 1)
 
 	// Get bot username and ID for @mention and reply detection
@@ -151,11 +186,12 @@ func StartTelegramWithBase(ctx context.Context, hub *chat.Hub, token, base strin
 			}()
 			ticker := time.NewTicker(5 * time.Second)
 			defer ticker.Stop()
+			maxLife := time.After(15 * time.Minute)
 			for {
 				v := url.Values{}
 				v.Set("chat_id", chatID)
 				v.Set("action", "typing")
-				resp, err := retryPostForm(client, base+"/sendChatAction", v)
+				resp, err := retryPostForm(typingClient, base+"/sendChatAction", v)
 				if err != nil {
 					log.Printf("telegram sendChatAction error: %v", err)
 				} else {
@@ -164,6 +200,12 @@ func StartTelegramWithBase(ctx context.Context, hub *chat.Hub, token, base strin
 				}
 				select {
 				case <-done:
+					return
+				case <-maxLife:
+					// A reply that never sends (error paths) would otherwise
+					// leave this goroutine and its per-5s HTTP calls running
+					// forever.
+					log.Printf("telegram: typing indicator for %s hit 15m lifetime cap - no reply ever sent", chatID)
 					return
 				case <-ticker.C:
 				}
@@ -181,6 +223,7 @@ func StartTelegramWithBase(ctx context.Context, hub *chat.Hub, token, base strin
 
 	go func() {
 		offset := int64(0)
+		pollBackoff := time.Second
 		for {
 			select {
 			case <-ctx.Done():
@@ -194,10 +237,16 @@ func StartTelegramWithBase(ctx context.Context, hub *chat.Hub, token, base strin
 			values.Set("timeout", "30")
 			resp, err := client.PostForm(base+"/getUpdates", values)
 			if err != nil {
-				log.Printf("telegram getUpdates error: %v", err)
-				time.Sleep(1 * time.Second)
+				log.Printf("telegram getUpdates error: %v - backing off %s", err, pollBackoff)
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(pollBackoff):
+				}
+				pollBackoff = tgNextBackoff(pollBackoff)
 				continue
 			}
+			pollBackoff = time.Second
 			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			if resp.StatusCode != http.StatusOK {
@@ -228,7 +277,7 @@ func StartTelegramWithBase(ctx context.Context, hub *chat.Hub, token, base strin
 						Text            string `json:"text"`
 						Caption         string `json:"caption"`
 						MessageThreadID *int64 `json:"message_thread_id"`
-						Document *struct {
+						Document        *struct {
 							FileID   string `json:"file_id"`
 							FileName string `json:"file_name"`
 						} `json:"document"`
@@ -245,9 +294,9 @@ func StartTelegramWithBase(ctx context.Context, hub *chat.Hub, token, base strin
 						} `json:"reply_to_message"`
 					} `json:"message"`
 					CallbackQuery *struct {
-						ID      string `json:"id"`
-						Data    string `json:"data"`
-						From    struct {
+						ID   string `json:"id"`
+						Data string `json:"data"`
+						From struct {
 							ID        int64  `json:"id"`
 							FirstName string `json:"first_name"`
 						} `json:"from"`
@@ -302,23 +351,23 @@ func StartTelegramWithBase(ctx context.Context, hub *chat.Hub, token, base strin
 							_, cbPriv = allowed[fromID]
 						}
 						meta := map[string]interface{}{
-							"privileged":   cbPriv,
-							"session_key":  "telegram:" + chatID,
-							"group":        false,
-							"sender_name":  cq.From.FirstName,
+							"privileged":    cbPriv,
+							"session_key":   "telegram:" + chatID,
+							"group":         false,
+							"sender_name":   cq.From.FirstName,
 							"callback_data": cq.Data,
 						}
 						if threadID != "" {
 							meta["thread_id"] = threadID
 						}
-						hub.In <- chat.Inbound{
+						deliverInbound(ctx, hub, chat.Inbound{
 							Channel:   "telegram",
 							SenderID:  fromID,
 							ChatID:    chatID,
 							Content:   cq.Data,
 							Timestamp: time.Now(),
 							Metadata:  meta,
-						}
+						})
 					}
 					continue
 				}
@@ -398,23 +447,23 @@ func StartTelegramWithBase(ctx context.Context, hub *chat.Hub, token, base strin
 					sessionKey := "telegram:" + chatID + ":" + fromID
 
 					meta := map[string]interface{}{
-						"privileged":   isAllowedDM,
-						"session_key":  sessionKey,
-						"group":        true,
-						"sender_name":  senderName,
+						"privileged":  isAllowedDM,
+						"session_key": sessionKey,
+						"group":       true,
+						"sender_name": senderName,
 					}
 					if m.MessageThreadID != nil {
 						meta["thread_id"] = strconv.FormatInt(*m.MessageThreadID, 10)
 					}
 
-					hub.In <- chat.Inbound{
+					deliverInbound(ctx, hub, chat.Inbound{
 						Channel:   "telegram",
 						SenderID:  fromID,
 						ChatID:    chatID,
 						Content:   strings.TrimSpace(content),
 						Timestamp: time.Now(),
 						Metadata:  meta,
-					}
+					})
 					if showTyping {
 						startTyping(chatID)
 					}
@@ -469,29 +518,29 @@ func StartTelegramWithBase(ctx context.Context, hub *chat.Hub, token, base strin
 					continue
 				}
 
-			// Get sender display name for DMs
-			senderName := ""
-			if m.From != nil {
-				senderName = m.From.FirstName
-			}
+				// Get sender display name for DMs
+				senderName := ""
+				if m.From != nil {
+					senderName = m.From.FirstName
+				}
 
-			hub.In <- chat.Inbound{
-				Channel:   "telegram",
-				SenderID:  fromID,
-				ChatID:    chatID,
-				Content:   content,
-				Timestamp: time.Now(),
-				Media:     media,
-				Metadata: map[string]interface{}{
-					"privileged":  true,
-					"session_key": "telegram:" + chatID,
-					"group":       false,
-					"sender_name": senderName,
-				},
-			}
-			if showTyping {
-				startTyping(chatID)
-			}
+				deliverInbound(ctx, hub, chat.Inbound{
+					Channel:   "telegram",
+					SenderID:  fromID,
+					ChatID:    chatID,
+					Content:   content,
+					Timestamp: time.Now(),
+					Media:     media,
+					Metadata: map[string]interface{}{
+						"privileged":  true,
+						"session_key": "telegram:" + chatID,
+						"group":       false,
+						"sender_name": senderName,
+					},
+				})
+				if showTyping {
+					startTyping(chatID)
+				}
 			}
 		}
 	}()
@@ -1107,4 +1156,3 @@ func tgSendMessage(client *http.Client, base, chatID, text, threadID, dmFallback
 	}
 	return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
 }
-
