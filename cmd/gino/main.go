@@ -705,18 +705,28 @@ func runGateway(homeFlag string, args []string) {
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	select {
-	case <-sigCh:
-		cancel()
-	case <-idleExitCh:
-		// Idle-exit supervisor already decided; run the same graceful
-		// shutdown a signal would trigger.
-		cancel()
-	}
+	awaitShutdown(ctx, sigCh, idleExitCh)
+	cancel() // idempotent; ensures ctx-derived children stop on every path
 	ag.Close()
 	log.Println("gateway stopped")
 	if errExitCode != 0 {
 		os.Exit(errExitCode)
+	}
+}
+
+// awaitShutdown blocks until the gateway should shut down: SIGINT/SIGTERM,
+// the idle-exit supervisor's decision, or context cancellation. ctx.Done is
+// the exit-on-turn-error watcher's only signal — its goroutine calls cancel()
+// and sets the exit code; without the ctx arm here a terminal turn error
+// would log "shutting down" and then hang this loop forever.
+func awaitShutdown(ctx context.Context, sigCh <-chan os.Signal, idleExitCh <-chan struct{}) {
+	select {
+	case <-sigCh:
+	case <-idleExitCh:
+		// Idle-exit supervisor already decided; run the same graceful
+		// shutdown a signal would trigger (cancel is called by the caller).
+	case <-ctx.Done():
+		// exit-on-turn-error watcher already cancelled; errExitCode set there.
 	}
 }
 

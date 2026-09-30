@@ -43,13 +43,13 @@ func TestProbeAnsweredWithBusyState(t *testing.T) {
 	waitForSocket(t, socketPath)
 
 	// Default (no probe fn): busy false.
-	if got := dialProbe(t, socketPath); got != `{"status":"ok","busy":false}` {
+	if got := dialProbe(t, socketPath); got != `{"status":"ok","busy":false,"proto":2}` {
 		t.Fatalf("default probe response = %q", got)
 	}
 
 	// Armed probe: busy true.
 	listener.SetBusyProbe(func() bool { return true })
-	if got := dialProbe(t, socketPath); got != `{"status":"ok","busy":true}` {
+	if got := dialProbe(t, socketPath); got != `{"status":"ok","busy":true,"proto":2}` {
 		t.Fatalf("armed probe response = %q", got)
 	}
 }
@@ -65,7 +65,7 @@ func TestProbeNeedsNoRegistryEntry(t *testing.T) {
 
 	// The probe is builtin: an empty registry (every other action would be
 	// rejected as unknown) still answers it.
-	if got := dialProbe(t, socketPath); got != `{"status":"ok","busy":false}` {
+	if got := dialProbe(t, socketPath); got != `{"status":"ok","busy":false,"proto":2}` {
 		t.Fatalf("empty-registry probe response = %q", got)
 	}
 }

@@ -20,6 +20,14 @@ import (
 
 // Signal represents an external trigger received via Unix domain socket.
 // Signals are action-based — they carry a named action, not freeform instructions.
+// ProbeProto is the supervised-child capability protocol reported in
+// probe answers. Bump whenever a child-facing supervisor feature lands;
+// supervisors (joist's interns manager) compare the reported number
+// against the version they require and warn about stale binaries.
+//	1 = busy-state probe
+//	2 = exit-on-turn-error (75), idle-exit, task_done doorbell
+const ProbeProto = 2
+
 type Signal struct {
 	// Source identifies the system sending the signal (e.g., "agentchat-mcp", "camera-script").
 	// Must match a registered MCP source or be empty for user-defined actions.
@@ -581,7 +589,7 @@ func (l *Listener) handleConnection(conn net.Conn) {
 		if fn != nil {
 			busy = fn()
 		}
-		conn.Write([]byte(fmt.Sprintf(`{"status":"ok","busy":%t}`, busy)))
+		conn.Write([]byte(fmt.Sprintf(`{"status":"ok","busy":%t,"proto":%d}`, busy, ProbeProto)))
 		return
 	}
 
