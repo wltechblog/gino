@@ -24,6 +24,7 @@ import (
 	"github.com/wltechblog/gino/internal/mcp"
 	"github.com/wltechblog/gino/internal/providers"
 	"github.com/wltechblog/gino/internal/session"
+	"github.com/wltechblog/gino/internal/signal"
 )
 
 var rememberRE = regexp.MustCompile(`(?i)^remember(?:\s+to)?\s+(.+)$`)
@@ -547,6 +548,7 @@ type AgentLoop struct {
 	sessComp                *sessionCompactor      // nil = session-history compaction disabled
 	autoTitleOff            bool                   // config: disable LLM session auto-titling
 	exitOnTurnError         bool                   // config: gateway exits (code 75) when a turn fails terminally
+	parentSignalSocket      string                 // config: supervised child fires task_done here after each turn
 	turnErrCount            int                    // terminal turn errors since boot (set by processTurn, read by gateway)
 	autoContinueOff         bool                   // config: disable resume-on-"continue" interception
 	signalBudgetBlocks      int                    // config: maxIterations multiplier for signal/background turns (0 = default)
@@ -1178,6 +1180,16 @@ func (a *AgentLoop) TurnErrorCount() int {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.turnErrCount
+}
+
+// SetParentSignalSocket arms the task-done doorbell. When set (supervised
+// children — joist stamps it into generated intern configs), every
+// completed hub-path turn fires a task_done signal at this socket so the
+// parent collects outbox results immediately instead of polling.
+func (a *AgentLoop) SetParentSignalSocket(path string) {
+	a.mu.Lock()
+	a.parentSignalSocket = path
+	a.mu.Unlock()
 }
 
 // SetAutoContinue toggles iteration-limit auto-continue. Default on: when a
@@ -2729,6 +2741,24 @@ func (a *AgentLoop) dispatchMessage(ctx context.Context, msg chat.Inbound) {
 			}
 			log.Printf("Signal: injected result into main session %s (%d chars)", sessionKey, len(notification))
 		}
+
+		// Parent doorbell (supervised children — joist interns): tell the
+		// supervisor a turn just finished so it can collect outbox results
+		// immediately instead of waiting on its 10s poll. Fire-and-forget
+		// on a tracked goroutine — a dead or slow parent never delays
+		// turn cleanup.
+		if a.parentSignalSocket != "" {
+			a.bgWG.Add(1)
+			go func(socket string) {
+				defer a.bgWG.Done()
+				if err := signal.SendSignal(socket, signal.Signal{
+					Source: internDoorbellSource,
+					Action: internDoorbellAction,
+				}); err != nil {
+					log.Printf("task-done doorbell: %v", err)
+				}
+			}(a.parentSignalSocket)
+		}
 	}()
 }
 
@@ -2756,6 +2786,16 @@ const silentMarker = "[silent]"
 // pausing at maxIterations they run on blocks x maxIterations, then one
 // wrap-up pass, then a synthesized hard-cap reply.
 const defaultSignalBudgetBlocks = 4
+
+// internDoorbellSource/Action identify the task-done doorbell a supervised
+// child (joist interns) fires at its parent's signal socket after every
+// completed turn. The parent validates the (source, action) pair and
+// consumes it programmatically — no LLM turn, no injection. Keep in sync
+// with joist's tools.InternDoorbellSource/InternDoorbellAction.
+const (
+	internDoorbellSource = "gino-intern"
+	internDoorbellAction = "task_done"
+)
 
 // stripSilentMarker removes every [silent] marker from a reply. Used at the
 // send boundary for silent signals so the marker never leaks into a

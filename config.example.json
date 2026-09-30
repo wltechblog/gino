@@ -13,6 +13,7 @@
       "execTimeoutS": 300,
       "idleExitS": 0,
       "exitOnTurnError": false,
+      "parentSignalSocket": "",
       "maxRetries": 2,
       "retryBaseWaitS": 2,
       "visionModel": "",

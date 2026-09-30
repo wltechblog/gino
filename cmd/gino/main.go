@@ -642,6 +642,9 @@ func runGateway(homeFlag string, args []string) {
 	// terminally (LLM errored after all retries) shuts down so the parent
 	// can pick up the pieces. Code 75 (EX_TEMPFAIL) distinguishes it from
 	// idle exit (0) and crashes (anything else).
+	if cfg.Agents.Defaults.ParentSignalSocket != "" {
+		ag.SetParentSignalSocket(cfg.Agents.Defaults.ParentSignalSocket)
+	}
 	if cfg.Agents.Defaults.ExitOnTurnError {
 		ag.SetExitOnTurnError(true)
 		go func() {

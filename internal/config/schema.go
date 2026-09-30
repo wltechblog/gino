@@ -117,7 +117,14 @@ type AgentDefaults struct {
 	// Intended for supervised child agents: the parent notices the exit,
 	// tells the operator, and relaunches on demand. 0/false (default) keeps
 	// the gateway running after turn errors.
-	ExitOnTurnError             bool   `json:"exitOnTurnError,omitempty"`
+	ExitOnTurnError bool `json:"exitOnTurnError,omitempty"`
+	// ParentSignalSocket is the Unix socket path of a supervising gateway
+	// (e.g. joist's interns manager). When set, the gateway fires a
+	// "task_done" doorbell signal (source "gino-intern") at this socket
+	// after every completed turn — the supervisor collects outbox results
+	// immediately instead of waiting for its poll interval. Supervised
+	// children only; standalone gateways leave it empty.
+	ParentSignalSocket          string `json:"parentSignalSocket,omitempty"`
 	MaxRetries                  int    `json:"maxRetries,omitempty"`     // retries per provider attempt (default: 2)
 	RetryBaseWaitS              int    `json:"retryBaseWaitS,omitempty"` // base wait between retries in seconds (default: 2)
 	EnableToolActivityIndicator *bool  `json:"enableToolActivityIndicator,omitempty"`
