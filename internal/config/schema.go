@@ -94,14 +94,14 @@ type AgentsConfig struct {
 }
 
 type AgentDefaults struct {
-	Workspace                   string  `json:"workspace"`
-	Model                       string  `json:"model"`
-	MaxTokens                   int     `json:"maxTokens"`
-	Temperature                 float64 `json:"temperature"`
-	MaxToolIterations           int     `json:"maxToolIterations"`
-	HeartbeatIntervalS          int     `json:"heartbeatIntervalS"`
-	RequestTimeoutS             int     `json:"requestTimeoutS"`
-	ExecTimeoutS                int     `json:"execTimeoutS"`
+	Workspace          string  `json:"workspace"`
+	Model              string  `json:"model"`
+	MaxTokens          int     `json:"maxTokens"`
+	Temperature        float64 `json:"temperature"`
+	MaxToolIterations  int     `json:"maxToolIterations"`
+	HeartbeatIntervalS int     `json:"heartbeatIntervalS"`
+	RequestTimeoutS    int     `json:"requestTimeoutS"`
+	ExecTimeoutS       int     `json:"execTimeoutS"`
 
 	// IdleExitS shuts the gateway down cleanly when it has been idle for
 	// this many continuous seconds: no active turns, nothing paused or
@@ -109,13 +109,21 @@ type AgentDefaults struct {
 	// for supervised child agents (joist subagents) — the supervisor
 	// relaunches on demand, making children serverless. 0 (default) keeps
 	// the gateway running forever.
-	IdleExitS                   int     `json:"idleExitS,omitempty"`
-	MaxRetries                  int     `json:"maxRetries,omitempty"`     // retries per provider attempt (default: 2)
-	RetryBaseWaitS              int     `json:"retryBaseWaitS,omitempty"` // base wait between retries in seconds (default: 2)
-	EnableToolActivityIndicator *bool   `json:"enableToolActivityIndicator,omitempty"`
-	EnableToolCallMessages      *bool   `json:"enableToolCallMessages,omitempty"`
-	EnableToolErrorMessages     *bool   `json:"enableToolErrorMessages,omitempty"`
-	VisionModel                 string  `json:"visionModel,omitempty"`
+	IdleExitS int `json:"idleExitS,omitempty"`
+
+	// ExitOnTurnError makes the gateway shut down gracefully and exit with
+	// code 75 when a turn ends terminally failed (the LLM call failed after
+	// all provider retries — the "Sorry, I encountered an error" path).
+	// Intended for supervised child agents: the parent notices the exit,
+	// tells the operator, and relaunches on demand. 0/false (default) keeps
+	// the gateway running after turn errors.
+	ExitOnTurnError             bool   `json:"exitOnTurnError,omitempty"`
+	MaxRetries                  int    `json:"maxRetries,omitempty"`     // retries per provider attempt (default: 2)
+	RetryBaseWaitS              int    `json:"retryBaseWaitS,omitempty"` // base wait between retries in seconds (default: 2)
+	EnableToolActivityIndicator *bool  `json:"enableToolActivityIndicator,omitempty"`
+	EnableToolCallMessages      *bool  `json:"enableToolCallMessages,omitempty"`
+	EnableToolErrorMessages     *bool  `json:"enableToolErrorMessages,omitempty"`
+	VisionModel                 string `json:"visionModel,omitempty"`
 
 	// LogLevel controls the runtime log stream. "off" silences routine
 	// logging entirely (only fatal startup errors surface, on stderr);

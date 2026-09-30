@@ -546,6 +546,8 @@ type AgentLoop struct {
 	spTool                  *tools.SpawnTool       // subagent spawn tool (disabled until SetSpawnConfig)
 	sessComp                *sessionCompactor      // nil = session-history compaction disabled
 	autoTitleOff            bool                   // config: disable LLM session auto-titling
+	exitOnTurnError         bool                   // config: gateway exits (code 75) when a turn fails terminally
+	turnErrCount            int                    // terminal turn errors since boot (set by processTurn, read by gateway)
 	autoContinueOff         bool                   // config: disable resume-on-"continue" interception
 	signalBudgetBlocks      int                    // config: maxIterations multiplier for signal/background turns (0 = default)
 	paused                  map[string]*pausedTurn // iteration-limit-paused turns awaiting "continue"
@@ -1157,6 +1159,25 @@ func (a *AgentLoop) SetSpawnCLIFlags(flags tools.CLIFlags) {
 // pass false to disable (sessions fall back to derived titles on archive).
 func (a *AgentLoop) SetSessionAutoTitle(enabled bool) {
 	a.autoTitleOff = !enabled
+}
+
+// SetExitOnTurnError arms the fatal-turn-error exit. When true, a turn that
+// fails terminally (LLM call errored after all provider retries) bumps a
+// counter that the gateway's main loop observes — the gateway then shuts
+// down gracefully and exits with code 75 so a supervisor (joist's interns
+// manager) can pick up the pieces instead of the child silently idling.
+func (a *AgentLoop) SetExitOnTurnError(enabled bool) {
+	a.mu.Lock()
+	a.exitOnTurnError = enabled
+	a.mu.Unlock()
+}
+
+// TurnErrorCount reports the number of terminal turn errors since boot.
+// Used by the gateway main loop to decide the exit-75 path.
+func (a *AgentLoop) TurnErrorCount() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.turnErrCount
 }
 
 // SetAutoContinue toggles iteration-limit auto-continue. Default on: when a
@@ -2895,6 +2916,12 @@ signalLoop:
 			}
 
 			log.Printf("provider error: %v", err)
+			if a.exitOnTurnError {
+				a.mu.Lock()
+				a.turnErrCount++
+				a.mu.Unlock()
+				log.Printf("exit-on-turn-error: terminal turn error (LLM failed after all retries) — gateway will exit with code 75")
+			}
 			finalContent = "Sorry, I encountered an error while processing your request."
 			break
 		}

@@ -12,6 +12,7 @@
       "requestTimeoutS": 300,
       "execTimeoutS": 300,
       "idleExitS": 0,
+      "exitOnTurnError": false,
       "maxRetries": 2,
       "retryBaseWaitS": 2,
       "visionModel": "",

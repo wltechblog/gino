@@ -70,6 +70,8 @@ Agent behavior settings.
 | `maxTokens` | int | `8192` | Maximum tokens for LLM responses. |
 | `temperature` | float | `0.7` | LLM temperature (0.0 = deterministic, 1.0 = creative). |
 | `maxToolIterations` | int | `100` | Maximum number of tool-calling iterations per request. Prevents infinite loops. |
+| `exitOnTurnError` | bool | `false` | When `true`, a terminally failed turn (LLM call errored after ALL provider retries) shuts the gateway down gracefully and exits with code 75. Intended for supervised child agents: the parent (e.g. joist's interns manager) notices the exit, preserves pending work, and relaunches on demand. Long-lived interactive bots should leave this off — one failed turn shouldn't kill a chat bot. |
+| `maxRetries` | int | `2` | Provider retries per LLM request (exponential backoff). Supervised children that run unattended benefit from a higher budget (joist stamps 5 into interns) so transient provider outages ride out. |
 | `signalBudgetBlocks` | int | `4` | Iteration-budget multiplier for signal/background turns (agentchat wake-ups, job reports, async spawn results). These turns have no interactive subscriber who could reply `continue`, so they never pause at `maxToolIterations`: they run on blocks × maxIterations, then a wrap-up pass, then a synthesized hard-cap reply. Interactive turns always pause-and-resume unchanged. |
 | `heartbeatIntervalS` | int | `60` | How often (in seconds) the heartbeat checks `HEARTBEAT.md` for periodic tasks. Only used in gateway mode. |
 | `requestTimeoutS` | int | `60` | HTTP timeout in seconds for each LLM API request. Increase for slow models or poor network conditions. |

@@ -471,6 +471,7 @@ func runGateway(homeFlag string, args []string) {
 	hub := chat.NewHub(200)
 	cfg, _ := config.LoadConfig(homeDir)
 	configureLogging(cfg)
+	errExitCode := 0 // non-zero only on the exit-on-turn-error path (75)
 	provider := providers.NewProviderFromConfig(cfg)
 
 	model := *modelFlag
@@ -637,6 +638,34 @@ func runGateway(homeFlag string, args []string) {
 	// cancel() runs the same shutdown path as SIGTERM, and the parent's
 	// exit watcher sees a zero exit code. Assign a task and the parent's
 	// health-gated assign relaunches the child (serverless pattern).
+	// Exit on terminal turn error: a supervised child whose turn failed
+	// terminally (LLM errored after all retries) shuts down so the parent
+	// can pick up the pieces. Code 75 (EX_TEMPFAIL) distinguishes it from
+	// idle exit (0) and crashes (anything else).
+	if cfg.Agents.Defaults.ExitOnTurnError {
+		ag.SetExitOnTurnError(true)
+		go func() {
+			// Small poll: turn errors are rare; 2s is plenty and keeps the
+			// check cheap. ctx.Done stops the watcher on normal shutdown.
+			tick := time.NewTicker(2 * time.Second)
+			defer tick.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-tick.C:
+					if ag.TurnErrorCount() > 0 {
+						log.Printf("exit-on-turn-error: shutting down after terminal turn error")
+						cancel()
+						errExitCode = 75
+						return
+					}
+				}
+			}
+		}()
+		log.Println("exit-on-turn-error: armed (terminal turn errors exit with code 75)")
+	}
+
 	idleExitCh := make(chan struct{})
 	if idleExit := time.Duration(cfg.Agents.Defaults.IdleExitS) * time.Second; idleExit > 0 {
 		go func() {
@@ -678,6 +707,9 @@ func runGateway(homeFlag string, args []string) {
 	}
 	ag.Close()
 	log.Println("gateway stopped")
+	if errExitCode != 0 {
+		os.Exit(errExitCode)
+	}
 }
 
 // ─── signal send ────────────────────────────────────────────────────────────
