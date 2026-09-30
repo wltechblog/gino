@@ -600,6 +600,11 @@ func runGateway(homeFlag string, args []string) {
 		}()
 		log.Printf("Signal: external trigger system enabled on %s", sigListener.SocketPath())
 		ag.SetSignalListener(sigListener)
+		// Builtin "probe" answers with the gateway's busy state (same
+		// semantics as idleExitS): active or queued turns, paused turns,
+		// pending messages, or background jobs. Supervisors poll it to
+		// tell alive-and-busy from wedged — no LLM turn per probe.
+		sigListener.SetBusyProbe(func() bool { return !ag.Idle() || ag.BackgroundJobs() > 0 })
 	}
 
 	if cfg.Channels.Telegram.Enabled {

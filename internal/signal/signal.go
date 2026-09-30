@@ -289,6 +289,14 @@ type Listener struct {
 	lastChan   string
 	lastChatID string
 
+	// busyFn powers the builtin "probe" action: when set, the listener
+	// answers probe signals directly with the gateway's busy state
+	// ({"status":"ok","busy":...}) — never injected into the hub, no LLM
+	// turn. Supervisors (joist's interns manager) poll it to tell
+	// alive-and-busy from wedged or dead.
+	probeMu sync.RWMutex
+	busyFn  func() bool
+
 	// Per-source routing bindings: MCP source name → (channel, chatID) of
 	// the session that most recently called a tool on that server. A session
 	// that arms a trigger via a tools/call does so on a specific server, so
@@ -318,6 +326,15 @@ func NewListener(socketPath string, hub *chat.Hub, registry *Registry, defaultCh
 		defaultChatID:  defaultChatID,
 		sourceTargets:  map[string]sourceTarget{},
 	}
+}
+
+// SetBusyProbe arms the builtin "probe" action with a busy-state probe
+// (typically !Idle() || background jobs > 0). Nil (default) = probes
+// answer busy:false.
+func (l *Listener) SetBusyProbe(fn func() bool) {
+	l.probeMu.Lock()
+	l.busyFn = fn
+	l.probeMu.Unlock()
 }
 
 // SocketPath returns the path the listener is configured on.
@@ -549,6 +566,22 @@ func (l *Listener) handleConnection(conn net.Conn) {
 	if sig.Source == "" {
 		log.Printf("Signal: missing source field, ignoring")
 		conn.Write([]byte(`{"status":"error","error":"source is required"}`))
+		return
+	}
+
+	// Builtin liveness probe: answered by the listener itself — no
+	// registry entry, no hub injection, no LLM turn. Checked before
+	// registry validation; older listeners reject it as an unknown
+	// action, which callers treat as "reachable but busy-unknown".
+	if sig.Action == "probe" {
+		busy := false
+		l.probeMu.RLock()
+		fn := l.busyFn
+		l.probeMu.RUnlock()
+		if fn != nil {
+			busy = fn()
+		}
+		conn.Write([]byte(fmt.Sprintf(`{"status":"ok","busy":%t}`, busy)))
 		return
 	}
 
