@@ -1671,6 +1671,26 @@ type pausedTurn struct {
 }
 
 // hasActiveTurn returns true if a turn is currently running for the session.
+// Idle reports whether the agent currently has anything in flight: no
+// active turns (including signal turns), no deferred signals, no
+// iteration-paused turns awaiting "continue", and no messages queued for
+// an active turn. Used by the gateway's idle-exit supervisor — an agent
+// with no work in flight is a candidate for clean shutdown.
+func (a *AgentLoop) Idle() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.active) == 0 && len(a.signalQueue) == 0 && len(a.paused) == 0 && len(a.pending) == 0
+}
+
+// BackgroundJobs reports the number of running background-tool jobs
+// (one-shots + pollers). 0 when the background tool is absent.
+func (a *AgentLoop) BackgroundJobs() int {
+	if a.bgTool == nil {
+		return 0
+	}
+	return a.bgTool.ActiveJobs()
+}
+
 func (a *AgentLoop) hasActiveTurn(sessionKey string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()

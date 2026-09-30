@@ -724,6 +724,15 @@ func (t *BackgroundTool) loadLocked() error {
 
 // Shutdown stops all pollers and kills running one-shots. Called on agent
 // shutdown so child processes don't outlive the agent.
+// ActiveJobs returns the number of one-shot jobs and pollers currently
+// registered. Used by the gateway's idle-exit check: running background
+// work is in-flight activity, not idleness.
+func (t *BackgroundTool) ActiveJobs() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.oneShots) + len(t.pollers)
+}
+
 func (t *BackgroundTool) Shutdown() {
 	t.mu.Lock()
 	pollers := make([]*bgPoller, 0, len(t.pollers))

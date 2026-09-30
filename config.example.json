@@ -11,6 +11,7 @@
       "heartbeatIntervalS": 30,
       "requestTimeoutS": 300,
       "execTimeoutS": 300,
+      "idleExitS": 0,
       "maxRetries": 2,
       "retryBaseWaitS": 2,
       "visionModel": "",

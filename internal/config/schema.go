@@ -102,6 +102,14 @@ type AgentDefaults struct {
 	HeartbeatIntervalS          int     `json:"heartbeatIntervalS"`
 	RequestTimeoutS             int     `json:"requestTimeoutS"`
 	ExecTimeoutS                int     `json:"execTimeoutS"`
+
+	// IdleExitS shuts the gateway down cleanly when it has been idle for
+	// this many continuous seconds: no active turns, nothing paused or
+	// deferred, no background jobs, no undelivered hub traffic. Intended
+	// for supervised child agents (joist subagents) — the supervisor
+	// relaunches on demand, making children serverless. 0 (default) keeps
+	// the gateway running forever.
+	IdleExitS                   int     `json:"idleExitS,omitempty"`
 	MaxRetries                  int     `json:"maxRetries,omitempty"`     // retries per provider attempt (default: 2)
 	RetryBaseWaitS              int     `json:"retryBaseWaitS,omitempty"` // base wait between retries in seconds (default: 2)
 	EnableToolActivityIndicator *bool   `json:"enableToolActivityIndicator,omitempty"`

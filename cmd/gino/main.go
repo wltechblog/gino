@@ -629,9 +629,55 @@ func runGateway(homeFlag string, args []string) {
 	hub.StartRouter(ctx)
 
 	log.Println("gateway started — waiting for messages")
+
+	// Idle exit: supervised child gateways terminate themselves when idle
+	// instead of running forever. All conditions must hold continuously
+	// for the full window: no active/paused/deferred turns, no background
+	// jobs, no undelivered outbound in the hub buffer. Exit is clean —
+	// cancel() runs the same shutdown path as SIGTERM, and the parent's
+	// exit watcher sees a zero exit code. Assign a task and the parent's
+	// health-gated assign relaunches the child (serverless pattern).
+	idleExitCh := make(chan struct{})
+	if idleExit := time.Duration(cfg.Agents.Defaults.IdleExitS) * time.Second; idleExit > 0 {
+		go func() {
+			tick := time.NewTicker(idleExit / 4)
+			defer tick.Stop()
+			idleSince := time.Now()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-tick.C:
+					busy := !ag.Idle() ||
+						(ag.BackgroundJobs() > 0) ||
+						len(hub.Out) > 0
+					if busy {
+						idleSince = time.Now()
+						continue
+					}
+					if time.Since(idleSince) >= idleExit {
+						log.Printf("idle-exit: no work for %v — shutting down cleanly", idleExit)
+						close(idleExitCh)
+						return
+					}
+				}
+			}
+		}()
+		log.Printf("idle-exit: armed (exits after %v idle)", idleExit)
+	}
+
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	<-sigCh
+	select {
+	case <-sigCh:
+		cancel()
+	case <-idleExitCh:
+		// Idle-exit supervisor already decided; run the same graceful
+		// shutdown a signal would trigger.
+		cancel()
+	}
+	ag.Close()
+	log.Println("gateway stopped")
 }
 
 // ─── signal send ────────────────────────────────────────────────────────────
