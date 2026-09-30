@@ -244,28 +244,37 @@ func (t *ExecTool) isArgUnsafe(s string) bool {
 		return false
 	}
 
-	// If sandbox allows absolute paths, check if path is within allowed dirs
-	if t.sandbox.AllowsAbsolutePaths() {
-		cleaned := filepath.Clean(s)
-		for _, d := range t.allowedDirs {
-			if cleaned == d || (d == "/") {
-				return false
-			}
-			if strings.HasPrefix(cleaned, d+string(filepath.Separator)) {
-				return false
-			}
+	// An explicit allowedDirs grant is honored in EVERY mode — it is
+	// the operator's explicit authorization, stricter than mode defaults.
+	// Root ("/") grants cover any absolute path.
+	cleaned := filepath.Clean(s)
+	for _, d := range t.allowedDirs {
+		if cleaned == filepath.Clean(d) {
+			return false
 		}
-		if t.allowedDir != "" {
-			ad := filepath.Clean(t.allowedDir)
-			if cleaned == ad || strings.HasPrefix(cleaned, ad+string(filepath.Separator)) {
-				return false
-			}
+		if d == "/" {
+			return false
 		}
-		// Absolute path outside allowed dirs — still unsafe
-		return true
+		if strings.HasPrefix(cleaned, filepath.Clean(d)+string(filepath.Separator)) {
+			return false
+		}
+	}
+	if t.allowedDir != "" {
+		ad := filepath.Clean(t.allowedDir)
+		if cleaned == ad || strings.HasPrefix(cleaned, ad+string(filepath.Separator)) {
+			return false
+		}
 	}
 
-	// Strict mode: all absolute paths are unsafe
+	// Beyond explicit grants, mode rules decide. Permissive (and yolo,
+	// already returned above) allows absolute paths — but when allowedDirs
+	// IS configured it stays the containment boundary: paths outside are
+	// unsafe. Strict without allowAbsolutePaths blocks everything else.
+	if t.sandbox.AllowsAbsolutePaths() {
+		// Grants configured and the path is outside all of them -> the
+		// grants remain the containment boundary even in permissive mode.
+		return len(t.allowedDirs) > 0 || t.allowedDir != ""
+	}
 	return true
 }
 
@@ -278,6 +287,11 @@ func (t *ExecTool) isDirAllowed(dir string) bool {
 	cleaned := filepath.Clean(dir)
 	for _, d := range t.allowedDirs {
 		if cleaned == d || cleaned == filepath.Clean(d) {
+			return true
+		}
+		// Root grant covers everything; Clean("/")+"/" would be "//",
+		// which prefixes nothing (same special case as filesystem.go).
+		if d == "/" {
 			return true
 		}
 		if strings.HasPrefix(cleaned, filepath.Clean(d)+string(filepath.Separator)) {
