@@ -197,9 +197,14 @@ type originKeyType struct{}
 var originKey originKeyType
 
 // TurnOrigin carries the channel/chatID a tools/call originates from.
+// SessionKey is the full logical session key of the originating turn
+// (project- or user-namespaced where applicable) — longer-lived tools
+// (background jobs, spawn tasks, cron) persist it so their results route
+// back to the exact conversation that created them.
 type TurnOrigin struct {
-	Channel string
-	ChatID  string
+	Channel    string
+	ChatID     string
+	SessionKey string
 }
 
 // WithTurnOrigin returns a context carrying the turn origin. The value is
@@ -209,10 +214,23 @@ func WithTurnOrigin(ctx context.Context, channel, chatID string) context.Context
 	return context.WithValue(ctx, originKey, TurnOrigin{Channel: channel, ChatID: chatID})
 }
 
-// originFromContext extracts the turn origin, if any.
-func originFromContext(ctx context.Context) (TurnOrigin, bool) {
+// WithTurnOriginSession is WithTurnOrigin plus the full session key.
+func WithTurnOriginSession(ctx context.Context, channel, chatID, sessionKey string) context.Context {
+	return context.WithValue(ctx, originKey, TurnOrigin{Channel: channel, ChatID: chatID, SessionKey: sessionKey})
+}
+
+// OriginFromContext extracts the turn origin, if any. Tools that need to
+// know where they were invoked from (background jobs, spawn, cron) read
+// their destination from here — never from mutable tool state, which races
+// when multiple sessions are live.
+func OriginFromContext(ctx context.Context) (TurnOrigin, bool) {
 	o, ok := ctx.Value(originKey).(TurnOrigin)
 	return o, ok
+}
+
+// originFromContext is the unexported alias used inside this package.
+func originFromContext(ctx context.Context) (TurnOrigin, bool) {
+	return OriginFromContext(ctx)
 }
 
 // CallToolWithImages invokes a tool and returns both the concatenated text

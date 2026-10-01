@@ -15,6 +15,8 @@ import (
 
 	"github.com/wltechblog/gino/internal/chat"
 	"github.com/wltechblog/gino/internal/config"
+
+	"github.com/wltechblog/gino/internal/mcp"
 )
 
 // SpawnTool runs named subagent tasks as isolated `gino agent` subprocesses.
@@ -385,7 +387,12 @@ func (t *SpawnTool) doSpawn(ctx context.Context, args map[string]interface{}) (s
 	// The child runs in its own context DETACHED from the registering turn —
 	// a long research task must survive the parent turn ending (reply sent,
 	// turn context canceled). Only the timeout or an explicit cancel kills it.
-	channel, chatID := t.currentContext()
+	channel, chatID, sessionKey := t.currentContext()
+	if o, ok := mcp.OriginFromContext(ctx); ok && o.Channel != "" && o.ChatID != "" {
+		// Per-turn origin beats ambient tool state: two live sessions
+		// spawning in overlapping turns each deliver to their own chat.
+		channel, chatID, sessionKey = o.Channel, o.ChatID, o.SessionKey
+	}
 	runCtx, cancel := context.WithTimeout(context.Background(), timeout)
 	tk.cancel = cancel
 	go func() {
@@ -404,7 +411,7 @@ func (t *SpawnTool) doSpawn(ctx context.Context, args map[string]interface{}) (s
 		}
 		body := fmt.Sprintf("%s\nLabel: %s\nTask: %s\n--- output ---\n%s",
 			head, agentLabel(agentName), headBytes(task, spTaskHeadBytes), tailBytes(output, spTailBytes))
-		t.deliver(channel, chatID, body)
+		t.deliver(channel, chatID, sessionKey, body)
 	}()
 
 	return fmt.Sprintf("started: id=%s agent=%s session=%s timeout=%s — the result will be delivered when it finishes. Use action=list to see it or action=cancel id=%s to stop it.",
@@ -625,16 +632,16 @@ func (t *SpawnTool) normalizeSession(name, task string) string {
 	return fmt.Sprintf("%s-%d", slug, seq)
 }
 
-func (t *SpawnTool) currentContext() (string, string) {
+func (t *SpawnTool) currentContext() (string, string, string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.channel, t.chatID
+	return t.channel, t.chatID, ""
 }
 
 // deliver injects a completed task's output into the hub as a signal, so it
 // routes to the signal session namespace and never cancels an active
 // interactive turn (mirrors the background tool's delivery pattern).
-func (t *SpawnTool) deliver(channel, chatID, body string) {
+func (t *SpawnTool) deliver(channel, chatID, sessionKey, body string) {
 	if t.hub == nil {
 		log.Printf("spawn: no hub; dropping delivery: %s", headBytes(body, 200))
 		return
@@ -642,6 +649,10 @@ func (t *SpawnTool) deliver(channel, chatID, body string) {
 	meta := map[string]interface{}{
 		"signal_action": "spawn_task",
 		"signal_silent": false,
+	}
+	if sessionKey != "" {
+		// Route the result into the exact session that spawned the task.
+		meta["session_key"] = sessionKey
 	}
 	select {
 	case t.hub.In <- chat.Inbound{

@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/wltechblog/gino/internal/chat"
+
+	"github.com/wltechblog/gino/internal/mcp"
 )
 
 // ── Limits ──────────────────────────────────────────────────────────────────
@@ -40,6 +42,7 @@ type bgOneShot struct {
 	Timeout        time.Duration `json:"timeout"`
 	Channel        string        `json:"channel"`
 	ChatID         string        `json:"chat_id"`
+	SessionKey     string        `json:"session_key,omitempty"`
 	RerunOnRestart bool          `json:"rerun_on_restart,omitempty"`
 	StartedAt      time.Time     `json:"started_at"`
 
@@ -49,17 +52,18 @@ type bgOneShot struct {
 
 // bgPoller runs a command on an interval and signals on change/failure/always.
 type bgPoller struct {
-	ID       string        `json:"id"`
-	Name     string        `json:"name"`
-	Argv     []string      `json:"argv"`
-	Cwd      string        `json:"cwd,omitempty"`
-	Interval time.Duration `json:"interval"`
-	RunTO    time.Duration `json:"run_timeout"`
-	NotifyOn string        `json:"notify_on"`          // change | failure | always
-	MaxRuns  int           `json:"max_runs,omitempty"` // 0 = unlimited
-	Runs     int           `json:"runs"`
-	Channel  string        `json:"channel"`
-	ChatID   string        `json:"chat_id"`
+	ID         string        `json:"id"`
+	Name       string        `json:"name"`
+	Argv       []string      `json:"argv"`
+	Cwd        string        `json:"cwd,omitempty"`
+	Interval   time.Duration `json:"interval"`
+	RunTO      time.Duration `json:"run_timeout"`
+	NotifyOn   string        `json:"notify_on"`          // change | failure | always
+	MaxRuns    int           `json:"max_runs,omitempty"` // 0 = unlimited
+	Runs       int           `json:"runs"`
+	Channel    string        `json:"channel"`
+	ChatID     string        `json:"chat_id"`
+	SessionKey string        `json:"session_key,omitempty"`
 
 	lastHash string
 	lastFail bool
@@ -173,16 +177,31 @@ func (t *BackgroundTool) SetContext(channel, chatID string) {
 	t.mu.Unlock()
 }
 
+// resolveOrigin returns the destination a job created in this turn should
+// notify. Context wins: the per-turn origin stamped by the agent loop at
+// tools.Execute time cannot race concurrent dispatches (two live sessions
+// calling background in overlapping turns each get their own). The ambient
+// SetContext fields remain as a fallback for direct callers without an
+// origin-carrying context.
+func (t *BackgroundTool) resolveOrigin(ctx context.Context) (channel, chatID, sessionKey string) {
+	if o, ok := mcp.OriginFromContext(ctx); ok && o.Channel != "" && o.ChatID != "" {
+		return o.Channel, o.ChatID, o.SessionKey
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.channel, t.chatID, ""
+}
+
 // ── Execute ─────────────────────────────────────────────────────────────────
 
-func (t *BackgroundTool) Execute(_ context.Context, args map[string]interface{}) (string, error) {
+func (t *BackgroundTool) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
 	action, _ := args["action"].(string)
 
 	switch action {
 	case "start":
-		return t.executeStart(args)
+		return t.executeStart(ctx, args)
 	case "poll":
-		return t.executePoll(args)
+		return t.executePoll(ctx, args)
 	case "list":
 		return t.executeList()
 	case "cancel":
@@ -192,7 +211,7 @@ func (t *BackgroundTool) Execute(_ context.Context, args map[string]interface{})
 	}
 }
 
-func (t *BackgroundTool) executeStart(args map[string]interface{}) (string, error) {
+func (t *BackgroundTool) executeStart(ctx context.Context, args map[string]interface{}) (string, error) {
 	name, _ := args["name"].(string)
 	if name == "" {
 		name = "job"
@@ -220,17 +239,17 @@ func (t *BackgroundTool) executeStart(args map[string]interface{}) (string, erro
 		return "", fmt.Errorf("background start: %v", err)
 	}
 
+	channel, chatID, sessionKey := t.resolveOrigin(ctx)
 	t.mu.Lock()
 	if len(t.oneShots) >= bgMaxOneShot {
 		t.mu.Unlock()
 		return "", fmt.Errorf("background start: %d one-shot jobs already running (max %d) — wait for one to finish or cancel one", len(t.oneShots), bgMaxOneShot)
 	}
-	channel, chatID := t.channel, t.chatID
 	id := fmt.Sprintf("bg%d", t.nextID)
 	t.nextID++
 	j := &bgOneShot{
 		ID: id, Name: name, Argv: argv, Cwd: cwd, Timeout: timeout,
-		Channel: channel, ChatID: chatID, RerunOnRestart: rerun,
+		Channel: channel, ChatID: chatID, SessionKey: sessionKey, RerunOnRestart: rerun,
 		StartedAt: time.Now(),
 	}
 	t.oneShots[id] = j
@@ -246,7 +265,7 @@ func (t *BackgroundTool) executeStart(args map[string]interface{}) (string, erro
 	return fmt.Sprintf("Background job %q (id %s) started%s. I'll report the result here when it completes.", name, id, toDesc), nil
 }
 
-func (t *BackgroundTool) executePoll(args map[string]interface{}) (string, error) {
+func (t *BackgroundTool) executePoll(ctx context.Context, args map[string]interface{}) (string, error) {
 	name, _ := args["name"].(string)
 	if name == "" {
 		name = "poll"
@@ -296,19 +315,19 @@ func (t *BackgroundTool) executePoll(args map[string]interface{}) (string, error
 		return "", fmt.Errorf("background poll: %v", err)
 	}
 
+	channel, chatID, sessionKey := t.resolveOrigin(ctx)
 	t.mu.Lock()
 	if len(t.pollers) >= bgMaxPollers {
 		t.mu.Unlock()
 		return "", fmt.Errorf("background poll: %d pollers already registered (max %d) — cancel one first", len(t.pollers), bgMaxPollers)
 	}
-	channel, chatID := t.channel, t.chatID
 	id := fmt.Sprintf("bg%d", t.nextID)
 	t.nextID++
 	p := &bgPoller{
 		ID: id, Name: name, Argv: argv, Cwd: cwd,
 		Interval: interval, RunTO: bgDefaultRunTO,
 		NotifyOn: notifyOn, MaxRuns: maxRuns,
-		Channel: channel, ChatID: chatID,
+		Channel: channel, ChatID: chatID, SessionKey: sessionKey,
 		stopCh: make(chan struct{}),
 	}
 	t.pollers[id] = p
@@ -444,7 +463,7 @@ func (w *bgTailWriter) String() string { return string(w.buf) }
 // notify injects a completion/update message into the hub with signal
 // metadata so it lands in the signal session namespace (never cancels an
 // active interactive turn) and always produces a visible reply.
-func (t *BackgroundTool) notify(channel, chatID, content string) {
+func (t *BackgroundTool) notify(channel, chatID, sessionKey, content string) {
 	if t.hub == nil {
 		return
 	}
@@ -454,11 +473,19 @@ func (t *BackgroundTool) notify(channel, chatID, content string) {
 		ChatID:    chatID,
 		Content:   content,
 		Timestamp: time.Now(),
-		Metadata: map[string]interface{}{
-			"signal_action": "background_job",
-			"signal_source": "background-manager",
-			"signal_silent": false,
-		},
+		Metadata: func() map[string]interface{} {
+			m := map[string]interface{}{
+				"signal_action": "background_job",
+				"signal_source": "background-manager",
+				"signal_silent": false,
+			}
+			if sessionKey != "" {
+				// Route the notification into the exact session that created
+				// the job (project- and user-namespaced sessions included).
+				m["session_key"] = sessionKey
+			}
+			return m
+		}(),
 	}
 	select {
 	case t.hub.In <- msg:
@@ -498,7 +525,7 @@ func (t *BackgroundTool) launchOneShot(j *bgOneShot) {
 		}
 		sb.WriteString(bgOutputSection(tail, total))
 
-		t.notify(j.Channel, j.ChatID, sb.String()+"(Relay this result to the user, summarizing it briefly.)")
+		t.notify(j.Channel, j.ChatID, j.SessionKey, sb.String()+"(Relay this result to the user, summarizing it briefly.)")
 
 		t.mu.Lock()
 		// If cancelled via executeCancel the entry is already gone.
@@ -569,11 +596,11 @@ func (t *BackgroundTool) runPoller(p *bgPoller) {
 				fmt.Fprintf(&sb, "Exit: %d\n", code)
 			}
 			sb.WriteString(bgOutputSection(out, total))
-			t.notify(p.Channel, p.ChatID, sb.String()+"(Relay this to the user, summarizing briefly.)")
+			t.notify(p.Channel, p.ChatID, p.SessionKey, sb.String()+"(Relay this to the user, summarizing briefly.)")
 		}
 		if done {
 			log.Printf("background: poller %q (%s) finished after %d runs", p.Name, p.ID, p.Runs)
-			t.notify(p.Channel, p.ChatID, fmt.Sprintf("[Background poller finished] %q (id %s) completed its %d scheduled runs. (Relay briefly to the user.)", p.Name, p.ID, p.Runs))
+			t.notify(p.Channel, p.ChatID, p.SessionKey, fmt.Sprintf("[Background poller finished] %q (id %s) completed its %d scheduled runs. (Relay briefly to the user.)", p.Name, p.ID, p.Runs))
 			p.stopOnce.Do(func() { close(p.stopCh) })
 			return
 		}
@@ -701,7 +728,7 @@ func (t *BackgroundTool) loadLocked() error {
 			t.launchOneShot(j)
 			log.Printf("background: relaunched job %q (%s) after restart", j.Name, j.ID)
 		} else {
-			t.notify(j.Channel, j.ChatID, fmt.Sprintf(
+			t.notify(j.Channel, j.ChatID, j.SessionKey, fmt.Sprintf(
 				"[Background job interrupted] %q (id %s) did not complete — the agent process restarted before it finished. Command: %s\n(If the job is still needed, start it again. Relay briefly to the user.)",
 				j.Name, j.ID, bgCmdString(j.Argv)))
 		}

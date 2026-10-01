@@ -1058,15 +1058,17 @@ func (a *AgentLoop) SetDirectOrigin(channel, chatID string) {
 	a.mu.Unlock()
 }
 
-// ctxWithOrigin stamps the turn's channel/chatID into the context so MCP
-// tools/call requests carry _meta origin. Cooperating servers echo this in
-// their signal payloads for exact routing; all clients honor the same
-// package-level context key.
-func (a *AgentLoop) ctxWithOrigin(ctx context.Context, channel, chatID string) context.Context {
+// ctxWithOrigin stamps the turn's channel/chatID and full session key into
+// the context so MCP tools/call requests carry _meta origin (cooperating
+// servers echo this in their signal payloads for exact routing) and so
+// tools that outlive the turn (background, spawn, cron) can capture a
+// race-free origin instead of reading mutable tool state. All clients honor
+// the same package-level context key.
+func (a *AgentLoop) ctxWithOrigin(ctx context.Context, channel, chatID, sessionKey string) context.Context {
 	if channel == "" || chatID == "" {
 		return ctx
 	}
-	return mcp.WithTurnOrigin(ctx, channel, chatID)
+	return mcp.WithTurnOriginSession(ctx, channel, chatID, sessionKey)
 }
 
 // recordSourceBinding notes that this session just called a tool on the
@@ -3017,7 +3019,7 @@ signalLoop:
 				start := time.Now()
 				res, err := a.tools.Execute(
 					tools.WithExecSession(
-						a.ctxWithOrigin(ctx, msg.Channel, msg.ChatID),
+						a.ctxWithOrigin(ctx, msg.Channel, msg.ChatID, strings.TrimPrefix(sessionKey, "signal:")),
 						sessionKey,
 					),
 					tc.Name, tc.Arguments)
@@ -3470,7 +3472,7 @@ func (a *AgentLoop) ProcessDirectWithSessionAndSystemPrompt(content string, time
 		for _, tc := range resp.ToolCalls {
 			result, err := a.tools.Execute(
 				tools.WithExecSession(
-					a.ctxWithOrigin(ctx, a.directChannel, a.directChatID),
+					a.ctxWithOrigin(ctx, a.directChannel, a.directChatID, sessionKey),
 					sessionKey,
 				),
 				tc.Name, tc.Arguments)

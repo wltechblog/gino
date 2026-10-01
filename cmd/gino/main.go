@@ -501,6 +501,10 @@ func runGateway(homeFlag string, args []string) {
 			ChatID:   job.ChatID,
 			Content:  fmt.Sprintf("[Scheduled reminder fired] %s — Please relay this to the user in a friendly way.", job.Message),
 		}
+		if job.SessionKey != "" {
+			// Deliver into the session that scheduled the reminder.
+			in.Metadata = map[string]interface{}{"session_key": job.SessionKey}
+		}
 		select {
 		case hub.In <- in:
 		case <-time.After(10 * time.Second):

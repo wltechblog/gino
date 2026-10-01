@@ -12,22 +12,23 @@ import (
 
 // Job represents a scheduled task.
 type Job struct {
-	ID        string        `json:"id"`
-	Name      string        `json:"name"`
-	Message   string        `json:"message"`
-	FireAt    time.Time     `json:"fire_at"`
-	Channel   string        `json:"channel,omitempty"`
-	ChatID    string        `json:"chat_id,omitempty"`
-	Recurring bool          `json:"recurring,omitempty"`
-	Interval  time.Duration `json:"interval,omitempty"`
+	ID         string        `json:"id"`
+	Name       string        `json:"name"`
+	Message    string        `json:"message"`
+	FireAt     time.Time     `json:"fire_at"`
+	Channel    string        `json:"channel,omitempty"`
+	ChatID     string        `json:"chat_id,omitempty"`
+	SessionKey string        `json:"session_key,omitempty"`
+	Recurring  bool          `json:"recurring,omitempty"`
+	Interval   time.Duration `json:"interval,omitempty"`
 
 	// Cron-expression scheduling (optional alternative to Interval-based recurring).
 	Schedule string `json:"schedule,omitempty"` // raw cron expression, e.g. "*/15 9-16 * * 1-5"
 	Timezone string `json:"timezone,omitempty"` // IANA timezone, e.g. "America/New_York"
 
 	// Internal fields (not persisted).
-	fired bool          `json:"-"`
-	expr  *CronExpr     `json:"-"`
+	fired bool           `json:"-"`
+	expr  *CronExpr      `json:"-"`
 	loc   *time.Location `json:"-"`
 }
 
@@ -106,19 +107,22 @@ func (s *Scheduler) SetPersistencePath(path string) error {
 	return s.loadLocked()
 }
 
-// Add schedules a new one-time job. Returns the job ID.
-func (s *Scheduler) Add(name, message string, delay time.Duration, channel, chatID string) string {
+// Add registers a one-time job. Returns the job ID. The optional sessionKey
+// routes the fired reminder into the exact session that scheduled it
+// (project- and user-namespaced sessions included).
+func (s *Scheduler) Add(name, message string, delay time.Duration, channel, chatID string, sessionKey ...string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.nextID++
 	id := fmt.Sprintf("job-%d", s.nextID)
 	s.jobs[id] = &Job{
-		ID:      id,
-		Name:    name,
-		Message: message,
-		FireAt:  time.Now().Add(delay),
-		Channel: channel,
-		ChatID:  chatID,
+		ID:         id,
+		Name:       name,
+		Message:    message,
+		FireAt:     time.Now().Add(delay),
+		Channel:    channel,
+		ChatID:     chatID,
+		SessionKey: firstNonEmpty(sessionKey),
 	}
 	log.Printf("cron: scheduled job %q (%s) to fire in %v", name, id, delay)
 	s.saveLocked()
@@ -126,20 +130,21 @@ func (s *Scheduler) Add(name, message string, delay time.Duration, channel, chat
 }
 
 // AddRecurring schedules a recurring job. Returns the job ID.
-func (s *Scheduler) AddRecurring(name, message string, interval time.Duration, channel, chatID string) string {
+func (s *Scheduler) AddRecurring(name, message string, interval time.Duration, channel, chatID string, sessionKey ...string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.nextID++
 	id := fmt.Sprintf("job-%d", s.nextID)
 	s.jobs[id] = &Job{
-		ID:        id,
-		Name:      name,
-		Message:   message,
-		FireAt:    time.Now().Add(interval),
-		Channel:   channel,
-		ChatID:    chatID,
-		Recurring: true,
-		Interval:  interval,
+		ID:         id,
+		Name:       name,
+		Message:    message,
+		FireAt:     time.Now().Add(interval),
+		Channel:    channel,
+		ChatID:     chatID,
+		SessionKey: firstNonEmpty(sessionKey),
+		Recurring:  true,
+		Interval:   interval,
 	}
 	log.Printf("cron: scheduled recurring job %q (%s) every %v", name, id, interval)
 	s.saveLocked()
@@ -150,7 +155,7 @@ func (s *Scheduler) AddRecurring(name, message string, interval time.Duration, c
 // The cron expression determines when the job fires.
 // The timezone determines how the expression is interpreted.
 // Returns the job ID or an error if the expression is invalid.
-func (s *Scheduler) AddScheduled(name, message, cronExpr, timezone, channel, chatID string) (string, error) {
+func (s *Scheduler) AddScheduled(name, message, cronExpr, timezone, channel, chatID string, sessionKey ...string) (string, error) {
 	// Validate the expression before adding.
 	parsed, err := ParseCron(cronExpr)
 	if err != nil {
@@ -424,4 +429,14 @@ func (s *Scheduler) saveLocked() {
 
 	// Ensure parent dir exists (belt and suspenders).
 	_ = os.MkdirAll(filepath.Dir(s.filePath), 0700)
+}
+
+// firstNonEmpty returns the first non-empty string, or "".
+func firstNonEmpty(ss []string) string {
+	for _, v := range ss {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }

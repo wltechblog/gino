@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/wltechblog/gino/internal/cron"
+
+	"github.com/wltechblog/gino/internal/mcp"
 )
 
 // CronTool schedules delayed/recurring tasks via the cron scheduler.
@@ -77,14 +79,27 @@ func (t *CronTool) SetContext(channel, chatID string) {
 	t.chatID = chatID
 }
 
+// resolveOrigin returns the destination a job scheduled in this turn should
+// fire at. Context wins (per-turn, race-free); ambient fields are the
+// fallback for callers without an origin-carrying context.
+func (t *CronTool) resolveOrigin(ctx context.Context) (string, string, string) {
+	if o, ok := mcp.OriginFromContext(ctx); ok && o.Channel != "" && o.ChatID != "" {
+		return o.Channel, o.ChatID, o.SessionKey
+	}
+	return t.channel, t.chatID, ""
+}
+
 func (t *CronTool) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
 	action, _ := args["action"].(string)
+	// Per-turn origin beats ambient tool state (race-free under concurrent
+	// dispatches); ambient SetContext remains the fallback.
+	t.resolveOrigin(ctx)
 
 	switch action {
 	case "add":
-		return t.executeAdd(args)
+		return t.executeAdd(ctx, args)
 	case "schedule":
-		return t.executeSchedule(args)
+		return t.executeSchedule(ctx, args)
 	case "list":
 		return t.executeList(args)
 	case "cancel":
@@ -94,7 +109,8 @@ func (t *CronTool) Execute(ctx context.Context, args map[string]interface{}) (st
 	}
 }
 
-func (t *CronTool) executeAdd(args map[string]interface{}) (string, error) {
+func (t *CronTool) executeAdd(ctx context.Context, args map[string]interface{}) (string, error) {
+	channel, chatID, sessionKey := t.resolveOrigin(ctx)
 	name, _ := args["name"].(string)
 	message, _ := args["message"].(string)
 	delayStr, _ := args["delay"].(string)
@@ -130,15 +146,16 @@ func (t *CronTool) executeAdd(args map[string]interface{}) (string, error) {
 		if interval < 2*time.Minute {
 			return "", fmt.Errorf("cron add: recurring interval must be at least 2m (got %v)", interval)
 		}
-		id := t.scheduler.AddRecurring(name, message, interval, t.channel, t.chatID)
+		id := t.scheduler.AddRecurring(name, message, interval, channel, chatID, sessionKey)
 		return fmt.Sprintf("Scheduled recurring job %q (id: %s). Will fire in %v, then repeat every %v.", name, id, delay, interval), nil
 	}
 
-	id := t.scheduler.Add(name, message, delay, t.channel, t.chatID)
+	id := t.scheduler.Add(name, message, delay, channel, chatID, sessionKey)
 	return fmt.Sprintf("Scheduled job %q (id: %s). Will fire in %v.", name, id, delay), nil
 }
 
-func (t *CronTool) executeSchedule(args map[string]interface{}) (string, error) {
+func (t *CronTool) executeSchedule(ctx context.Context, args map[string]interface{}) (string, error) {
+	channel, chatID, sessionKey := t.resolveOrigin(ctx)
 	name, _ := args["name"].(string)
 	message, _ := args["message"].(string)
 	cronExpr, _ := args["cron"].(string)
@@ -154,7 +171,7 @@ func (t *CronTool) executeSchedule(args map[string]interface{}) (string, error) 
 		return "", fmt.Errorf("cron schedule: 'cron' expression is required (e.g. \"*/15 9-16 * * 1-5\")")
 	}
 
-	id, err := t.scheduler.AddScheduled(name, message, cronExpr, timezone, t.channel, t.chatID)
+	id, err := t.scheduler.AddScheduled(name, message, cronExpr, timezone, channel, chatID, sessionKey)
 	if err != nil {
 		return "", err
 	}
