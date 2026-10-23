@@ -32,7 +32,7 @@ func (p *errProvider) GetModelContext(ctx context.Context, model string) (int, e
 func newExitLoop(t *testing.T) (*AgentLoop, *chat.Hub) {
 	t.Helper()
 	b := chat.NewHub(10)
-	ag := NewAgentLoop(b, &errProvider{}, "err-model", 5, t.TempDir(), nil, nil, nil, nil, nil, "", config.SandboxConfig{}, "", 0, 0, nil, config.WebConfig{}, config.SearchConfig{}, "")
+	ag := NewAgentLoop(b, &errProvider{}, "err-model", 5, t.TempDir(), nil, nil, nil, nil, nil, config.Paths{}, config.SandboxConfig{}, "", 0, 0, nil, config.WebConfig{}, config.SearchConfig{}, "")
 	return ag, b
 }
 
@@ -66,7 +66,7 @@ func TestExitOnTurnErrorCount(t *testing.T) {
 // The hub path (dispatchMessage → processTurn) must bump the same counter.
 func TestExitOnTurnErrorHubPath(t *testing.T) {
 	b := chat.NewHub(10)
-	ag := NewAgentLoop(b, &errProvider{}, "err-model", 5, t.TempDir(), nil, nil, nil, nil, nil, "", config.SandboxConfig{}, "", 0, 0, nil, config.WebConfig{}, config.SearchConfig{}, "")
+	ag := NewAgentLoop(b, &errProvider{}, "err-model", 5, t.TempDir(), nil, nil, nil, nil, nil, config.Paths{}, config.SandboxConfig{}, "", 0, 0, nil, config.WebConfig{}, config.SearchConfig{}, "")
 	ag.SetExitOnTurnError(true)
 
 	ctx, cancel := context.WithCancel(context.Background())

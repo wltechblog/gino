@@ -24,6 +24,10 @@ func writeFakeGino(t *testing.T, body string) string {
 	return path
 }
 
+func unifiedTestPaths(dir string) config.Paths {
+	return config.Paths{ConfigDir: dir, DataDir: dir, StateDir: dir}
+}
+
 func spawnTestTool(t *testing.T, binary string, ws string) *SpawnTool {
 	t.Helper()
 	cfg := config.SpawnConfig{
@@ -38,7 +42,7 @@ func spawnTestTool(t *testing.T, binary string, ws string) *SpawnTool {
 		},
 	}
 	hub := chat.NewHub(10)
-	return NewSpawnTool(cfg, t.TempDir(), ws, hub)
+	return NewSpawnTool(cfg, unifiedTestPaths(t.TempDir()), ws, hub)
 }
 
 func TestSpawnSyncRunsChildAndReturnsOutput(t *testing.T) {
@@ -62,7 +66,7 @@ func TestSpawnSyncRunsChildAndReturnsOutput(t *testing.T) {
 
 func TestSpawnDisabledWithoutConfigure(t *testing.T) {
 	hub := chat.NewHub(10)
-	tk := NewSpawnToolDisabled(t.TempDir(), t.TempDir(), hub)
+	tk := NewSpawnToolDisabled(unifiedTestPaths(t.TempDir()), t.TempDir(), hub)
 	if _, err := tk.Execute(t.Context(), map[string]interface{}{"task": "x"}); err == nil {
 		t.Fatal("expected error for disabled spawn tool")
 	} else if !strings.Contains(err.Error(), "not enabled") {
@@ -87,7 +91,7 @@ func TestSpawnChildArgv(t *testing.T) {
 	}
 	argv := strings.Split(strings.TrimSpace(string(data)), "\n")
 	joined := strings.Join(argv, " ")
-	for _, want := range []string{"agent", "-session", "sp:", "-disable-tools"} {
+	for _, want := range []string{"agent", "-session", "sp:", "-disable-tools", "-home"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("argv missing %q: %v", want, argv)
 		}
@@ -219,7 +223,7 @@ func TestSpawnListAndCancel(t *testing.T) {
 }
 
 func TestSpawnSessionNameNormalization(t *testing.T) {
-	tk := NewSpawnToolDisabled(t.TempDir(), t.TempDir(), nil)
+	tk := NewSpawnToolDisabled(unifiedTestPaths(t.TempDir()), t.TempDir(), nil)
 	got := tk.normalizeSession("My Weird/Task!!", "irrelevant")
 	if got != "My-Weird-Task" {
 		t.Errorf("normalized to %q", got)
@@ -378,5 +382,34 @@ func TestSpawnProfileTimeoutUsed(t *testing.T) {
 	}
 	if !strings.Contains(out, "timed out") || !strings.Contains(out, "SLOW-START") {
 		t.Errorf("profile timeout not applied: %q", out)
+	}
+}
+
+func TestSpawnPathArgs(t *testing.T) {
+	cases := []struct {
+		name  string
+		paths config.Paths
+		want  []string
+	}{
+		{"zero", config.Paths{}, nil},
+		{
+			"unified",
+			config.Paths{ConfigDir: "/h", DataDir: "/h", StateDir: "/h"},
+			[]string{"-home", "/h"},
+		},
+		{
+			"xdg",
+			config.Paths{ConfigDir: "/c", DataDir: "/d", StateDir: "/s"},
+			[]string{"-config-dir", "/c", "-data-dir", "/d", "-state-dir", "/s"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tk := &SpawnTool{paths: tc.paths}
+			got := tk.pathArgs()
+			if strings.Join(got, " ") != strings.Join(tc.want, " ") {
+				t.Fatalf("pathArgs = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

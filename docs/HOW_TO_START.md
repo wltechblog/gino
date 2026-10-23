@@ -42,17 +42,53 @@ make linux_arm64_telegram   # Telegram-only, ARM64
 make clean              # remove all built binaries
 ```
 
-## Step 2: Onboard
+## Step 2: Install to PATH
+
+For a personal install, use `install-user`. It copies the binary to
+`~/.local/bin` and needs no root:
+
+```sh
+make install-user
+```
+
+Make sure `~/.local/bin` is on your `PATH`. Most distros add it automatically;
+otherwise add this to your shell profile:
+
+```sh
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+For a system-wide install instead:
+
+```sh
+sudo make install
+```
+
+That writes to `/usr/local/bin`; override with `make install PREFIX=/opt/gino`.
+For a cross-compiled binary, install it manually:
+
+```sh
+sudo install -m 0755 gino_0.4.0_linux_arm64 /usr/local/bin/gino   # adjust the version
+```
+
+Verify whichever method you used:
+
+```sh
+command -v gino
+gino version
+```
+
+## Step 3: Onboard
 
 Run the onboard command to create the config and workspace:
 
 ```sh
-./gino onboard
+gino onboard
 ```
 
-This creates:
-- `~/.gino/config.json` — your configuration file
-- `~/.gino/workspace/` — the agent's workspace with bootstrap files:
+This creates the XDG layout:
+- `~/.config/gino/config.json` — your configuration file
+- `~/.local/share/gino/workspace/` — the agent's workspace with bootstrap files:
   - `SOUL.md` — agent personality and values
   - `AGENTS.md` — agent instructions and guidelines
   - `USER.md` — your profile (customize this!)
@@ -61,12 +97,12 @@ This creates:
   - `memory/MEMORY.md` — long-term memory
   - `skills/example/SKILL.md` — example skill
 
-## Step 3: Configure API Key
+## Step 4: Configure API Key
 
-Edit `~/.gino/config.json` and replace the placeholder API key:
+Edit `~/.config/gino/config.json` and replace the placeholder API key:
 
 ```sh
-nano ~/.gino/config.json
+nano ~/.config/gino/config.json
 ```
 
 Change `"sk-or-v1-REPLACE_ME"` to your actual API key.
@@ -89,22 +125,47 @@ Also set your preferred model:
 }
 ```
 
-## Step 4: Customize Your Profile
+### Local or LAN provider
 
-Edit `~/.gino/workspace/USER.md` to fill in your name, timezone, preferences, etc. This helps the agent personalize its responses.
+Give the wizard a host or URL. It finds the port and API base, discovers the
+models, and sends a test completion:
 
-## Step 5: Try It!
+```sh
+gino provider add 192.168.1.50
+```
+
+If the endpoint serves one model it is selected automatically. With several,
+you pick from a numbered list. A key is only requested when the endpoint
+rejects anonymous access; pass it up front to avoid the prompt:
+
+```sh
+gino provider add 192.168.1.50 -key local
+```
+
+A bare host tries the usual local-LLM ports (8080, 11434, 1234, 8000, 5000,
+80, 443). Add `:port` or a full URL to skip the search. `-no-test` skips the
+completion.
+
+## Step 5: Customize Your Profile
+
+Edit `~/.local/share/gino/workspace/USER.md` to fill in your name, timezone, preferences, etc. This helps the agent personalize its responses.
+
+State files (cron jobs, background jobs, signal routes) live in
+`~/.local/state/gino/`. All three roots honor `XDG_CONFIG_HOME`,
+`XDG_DATA_HOME`, and `XDG_STATE_HOME`.
+
+## Step 6: Try It!
 
 ### Single-shot query
 
 ```sh
-./gino agent -m "Hello, what tools do you have?"
+gino agent -m "Hello, what tools do you have?"
 ```
 
 ### Use a specific model
 
 ```sh
-./gino agent -M "google/gemini-2.5-flash" -m "What is 2+2?"
+gino agent -M "google/gemini-2.5-flash" -m "What is 2+2?"
 ```
 
 ### Work on a project while keeping your Gino profile
@@ -112,20 +173,20 @@ Edit `~/.gino/workspace/USER.md` to fill in your name, timezone, preferences, et
 `--project` sets the active working directory (files, exec cwd, project `AGENTS.md`) while identity, memory, skills, sessions, and checkpoints stay in the configured Gino workspace. Omitting the flag keeps the previous behaviour: profile and project are the same directory.
 
 ```sh
-./gino chat --project /path/to/repo
-./gino agent --project /path/to/repo -m "What does this repo do?"
+gino chat --project /path/to/repo
+gino agent --project /path/to/repo -m "What does this repo do?"
 ```
 
 ### Login to channels (Telegram, Discord)
 
 ```sh
-./gino channels login
+gino channels login
 ```
 
 ### Start the gateway (long-running mode)
 
 ```sh
-./gino gateway
+gino gateway
 ```
 
 This starts the agent loop, heartbeat, and any enabled channels (Telegram, Discord).
@@ -137,6 +198,7 @@ This starts the agent loop, heartbeat, and any enabled channels (Telegram, Disco
 | `gino version` | Print version |
 | `gino onboard` | Create default config and workspace |
 | `gino channels login` | Interactively connect Telegram or Discord |
+| `gino provider add` | Configure a local or remote OpenAI-compatible provider |
 | `gino agent -m "..."` | Run a single-shot agent query |
 | `gino agent -M model -m "..."` | Query with a specific model |
 | `gino agent --project dir -m "..."` | Query against a project while keeping the Gino profile |
@@ -189,7 +251,7 @@ To chat with Gino on Telegram, you need to create a bot via **@BotFather**.
 Run the interactive channel login wizard:
 
 ```sh
-./gino channels login
+gino channels login
 ```
 
 Select **1) Telegram**, then follow the prompts.
@@ -226,7 +288,7 @@ Send a message to [@userinfobot](https://t.me/userinfobot) on Telegram — it wi
 
 ### 5. Configure Gino
 
-Edit `~/.gino/config.json`:
+Edit `~/.config/gino/config.json`:
 
 ```json
 {
@@ -256,7 +318,7 @@ Enable Developer Mode in Discord settings (App Settings → Advanced → Develop
 
 ### 4. Configure Gino
 
-Edit `~/.gino/config.json`:
+Edit `~/.config/gino/config.json`:
 
 ```json
 {

@@ -69,10 +69,10 @@ type TokenStore struct {
 	loaded  bool
 }
 
-// NewTokenStore creates a token store backed by a JSON file.
-func NewTokenStore(homeDir string) *TokenStore {
+// NewTokenStore creates a token store backed by a JSON file in configDir.
+func NewTokenStore(configDir string) *TokenStore {
 	return &TokenStore{
-		path:    filepath.Join(homeDir, "tokens.json"),
+		path:    filepath.Join(configDir, "tokens.json"),
 		tokens:  make(map[string]Token),
 		pending: make(map[string]pendingAuth),
 	}

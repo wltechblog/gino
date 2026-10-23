@@ -11,11 +11,11 @@ import (
 )
 
 // DefaultConfig returns a minimal default Config with sensible defaults.
-// homeDir is the gino home directory used to set default paths (workspace, etc).
-func DefaultConfig(homeDir string) Config {
+// workspacePath is the default agent workspace.
+func DefaultConfig(workspacePath string) Config {
 	return Config{
 		Agents: AgentsConfig{Defaults: AgentDefaults{
-			Workspace:                   filepath.Join(homeDir, "workspace"),
+			Workspace:                   workspacePath,
 			Model:                       "stub-model",
 			MaxTokens:                   16384,
 			Temperature:                 0.7,
@@ -33,7 +33,7 @@ func DefaultConfig(homeDir string) Config {
 		},
 		MCPServers: map[string]MCPServerConfig{},
 		Providers: ProvidersConfig{
-			OpenAI: &ProviderConfig{APIKey: "sk-or-v1-REPLACE_ME", APIBase: "https://openrouter.ai/api/v1"},
+			OpenAI: &ProviderConfig{APIKey: PlaceholderAPIKey, APIBase: "https://openrouter.ai/api/v1"},
 		},
 	}
 }
@@ -51,6 +51,29 @@ func SaveConfig(cfg Config, path string) error {
 		return err
 	}
 	return os.WriteFile(path, b, 0o640)
+}
+
+// workspaceBootstrapNames lists the files InitializeWorkspace writes into the
+// workspace root.
+var workspaceBootstrapNames = []string{"SOUL.md", "AGENTS.md", "USER.md", "TOOLS.md", "HEARTBEAT.md"}
+
+// WorkspaceComplete reports whether the workspace already has the bootstrap
+// files, memory file, and skills directory that InitializeWorkspace creates.
+func WorkspaceComplete(basePath string) bool {
+	info, err := os.Stat(basePath)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	for _, name := range workspaceBootstrapNames {
+		if _, err := os.Stat(filepath.Join(basePath, name)); err != nil {
+			return false
+		}
+	}
+	if _, err := os.Stat(filepath.Join(basePath, "memory", "MEMORY.md")); err != nil {
+		return false
+	}
+	info, err = os.Stat(filepath.Join(basePath, "skills"))
+	return err == nil && info.IsDir()
 }
 
 // InitializeWorkspace creates the workspace dir and bootstrap files.
@@ -380,31 +403,15 @@ func extractEmbeddedSkills(targetDir string) error {
 	})
 }
 
-// ResolvePaths returns absolute paths for the config and workspace based on homeDir.
-func ResolvePaths(homeDir string) (cfgPath string, workspacePath string, err error) {
-	cfgPath = filepath.Join(homeDir, "config.json")
-	workspacePath = filepath.Join(homeDir, "workspace")
-	return cfgPath, workspacePath, nil
-}
-
-// ResolveDefaultPaths returns absolute paths using ~/.gino as the home directory.
-func ResolveDefaultPaths() (cfgPath string, workspacePath string, err error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", "", err
+// Onboard writes the default config and initializes the workspace described
+// by paths. All configured base directories are created.
+func Onboard(paths Paths) (cfgPath, workspacePath string, err error) {
+	if err := paths.Ensure(); err != nil {
+		return "", "", fmt.Errorf("creating base directories: %w", err)
 	}
-	return ResolvePaths(filepath.Join(home, ".gino"))
-}
-
-// Onboard writes default config and initializes the workspace at homeDir.
-func Onboard(homeDir string) (string, string, error) {
-	cfgPath, workspacePath, err := ResolvePaths(homeDir)
-	if err != nil {
-		return "", "", err
-	}
-	cfg := DefaultConfig(homeDir)
-	// set workspace path in config
-	cfg.Agents.Defaults.Workspace = workspacePath
+	cfgPath = paths.ConfigFile()
+	workspacePath = paths.Workspace()
+	cfg := DefaultConfig(workspacePath)
 	if err := SaveConfig(cfg, cfgPath); err != nil {
 		return "", "", fmt.Errorf("saving config: %w", err)
 	}

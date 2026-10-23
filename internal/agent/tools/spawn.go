@@ -37,7 +37,7 @@ type SpawnTool struct {
 	mu            sync.RWMutex
 	enabled       bool
 	binary        string
-	homeDir       string
+	paths         config.Paths
 	workspace     string
 	model         string
 	defaultTO     time.Duration
@@ -92,9 +92,9 @@ var spSessionRe = regexp.MustCompile(`[^a-zA-Z0-9_-]+`)
 // NewSpawnToolDisabled creates the spawn tool in its disabled state for
 // registration by the agent loop. It stays inert until Configure is called
 // (AgentLoop.SetSpawnConfig), so config decides whether spawning exists.
-func NewSpawnToolDisabled(homeDir, workspace string, hub *chat.Hub) *SpawnTool {
+func NewSpawnToolDisabled(paths config.Paths, workspace string, hub *chat.Hub) *SpawnTool {
 	return &SpawnTool{
-		homeDir:   homeDir,
+		paths:     paths,
 		workspace: workspace,
 		tasks:     make(map[string]*spawnTask),
 		hub:       hub,
@@ -102,15 +102,15 @@ func NewSpawnToolDisabled(homeDir, workspace string, hub *chat.Hub) *SpawnTool {
 }
 
 // NewSpawnTool creates an already-configured spawn tool (used by tests).
-func NewSpawnTool(cfg config.SpawnConfig, homeDir, workspace string, hub *chat.Hub) *SpawnTool {
-	return NewSpawnToolWithFlags(cfg, homeDir, workspace, hub, CLIFlags{})
+func NewSpawnTool(cfg config.SpawnConfig, paths config.Paths, workspace string, hub *chat.Hub) *SpawnTool {
+	return NewSpawnToolWithFlags(cfg, paths, workspace, hub, CLIFlags{})
 }
 
 // NewSpawnToolWithFlags creates a configured spawn tool with CLI flag
 // overrides applied (-M, -system-prompt, -disable-tools inheritance).
 // Provider presets are supplied separately via SetProviderPresets.
-func NewSpawnToolWithFlags(cfg config.SpawnConfig, homeDir, workspace string, hub *chat.Hub, cliCfg CLIFlags) *SpawnTool {
-	t := NewSpawnToolDisabled(homeDir, workspace, hub)
+func NewSpawnToolWithFlags(cfg config.SpawnConfig, paths config.Paths, workspace string, hub *chat.Hub, cliCfg CLIFlags) *SpawnTool {
+	t := NewSpawnToolDisabled(paths, workspace, hub)
 	t.SetCLIFlags(cliCfg)
 	t.Configure(cfg, cfg.Model)
 	return t
@@ -514,7 +514,7 @@ func (t *SpawnTool) buildChildInvocation(agentName string, profile *config.Spawn
 		if sp := firstNonEmpty(cliCfg.SystemPrompt); sp != "" {
 			argv = append(argv, "-system-prompt", sp)
 		}
-		return argv, nil
+		return append(argv, t.pathArgs()...), nil
 	}
 
 	// Named profile path.
@@ -532,6 +532,7 @@ func (t *SpawnTool) buildChildInvocation(agentName string, profile *config.Spawn
 	if sp := firstNonEmpty(profile.SystemPromptOverride, cliCfg.SystemPrompt); sp != "" {
 		argv = append(argv, "-system-prompt", sp)
 	}
+	argv = append(argv, t.pathArgs()...)
 
 	// Provider resolution: a named preset injects endpoint + key + model via
 	// env vars (env overrides config in the loader), keeping the child's
@@ -561,6 +562,30 @@ func (t *SpawnTool) buildChildInvocation(agentName string, profile *config.Spawn
 		}
 	}
 	return argv, env
+}
+
+// pathArgs returns the path flags a child process needs to resolve the same
+// config, data, and state as the parent. A zero Paths means the child should
+// use its own defaults.
+func (t *SpawnTool) pathArgs() []string {
+	p := t.paths
+	if p.ConfigDir == "" && p.DataDir == "" && p.StateDir == "" {
+		return nil
+	}
+	if p.IsUnified() && p.ConfigDir != "" {
+		return []string{"-home", p.ConfigDir}
+	}
+	var args []string
+	if p.ConfigDir != "" {
+		args = append(args, "-config-dir", p.ConfigDir)
+	}
+	if p.DataDir != "" {
+		args = append(args, "-data-dir", p.DataDir)
+	}
+	if p.StateDir != "" {
+		args = append(args, "-state-dir", p.StateDir)
+	}
+	return args
 }
 
 // firstNonEmpty returns the first non-empty argument.

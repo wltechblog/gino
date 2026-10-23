@@ -1,6 +1,21 @@
 # Configuration Reference
 
-Gino is configured via `~/.gino/config.json`. Run `gino onboard` to generate the default config.
+Gino is configured via `$XDG_CONFIG_HOME/gino/config.json`
+(`~/.config/gino/config.json`). Run `gino onboard` to generate the default
+config and directories.
+
+## File locations
+
+| Purpose | Default | Override |
+|---------|---------|----------|
+| Config (`config.json`, `tokens.json`) | `~/.config/gino` | `-config-dir`, `GINO_CONFIG_DIR`, `XDG_CONFIG_HOME` |
+| Data (`workspace/`, `brain.db`, `projects.json`) | `~/.local/share/gino` | `-data-dir`, `GINO_DATA_DIR`, `XDG_DATA_HOME` |
+| State (`cron_jobs.json`, `background_jobs.json`, `signal_routes.json`) | `~/.local/state/gino` | `-state-dir`, `GINO_STATE_DIR`, `XDG_STATE_HOME` |
+
+`-home DIR` and `GINO_HOME` are shorthand for setting all three to one
+directory (the layout used by the Docker image and the systemd installer).
+If `~/.gino` exists and no XDG config has been created, gino keeps using that
+legacy home so existing installs survive the upgrade.
 
 ## Full Default Config
 
@@ -8,7 +23,7 @@ Gino is configured via `~/.gino/config.json`. Run `gino onboard` to generate the
 {
   "agents": {
     "defaults": {
-      "workspace": "~/.gino/workspace",
+      "workspace": "~/.local/share/gino/workspace",
       "model": "stub-model",
       "maxTokens": 8192,
       "temperature": 0.7,
@@ -64,7 +79,7 @@ Agent behavior settings.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `workspace` | string | `~/.gino/workspace` | Path to the agent's workspace directory. Contains bootstrap files, memory, and skills. |
+| `workspace` | string | `~/.local/share/gino/workspace` | Path to the agent's workspace directory. Contains bootstrap files, memory, and skills. |
 | `model` | string | `stub-model` | Default LLM model to use. Set to a real model like `google/gemini-2.5-flash`. Can be overridden with the `-M` flag. |
 | `reasoningEffort` | string | *(none)* | Reasoning effort sent as `reasoning_effort`. Validated against the provider's `reasoningLevels` (provider config takes precedence). |
 | `maxTokens` | int | `8192` | Maximum tokens for LLM responses. |
@@ -131,6 +146,8 @@ LLM provider configuration. Gino uses an OpenAI-compatible API provider.
 ### providers.openai
 
 Connect to any OpenAI-compatible API service (OpenAI, OpenRouter, z.ai, Ollama, etc.).
+
+`gino provider add <host>` configures this block: it discovers the port and API base, lists the models advertised at `/models`, asks only when there are several models or the endpoint requires a key, and sends a test completion. See `gino provider add -h` for flags.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -379,7 +396,7 @@ External trigger system. When enabled, Gino listens on a Unix domain socket for 
 When multiple sessions are live (e.g. several Discord threads), signals route by this priority:
 
 1. **Explicit** — `channel`/`chat_id` fields in the signal payload itself
-2. **Per-source binding** — the session that most recently called a tool on the originating MCP server; gino stamps `channel`/`chat_id` into every tools/call request's `_meta`, and records the binding after each successful MCP tool call (persisted in `~/.gino/signal_routes.json`, survives restarts)
+2. **Per-source binding** — the session that most recently called a tool on the originating MCP server; gino stamps `channel`/`chat_id` into every tools/call request's `_meta`, and records the binding after each successful MCP tool call (persisted in `~/.local/state/gino/signal_routes.json`, survives restarts)
 3. **Last known** — the channel/chatID of the most recent non-signal message
 4. **Config defaults** — `defaultChannel`/`defaultChatID`
 

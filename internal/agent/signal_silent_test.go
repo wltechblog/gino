@@ -55,7 +55,7 @@ func (p *silentProvider) GetModelContext(ctx context.Context, model string) (int
 func newSilentTestLoop(t *testing.T, p providers.LLMProvider) (*AgentLoop, *chat.Hub) {
 	t.Helper()
 	b := chat.NewHub(16)
-	ag := NewAgentLoop(b, p, p.GetDefaultModel(), 5, "", nil, nil, nil, nil, nil, "", config.SandboxConfig{}, "", 0, 0, nil, config.WebConfig{}, config.SearchConfig{}, "")
+	ag := NewAgentLoop(b, p, p.GetDefaultModel(), 5, "", nil, nil, nil, nil, nil, config.Paths{}, config.SandboxConfig{}, "", 0, 0, nil, config.WebConfig{}, config.SearchConfig{}, "")
 	t.Cleanup(func() { ag.Close() })
 	return ag, b
 }

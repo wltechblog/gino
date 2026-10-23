@@ -63,7 +63,7 @@ func TestParentDoorbellFiresAfterTurn(t *testing.T) {
 
 	b := chat.NewHub(10)
 	p := &doorbellProvider{}
-	ag := NewAgentLoop(b, p, p.GetDefaultModel(), 5, t.TempDir(), nil, nil, nil, nil, nil, "", config.SandboxConfig{}, "", 0, 0, nil, config.WebConfig{}, config.SearchConfig{}, "")
+	ag := NewAgentLoop(b, p, p.GetDefaultModel(), 5, t.TempDir(), nil, nil, nil, nil, nil, config.Paths{}, config.SandboxConfig{}, "", 0, 0, nil, config.WebConfig{}, config.SearchConfig{}, "")
 	ag.SetParentSignalSocket(sock)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -94,7 +94,7 @@ func TestParentDoorbellFiresAfterTurn(t *testing.T) {
 func TestNoDoorbellWhenUnarmed(t *testing.T) {
 	b := chat.NewHub(10)
 	p := &doorbellProvider{}
-	ag := NewAgentLoop(b, p, p.GetDefaultModel(), 5, t.TempDir(), nil, nil, nil, nil, nil, "", config.SandboxConfig{}, "", 0, 0, nil, config.WebConfig{}, config.SearchConfig{}, "")
+	ag := NewAgentLoop(b, p, p.GetDefaultModel(), 5, t.TempDir(), nil, nil, nil, nil, nil, config.Paths{}, config.SandboxConfig{}, "", 0, 0, nil, config.WebConfig{}, config.SearchConfig{}, "")
 	if ag.parentSignalSocket != "" {
 		t.Fatal("parentSignalSocket should default empty")
 	}

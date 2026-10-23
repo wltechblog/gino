@@ -1,7 +1,7 @@
 {
   "agents": {
     "defaults": {
-      "workspace": "~/.gino/workspace",
+      "workspace": "~/.local/share/gino/workspace",
       "model": "glm-5.2",
       "reasoningEffort": "",
       "maxTokens": 16384,

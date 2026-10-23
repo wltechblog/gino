@@ -13,7 +13,8 @@ func TestHandleCommandReasoningOverride(t *testing.T) {
 	p := providers.NewOpenAIProvider("k", "http://example.invalid", 1, 0)
 	p.SetReasoningEffort("low")
 	var buf bytes.Buffer
-	s := New(config.Config{}, p, t.TempDir(), t.TempDir())
+	dir := t.TempDir()
+	s := New(config.Config{}, p, config.Paths{ConfigDir: dir, DataDir: dir, StateDir: dir}, dir)
 	s.out = &buf
 
 	if !s.handleCommand("/reasoning high") {

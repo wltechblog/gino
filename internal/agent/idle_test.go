@@ -14,7 +14,7 @@ func newIdleLoop(t *testing.T) *AgentLoop {
 	t.Helper()
 	b := chat.NewHub(10)
 	p := providers.NewStubProvider()
-	return NewAgentLoop(b, p, p.GetDefaultModel(), 5, t.TempDir(), nil, nil, nil, nil, nil, "", config.SandboxConfig{}, "", 0, 0, nil, config.WebConfig{}, config.SearchConfig{}, "")
+	return NewAgentLoop(b, p, p.GetDefaultModel(), 5, t.TempDir(), nil, nil, nil, nil, nil, config.Paths{}, config.SandboxConfig{}, "", 0, 0, nil, config.WebConfig{}, config.SearchConfig{}, "")
 }
 
 func TestIdleFreshLoopIsIdle(t *testing.T) {

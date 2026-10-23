@@ -49,7 +49,7 @@ go build -o gino ./cmd/gino
 ### Run locally
 
 ```sh
-# First time? Run onboard to create ~/.gino config and workspace
+# First time? Run onboard to create the XDG config, data, and state dirs
 ./gino onboard
 
 # Try a quick query

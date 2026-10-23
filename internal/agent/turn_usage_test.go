@@ -56,7 +56,7 @@ func TestTurnUsageIncludesModelAndDurations(t *testing.T) {
 
 	b := chat.NewHub(64)
 	p := &analyticsProvider{}
-	ag := NewAgentLoop(b, p, p.GetDefaultModel(), 50, t.TempDir(), nil, nil, nil, nil, nil, "", config.SandboxConfig{}, "", 0, 0, nil, config.WebConfig{}, config.SearchConfig{}, "")
+	ag := NewAgentLoop(b, p, p.GetDefaultModel(), 50, t.TempDir(), nil, nil, nil, nil, nil, config.Paths{}, config.SandboxConfig{}, "", 0, 0, nil, config.WebConfig{}, config.SearchConfig{}, "")
 	ag.SetAnalytics(true)
 	ag.SetSessionAutoTitle(false)
 	defer ag.Close()

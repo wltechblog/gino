@@ -20,7 +20,7 @@ import (
 func TestIdleSignalReplyDisplaysWithoutPrompt(t *testing.T) {
 	ws := t.TempDir()
 	buf := &syncBuffer{}
-	s := New(config.Config{}, providers.NewStubProvider(), ws, ws)
+	s := New(config.Config{}, providers.NewStubProvider(), config.Paths{ConfigDir: ws, DataDir: ws, StateDir: ws}, ws)
 	s.out = buf
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -82,7 +82,7 @@ func TestSignalReplyDuringTurnDoesNotEndWait(t *testing.T) {
 	// instead use a slow provider for the main turn and inject a signal
 	// while it is thinking.
 	p := newSlowEchoProvider(600 * time.Millisecond)
-	s := New(config.Config{}, p, ws, ws)
+	s := New(config.Config{}, p, config.Paths{ConfigDir: ws, DataDir: ws, StateDir: ws}, ws)
 	s.out = buf
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

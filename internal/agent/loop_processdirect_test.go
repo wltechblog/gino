@@ -46,7 +46,7 @@ func (p *writeMemoryCallingProvider) GetModelContext(ctx context.Context, model 
 func TestProcessDirectExecutesToolCall(t *testing.T) {
 	b := chat.NewHub(10)
 	prov := &writeMemoryCallingProvider{}
-	ag := NewAgentLoop(b, prov, prov.GetDefaultModel(), 5, "", nil, nil, nil, nil, nil, "", config.SandboxConfig{}, "", 0, 0, nil, config.WebConfig{}, config.SearchConfig{}, "")
+	ag := NewAgentLoop(b, prov, prov.GetDefaultModel(), 5, "", nil, nil, nil, nil, nil, config.Paths{}, config.SandboxConfig{}, "", 0, 0, nil, config.WebConfig{}, config.SearchConfig{}, "")
 
 	resp, err := ag.ProcessDirect("please remember Test note", 2*time.Second)
 	if err != nil {
@@ -98,7 +98,7 @@ func (p *toolLoopProvider) GetModelContext(ctx context.Context, model string) (i
 func TestProcessDirectMaxIterationsNotice(t *testing.T) {
 	b := chat.NewHub(10)
 	prov := &toolLoopProvider{}
-	ag := NewAgentLoop(b, prov, prov.GetDefaultModel(), 3, "", nil, nil, nil, nil, nil, "", config.SandboxConfig{}, "", 0, 0, nil, config.WebConfig{}, config.SearchConfig{}, "")
+	ag := NewAgentLoop(b, prov, prov.GetDefaultModel(), 3, "", nil, nil, nil, nil, nil, config.Paths{}, config.SandboxConfig{}, "", 0, 0, nil, config.WebConfig{}, config.SearchConfig{}, "")
 	ag.SetAutoContinue(false)
 
 	resp, err := ag.ProcessDirect("keep working", 10*time.Second)

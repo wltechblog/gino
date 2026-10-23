@@ -9,7 +9,6 @@ import (
 	"log"
 	"os"
 	"os/signal"
-	"os/user"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -30,61 +29,34 @@ import (
 
 const version = "0.4.0"
 
-// userHomeDir resolves the user's home directory with a fallback chain:
-// $HOME first, then the user database. Under systemd system services $HOME
-// is typically unset; user.Current still resolves via /etc/passwd (pure Go,
-// no cgo needed), so root-run gateways keep working.
-func userHomeDir() (string, error) {
-	if h := os.Getenv("HOME"); h != "" {
-		return h, nil
-	}
-	if u, err := user.Current(); err == nil && u.HomeDir != "" {
-		return u.HomeDir, nil
-	}
-	return "", fmt.Errorf("cannot determine home directory ($HOME unset and user lookup failed) — pass -home <dir>")
-}
-
-// resolveHomeDir resolves the gino home directory, always returning an
-// absolute path. Falls back hard (exit 1) when no home can be determined,
-// with an actionable message instead of a confusing downstream failure.
-func resolveHomeDir(homeFlag string) string {
-	resolve := func() (string, error) {
-		if homeFlag == "" {
-			userHome, err := userHomeDir()
-			if err != nil {
-				return "", err
-			}
-			return filepath.Join(userHome, ".gino"), nil
-		}
-		if strings.HasPrefix(homeFlag, "~/") {
-			userHome, err := userHomeDir()
-			if err != nil {
-				return "", err
-			}
-			return filepath.Join(userHome, homeFlag[2:]), nil
-		}
-		return homeFlag, nil
-	}
-	dir, err := resolve()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "gino: %v\n", err)
-		os.Exit(1)
-	}
-	if abs, absErr := filepath.Abs(dir); absErr == nil {
-		return abs
-	}
-	return dir
-}
-
-func expandWorkspace(ws, homeDir string) string {
+func expandWorkspace(ws string, paths config.Paths) string {
 	if ws == "" {
-		return filepath.Join(homeDir, "workspace")
+		return paths.Workspace()
 	}
 	if strings.HasPrefix(ws, "~/") {
-		userHome, _ := os.UserHomeDir()
-		return filepath.Join(userHome, ws[2:])
+		userHome, err := config.UserHomeDir()
+		if err == nil {
+			return filepath.Join(userHome, ws[2:])
+		}
 	}
 	return ws
+}
+
+// ensureWorkspaceDir creates the workspace directory when it is missing.
+// Onboard normally creates it, but a deleted or never-initialized workspace
+// must not break agent, chat, or gateway startup.
+func ensureWorkspaceDir(dir string) error {
+	return os.MkdirAll(dir, 0o755)
+}
+
+// requireConfiguredProvider stops commands before they spend a network round
+// trip on the onboarding placeholder key. A nil provider block is allowed: it
+// selects the stub provider used by tests and benchmarks.
+func requireConfiguredProvider(cfg config.Config, paths config.Paths) error {
+	if !cfg.ProviderNeedsSetup() {
+		return nil
+	}
+	return fmt.Errorf("no LLM provider configured yet — set providers.openai.apiKey in %s, or export GINO_API_KEY", paths.ConfigFile())
 }
 
 func usage() {
@@ -94,8 +66,9 @@ func usage() {
 	fmt.Fprintf(os.Stderr, "Commands:\n")
 	fmt.Fprintf(os.Stderr, "  version          Print version\n")
 	fmt.Fprintf(os.Stderr, "  onboard          Create default config and workspace\n")
-	fmt.Fprintf(os.Stderr, "  doctor           Post-install health check\n")
+	fmt.Fprintf(os.Stderr, "  doctor           Post-install health check (-fix repairs)\n")
 	fmt.Fprintf(os.Stderr, "  channels login   Interactively connect a channel\n")
+	fmt.Fprintf(os.Stderr, "  provider add     Configure an OpenAI-compatible provider\n")
 	fmt.Fprintf(os.Stderr, "  agent            Run a single-shot agent query\n")
 	fmt.Fprintf(os.Stderr, "  chat             Start interactive TUI chat session\n")
 	fmt.Fprintf(os.Stderr, "  gateway          Start long-running gateway\n")
@@ -106,7 +79,46 @@ func usage() {
 	fmt.Fprintf(os.Stderr, "  memory recent    Show recent days' notes\n")
 	fmt.Fprintf(os.Stderr, "  memory rank      Rank memories by relevance\n\n")
 	fmt.Fprintf(os.Stderr, "Global flags:\n")
-	fmt.Fprintf(os.Stderr, "  -home string     gino home directory (default: ~/.gino)\n")
+	fmt.Fprintf(os.Stderr, "  -config-dir dir  config directory (default: $XDG_CONFIG_HOME/gino)\n")
+	fmt.Fprintf(os.Stderr, "  -data-dir dir    data directory (default: $XDG_DATA_HOME/gino)\n")
+	fmt.Fprintf(os.Stderr, "  -state-dir dir   state directory (default: $XDG_STATE_HOME/gino)\n")
+	fmt.Fprintf(os.Stderr, "  -home dir        legacy single-root layout: sets all three above\n")
+}
+
+// parseGlobalFlags extracts the path flags from args so that subcommand
+// specific flags (e.g. agent -m) are not consumed by a global parser.
+func parseGlobalFlags(args []string) (config.PathOverrides, []string) {
+	var overrides config.PathOverrides
+	targets := []struct {
+		name string
+		dst  *string
+	}{
+		{"-home", &overrides.Home},
+		{"-config-dir", &overrides.ConfigDir},
+		{"-data-dir", &overrides.DataDir},
+		{"-state-dir", &overrides.StateDir},
+	}
+	var rest []string
+	for i := 0; i < len(args); i++ {
+		matched := false
+		for _, t := range targets {
+			if args[i] == t.name && i+1 < len(args) {
+				*t.dst = args[i+1]
+				i++
+				matched = true
+				break
+			}
+			if strings.HasPrefix(args[i], t.name+"=") {
+				*t.dst = strings.TrimPrefix(args[i], t.name+"=")
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			rest = append(rest, args[i])
+		}
+	}
+	return overrides, rest
 }
 
 func main() {
@@ -116,34 +128,25 @@ func main() {
 	}
 
 	command := os.Args[1]
-	// Extract -home from args manually so that subcommand-specific flags
-	// (e.g. agent -m) are not consumed by the global flag parser.
-	args := os.Args[2:]
-	homeVal := ""
-	var rest []string
-	for i := 0; i < len(args); i++ {
-		if args[i] == "-home" && i+1 < len(args) {
-			homeVal = args[i+1]
-			i++ // skip value
-			continue
-		}
-		if strings.HasPrefix(args[i], "-home=") {
-			homeVal = strings.TrimPrefix(args[i], "-home=")
-			continue
-		}
-		rest = append(rest, args[i])
+	overrides, rest := parseGlobalFlags(os.Args[2:])
+
+	if command == "version" {
+		fmt.Printf("🤖 gino v%s\n", version)
+		return
 	}
-	homeFlag := homeVal
+
+	paths, err := config.ResolvePaths(overrides)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "gino: %v\n", err)
+		os.Exit(1)
+	}
 
 	switch command {
-	case "version":
-		fmt.Printf("🤖 gino v%s\n", version)
-
 	case "onboard":
-		runOnboard(homeFlag)
+		runOnboard(paths)
 
 	case "doctor":
-		runDoctor(homeFlag)
+		runDoctor(paths, rest)
 
 	case "channels":
 		if len(rest) == 0 {
@@ -152,20 +155,33 @@ func main() {
 		}
 		switch rest[0] {
 		case "login":
-			runChannelsLogin(homeFlag)
+			runChannelsLogin(paths)
 		default:
 			fmt.Fprintf(os.Stderr, "unknown channels subcommand: %s\n", rest[0])
 			os.Exit(2)
 		}
 
+	case "provider":
+		if len(rest) == 0 {
+			fmt.Fprintln(os.Stderr, "Usage: gino provider add [flags]")
+			os.Exit(2)
+		}
+		switch rest[0] {
+		case "add":
+			runProviderAdd(paths, rest[1:])
+		default:
+			fmt.Fprintf(os.Stderr, "unknown provider subcommand: %s\n", rest[0])
+			os.Exit(2)
+		}
+
 	case "agent":
-		runAgent(homeFlag, rest)
+		runAgent(paths, rest)
 
 	case "chat":
-		runChat(homeFlag, rest)
+		runChat(paths, rest)
 
 	case "gateway":
-		runGateway(homeFlag, rest)
+		runGateway(paths, rest)
 
 	case "signal":
 		if len(rest) == 0 {
@@ -187,15 +203,15 @@ func main() {
 		}
 		switch rest[0] {
 		case "read":
-			runMemoryRead(homeFlag, rest[1:])
+			runMemoryRead(paths, rest[1:])
 		case "append":
-			runMemoryAppend(homeFlag, rest[1:])
+			runMemoryAppend(paths, rest[1:])
 		case "write":
-			runMemoryWrite(homeFlag, rest[1:])
+			runMemoryWrite(paths, rest[1:])
 		case "recent":
-			runMemoryRecent(homeFlag, rest[1:])
+			runMemoryRecent(paths, rest[1:])
 		case "rank":
-			runMemoryRank(homeFlag, rest[1:])
+			runMemoryRank(paths, rest[1:])
 		default:
 			fmt.Fprintf(os.Stderr, "unknown memory subcommand: %s\n", rest[0])
 			os.Exit(2)
@@ -210,19 +226,19 @@ func main() {
 
 // ─── onboard ────────────────────────────────────────────────────────────────
 
-func runOnboard(homeFlag string) {
-	homeDir := resolveHomeDir(homeFlag)
-	cfgPath, workspacePath, err := config.Onboard(homeDir)
+func runOnboard(paths config.Paths) {
+	cfgPath, workspacePath, err := config.Onboard(paths)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "onboard failed: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Printf("Wrote config to %s\nInitialized workspace at %s\n", cfgPath, workspacePath)
+	fmt.Printf("Wrote config to %s\nInitialized workspace at %s\nState directory: %s\n", cfgPath, workspacePath, paths.StateDir)
+	fmt.Printf("\nNext: set providers.openai.apiKey in %s, or export GINO_API_KEY.\n", cfgPath)
 }
 
 // ─── channels login ─────────────────────────────────────────────────────────
 
-func runChannelsLogin(homeFlag string) {
+func runChannelsLogin(paths config.Paths) {
 	reader := bufio.NewReader(os.Stdin)
 
 	fmt.Println("Which channel would you like to connect?")
@@ -235,17 +251,12 @@ func runChannelsLogin(homeFlag string) {
 	choice, _ := reader.ReadString('\n')
 	choice = strings.TrimSpace(strings.ToLower(choice))
 
-	homeDir := resolveHomeDir(homeFlag)
-	cfg, err := config.LoadConfig(homeDir)
+	cfg, err := config.LoadConfig(paths)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to load config: %v\n", err)
 		os.Exit(1)
 	}
-	cfgPath, _, err := config.ResolvePaths(homeDir)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to resolve config path: %v\n", err)
-		os.Exit(1)
-	}
+	cfgPath := paths.ConfigFile()
 
 	switch choice {
 	case "1", "telegram":
@@ -260,7 +271,7 @@ func runChannelsLogin(homeFlag string) {
 
 // ─── agent ──────────────────────────────────────────────────────────────────
 
-func runAgent(homeFlag string, args []string) {
+func runAgent(paths config.Paths, args []string) {
 	fs := flag.NewFlagSet("agent", flag.ExitOnError)
 	msg := fs.String("m", "", "Message to send to the agent")
 	modelFlag := fs.String("M", "", "Model to use (overrides config/provider default)")
@@ -276,9 +287,12 @@ func runAgent(homeFlag string, args []string) {
 		os.Exit(2)
 	}
 
-	homeDir := resolveHomeDir(homeFlag)
 	hub := chat.NewHub(100)
-	cfg, _ := config.LoadConfig(homeDir)
+	cfg, _ := config.LoadConfig(paths)
+	if err := requireConfiguredProvider(cfg, paths); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
 	configureLogging(cfg)
 	provider := providers.NewProviderFromConfig(cfg)
 
@@ -306,13 +320,21 @@ func runAgent(homeFlag string, args []string) {
 	if maxIter <= 0 {
 		maxIter = 100
 	}
-	profileWS := expandWorkspace(cfg.Agents.Defaults.Workspace, homeDir)
+	profileWS := expandWorkspace(cfg.Agents.Defaults.Workspace, paths)
 	projectWS, err := agent.ResolveProjectWorkspace(*projectFlag, profileWS)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 
+	if err := paths.Ensure(); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to create base directories: %v\n", err)
+		os.Exit(1)
+	}
+	if err := ensureWorkspaceDir(projectWS); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to create project workspace %q: %v\n", projectWS, err)
+		os.Exit(1)
+	}
 	if err := os.Chdir(projectWS); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to chdir to project %q: %v\n", projectWS, err)
 		os.Exit(1)
@@ -329,7 +351,7 @@ func runAgent(homeFlag string, args []string) {
 		}
 	}
 
-	ag := agent.NewAgentLoopWithProfileWorkspace(hub, provider, model, maxIter, projectWS, profileWS, nil, cfg.MCPServers, cfg.Agents.Defaults.AllowedDirs, disableSet, cfg.Brain, homeDir, cfg.Agents.Defaults.Sandbox, "", cfg.Agents.Defaults.MaxTurnMessages, cfg.Agents.Defaults.MaxToolResultChars, cfg.Agents.Defaults.Compaction, cfg.Agents.Defaults.Web, cfg.Agents.Defaults.Search, cfg.Agents.Defaults.VisionModel)
+	ag := agent.NewAgentLoopWithProfileWorkspace(hub, provider, model, maxIter, projectWS, profileWS, nil, cfg.MCPServers, cfg.Agents.Defaults.AllowedDirs, disableSet, cfg.Brain, paths, cfg.Agents.Defaults.Sandbox, "", cfg.Agents.Defaults.MaxTurnMessages, cfg.Agents.Defaults.MaxToolResultChars, cfg.Agents.Defaults.Compaction, cfg.Agents.Defaults.Web, cfg.Agents.Defaults.Search, cfg.Agents.Defaults.VisionModel)
 	defer ag.Close()
 	ag.SetSpawnCLIFlags(tools.CLIFlags{Model: *modelFlag, SystemPrompt: *systemPromptOverride})
 	ag.SetSpawnConfig(cfg.Agents.Defaults.Spawn, cfg.Providers.Presets)
@@ -376,17 +398,20 @@ func runAgent(homeFlag string, args []string) {
 
 // ─── chat (TUI) ─────────────────────────────────────────────────────────────
 
-func runChat(homeFlag string, args []string) {
+func runChat(paths config.Paths, args []string) {
 	fs := flag.NewFlagSet("chat", flag.ExitOnError)
 	modelFlag := fs.String("M", "", "Model to use (overrides config/provider default)")
 	reasoningFlag := fs.String("R", "", "Reasoning effort (must be in the provider's reasoningLevels vocabulary)")
 	projectFlag := fs.String("project", "", "Project working directory while retaining the configured Gino profile")
 	_ = fs.Parse(args)
 
-	homeDir := resolveHomeDir(homeFlag)
-	cfg, err := config.LoadConfig(homeDir)
+	cfg, err := config.LoadConfig(paths)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to load config: %v\n", err)
+		os.Exit(1)
+	}
+	if err := requireConfiguredProvider(cfg, paths); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
 	configureLogging(cfg)
@@ -405,19 +430,27 @@ func runChat(homeFlag string, args []string) {
 		}
 	}
 
-	profileWS := expandWorkspace(cfg.Agents.Defaults.Workspace, homeDir)
+	profileWS := expandWorkspace(cfg.Agents.Defaults.Workspace, paths)
 	projectWS, err := agent.ResolveProjectWorkspace(*projectFlag, profileWS)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 
+	if err := paths.Ensure(); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to create base directories: %v\n", err)
+		os.Exit(1)
+	}
+	if err := ensureWorkspaceDir(projectWS); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to create project workspace %q: %v\n", projectWS, err)
+		os.Exit(1)
+	}
 	if err := os.Chdir(projectWS); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to chdir to project %q: %v\n", projectWS, err)
 		os.Exit(1)
 	}
 
-	session := tui.NewWithProject(cfg, provider, homeDir, profileWS, projectWS)
+	session := tui.NewWithProject(cfg, provider, paths, profileWS, projectWS)
 	if *modelFlag != "" {
 		session.Model = *modelFlag
 	}
@@ -430,13 +463,13 @@ func runChat(homeFlag string, args []string) {
 
 // ─── gateway ────────────────────────────────────────────────────────────────
 
-// requireGatewayConfig errors when the gateway home has no config.json.
+// requireGatewayConfig errors when there is no config.json.
 // A gateway is a long-running service: silently proceeding with defaults
 // (empty workspace, no provider key) produces confusing failures — better
 // to refuse to start with an actionable message.
-func requireGatewayConfig(homeDir string) error {
-	if _, err := os.Stat(filepath.Join(homeDir, "config.json")); err != nil {
-		return fmt.Errorf("no config.json under %s — run `gino onboard` or re-run the installer", homeDir)
+func requireGatewayConfig(paths config.Paths) error {
+	if _, err := os.Stat(paths.ConfigFile()); err != nil {
+		return fmt.Errorf("no config.json at %s — run `gino onboard` or re-run the installer", paths.ConfigFile())
 	}
 	return nil
 }
@@ -458,18 +491,20 @@ func fatalf(format string, args ...interface{}) {
 	os.Exit(1)
 }
 
-func runGateway(homeFlag string, args []string) {
+func runGateway(paths config.Paths, args []string) {
 	fs := flag.NewFlagSet("gateway", flag.ExitOnError)
 	modelFlag := fs.String("M", "", "Model to use (overrides config/provider default)")
 	_ = fs.Parse(args)
 
-	homeDir := resolveHomeDir(homeFlag)
-	if err := requireGatewayConfig(homeDir); err != nil {
+	if err := requireGatewayConfig(paths); err != nil {
 		fmt.Fprintf(os.Stderr, "gino gateway: %v\n", err)
 		os.Exit(1)
 	}
 	hub := chat.NewHub(200)
-	cfg, _ := config.LoadConfig(homeDir)
+	cfg, _ := config.LoadConfig(paths)
+	if err := requireConfiguredProvider(cfg, paths); err != nil {
+		fatalf("%v", err)
+	}
 	configureLogging(cfg)
 	errExitCode := 0 // non-zero only on the exit-on-turn-error path (75)
 	provider := providers.NewProviderFromConfig(cfg)
@@ -512,7 +547,7 @@ func runGateway(homeFlag string, args []string) {
 		}
 
 	})
-	if err := scheduler.SetPersistencePath(filepath.Join(homeDir, "cron_jobs.json")); err != nil {
+	if err := scheduler.SetPersistencePath(paths.CronJobsFile()); err != nil {
 		log.Printf("cron: failed to set persistence path: %v", err)
 	}
 
@@ -520,7 +555,15 @@ func runGateway(homeFlag string, args []string) {
 	if maxIter <= 0 {
 		maxIter = 100
 	}
-	ws := expandWorkspace(cfg.Agents.Defaults.Workspace, homeDir)
+	ws := expandWorkspace(cfg.Agents.Defaults.Workspace, paths)
+	if err := paths.Ensure(); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to create base directories: %v\n", err)
+		os.Exit(1)
+	}
+	if err := ensureWorkspaceDir(ws); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to create workspace %q: %v\n", ws, err)
+		os.Exit(1)
+	}
 	if err := os.Chdir(ws); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to chdir to workspace %q: %v\n", ws, err)
 		os.Exit(1)
@@ -528,7 +571,7 @@ func runGateway(homeFlag string, args []string) {
 	// Compute signal socket path for MCP env injection
 	signalSocketPath := ""
 	if cfg.Signal.Enabled {
-		signalSocketPath = cfg.Signal.GetSocketPath(homeDir, ws)
+		signalSocketPath = cfg.Signal.GetSocketPath(ws)
 	}
 
 	// ─── Signal listener (early bind) ───────────────────────────────────
@@ -543,13 +586,13 @@ func runGateway(homeFlag string, args []string) {
 	if signalSocketPath != "" {
 		sigRegistry = picosignal.NewRegistry(cfg.Signal.Actions)
 		sigListener = picosignal.NewListener(signalSocketPath, hub, sigRegistry, cfg.Signal.DefaultChannel, cfg.Signal.DefaultChatID)
-		sigListener.SetPersistencePath(filepath.Join(homeDir, "signal_routes.json"))
+		sigListener.SetPersistencePath(paths.SignalRoutesFile())
 		if err := sigListener.Bind(); err != nil {
 			fatalf("signal listener: %v", err)
 		}
 	}
 
-	ag := agent.NewAgentLoop(hub, provider, model, maxIter, ws, scheduler, cfg.MCPServers, cfg.Agents.Defaults.AllowedDirs, cfg.Agents.Defaults.DisableTools, cfg.Brain, homeDir, cfg.Agents.Defaults.Sandbox, signalSocketPath, cfg.Agents.Defaults.MaxTurnMessages, cfg.Agents.Defaults.MaxToolResultChars, cfg.Agents.Defaults.Compaction, cfg.Agents.Defaults.Web, cfg.Agents.Defaults.Search, cfg.Agents.Defaults.VisionModel)
+	ag := agent.NewAgentLoop(hub, provider, model, maxIter, ws, scheduler, cfg.MCPServers, cfg.Agents.Defaults.AllowedDirs, cfg.Agents.Defaults.DisableTools, cfg.Brain, paths, cfg.Agents.Defaults.Sandbox, signalSocketPath, cfg.Agents.Defaults.MaxTurnMessages, cfg.Agents.Defaults.MaxToolResultChars, cfg.Agents.Defaults.Compaction, cfg.Agents.Defaults.Web, cfg.Agents.Defaults.Search, cfg.Agents.Defaults.VisionModel)
 	defer ag.Close()
 
 	// Spawn tool (subagent tasks) — enabled via config; children run with
@@ -562,7 +605,7 @@ func runGateway(homeFlag string, args []string) {
 
 	// Persist background jobs (pollers survive restarts; interrupted one-shots
 	// are reported unless marked rerunOnRestart).
-	ag.SetBackgroundPersistencePath(filepath.Join(homeDir, "background_jobs.json"))
+	ag.SetBackgroundPersistencePath(paths.BackgroundJobsFile())
 
 	if cfg.Agents.Defaults.EnableToolActivityIndicator != nil {
 		ag.SetToolActivityIndicator(*cfg.Agents.Defaults.EnableToolActivityIndicator)
@@ -773,15 +816,14 @@ func runSignalSend(args []string) {
 
 // ─── memory read ────────────────────────────────────────────────────────────
 
-func runMemoryRead(homeFlag string, args []string) {
+func runMemoryRead(paths config.Paths, args []string) {
 	if len(args) < 1 {
 		fmt.Fprintln(os.Stderr, "Usage: gino memory read <today|long>")
 		os.Exit(2)
 	}
 	target := args[0]
-	homeDir := resolveHomeDir(homeFlag)
-	cfg, _ := config.LoadConfig(homeDir)
-	ws := expandWorkspace(cfg.Agents.Defaults.Workspace, homeDir)
+	cfg, _ := config.LoadConfig(paths)
+	ws := expandWorkspace(cfg.Agents.Defaults.Workspace, paths)
 	mem := memory.NewMemoryStoreWithWorkspace(ws, 100)
 
 	switch target {
@@ -799,7 +841,7 @@ func runMemoryRead(homeFlag string, args []string) {
 
 // ─── memory append ──────────────────────────────────────────────────────────
 
-func runMemoryAppend(homeFlag string, args []string) {
+func runMemoryAppend(paths config.Paths, args []string) {
 	if len(args) < 1 {
 		fmt.Fprintln(os.Stderr, "Usage: gino memory append <today|long> -c <content>")
 		os.Exit(2)
@@ -815,9 +857,8 @@ func runMemoryAppend(homeFlag string, args []string) {
 		os.Exit(2)
 	}
 
-	homeDir := resolveHomeDir(homeFlag)
-	cfg, _ := config.LoadConfig(homeDir)
-	ws := expandWorkspace(cfg.Agents.Defaults.Workspace, homeDir)
+	cfg, _ := config.LoadConfig(paths)
+	ws := expandWorkspace(cfg.Agents.Defaults.Workspace, paths)
 	mem := memory.NewMemoryStoreWithWorkspace(ws, 100)
 
 	switch target {
@@ -846,7 +887,7 @@ func runMemoryAppend(homeFlag string, args []string) {
 
 // ─── memory write ───────────────────────────────────────────────────────────
 
-func runMemoryWrite(homeFlag string, args []string) {
+func runMemoryWrite(paths config.Paths, args []string) {
 	if len(args) < 1 || args[0] != "long" {
 		fmt.Fprintln(os.Stderr, "Usage: gino memory write long -c <content>")
 		os.Exit(2)
@@ -861,9 +902,8 @@ func runMemoryWrite(homeFlag string, args []string) {
 		os.Exit(2)
 	}
 
-	homeDir := resolveHomeDir(homeFlag)
-	cfg, _ := config.LoadConfig(homeDir)
-	ws := expandWorkspace(cfg.Agents.Defaults.Workspace, homeDir)
+	cfg, _ := config.LoadConfig(paths)
+	ws := expandWorkspace(cfg.Agents.Defaults.Workspace, paths)
 	mem := memory.NewMemoryStoreWithWorkspace(ws, 100)
 
 	if err := mem.WriteLongTerm(*content); err != nil {
@@ -875,14 +915,13 @@ func runMemoryWrite(homeFlag string, args []string) {
 
 // ─── memory recent ──────────────────────────────────────────────────────────
 
-func runMemoryRecent(homeFlag string, args []string) {
+func runMemoryRecent(paths config.Paths, args []string) {
 	fs := flag.NewFlagSet("memory recent", flag.ExitOnError)
 	days := fs.Int("d", 1, "Number of days to include")
 	_ = fs.Parse(args)
 
-	homeDir := resolveHomeDir(homeFlag)
-	cfg, _ := config.LoadConfig(homeDir)
-	ws := expandWorkspace(cfg.Agents.Defaults.Workspace, homeDir)
+	cfg, _ := config.LoadConfig(paths)
+	ws := expandWorkspace(cfg.Agents.Defaults.Workspace, paths)
 	mem := memory.NewMemoryStoreWithWorkspace(ws, 100)
 
 	out, _ := mem.GetRecentMemories(*days)
@@ -891,7 +930,7 @@ func runMemoryRecent(homeFlag string, args []string) {
 
 // ─── memory rank ────────────────────────────────────────────────────────────
 
-func runMemoryRank(homeFlag string, args []string) {
+func runMemoryRank(paths config.Paths, args []string) {
 	fs := flag.NewFlagSet("memory rank", flag.ExitOnError)
 	q := fs.String("q", "", "Query to rank memories against")
 	top := fs.Int("k", 5, "Number of top memories to show")
@@ -903,9 +942,8 @@ func runMemoryRank(homeFlag string, args []string) {
 		os.Exit(2)
 	}
 
-	homeDir := resolveHomeDir(homeFlag)
-	cfg, _ := config.LoadConfig(homeDir)
-	ws := expandWorkspace(cfg.Agents.Defaults.Workspace, homeDir)
+	cfg, _ := config.LoadConfig(paths)
+	ws := expandWorkspace(cfg.Agents.Defaults.Workspace, paths)
 	mem := memory.NewMemoryStoreWithWorkspace(ws, 100)
 
 	items := make([]memory.MemoryItem, 0)

@@ -60,7 +60,7 @@ func newNSFixture(t *testing.T) *nsFixture {
 	p := &lateNSProvider{chatCalled: make(chan struct{})}
 	ag := NewAgentLoopWithProfileWorkspace(
 		b, p, p.GetDefaultModel(), 5, projWS, profWS,
-		nil, nil, nil, nil, nil, profWS, config.SandboxConfig{}, "",
+		nil, nil, nil, nil, nil, config.Paths{ConfigDir: profWS, DataDir: profWS, StateDir: profWS}, config.SandboxConfig{}, "",
 		0, 0, nil, config.WebConfig{}, config.SearchConfig{}, "",
 	)
 	return &nsFixture{ag: ag, hub: b, p: p}
@@ -86,7 +86,7 @@ func TestNamespacedKey(t *testing.T) {
 	p2 := &lateNSProvider{chatCalled: make(chan struct{})}
 	ag2 := NewAgentLoopWithProfileWorkspace(
 		b2, p2, p2.GetDefaultModel(), 5, profWS2, profWS2,
-		nil, nil, nil, nil, nil, profWS2, config.SandboxConfig{}, "",
+		nil, nil, nil, nil, nil, config.Paths{ConfigDir: profWS2, DataDir: profWS2, StateDir: profWS2}, config.SandboxConfig{}, "",
 		0, 0, nil, config.WebConfig{}, config.SearchConfig{}, "",
 	)
 	defer ag2.Close()

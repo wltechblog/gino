@@ -28,7 +28,7 @@ func newTitleTestLoop(t *testing.T) (*AgentLoop, *titleProvider, *chat.Hub) {
 	t.Helper()
 	b := chat.NewHub(10)
 	p := &titleProvider{}
-	ag := NewAgentLoop(b, p, p.GetDefaultModel(), 5, t.TempDir(), nil, nil, nil, nil, nil, "", config.SandboxConfig{}, "", 0, 0, nil, config.WebConfig{}, config.SearchConfig{}, "")
+	ag := NewAgentLoop(b, p, p.GetDefaultModel(), 5, t.TempDir(), nil, nil, nil, nil, nil, config.Paths{}, config.SandboxConfig{}, "", 0, 0, nil, config.WebConfig{}, config.SearchConfig{}, "")
 	t.Cleanup(func() { ag.Close() })
 	return ag, p, b
 }

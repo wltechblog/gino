@@ -65,13 +65,14 @@ The slim image skips the Ollama download entirely. Set `OLLAMA_URL` in your `.en
 git clone https://github.com/wltechblog/gino.git
 cd gino
 make build
-./gino onboard          # creates ~/.gino with config + workspace
+make install-user       # installs to ~/.local/bin (no sudo; must be on PATH)
+gino onboard            # creates the XDG config, data, and state dirs
 ```
 
-Edit `~/.gino/config.json` with your API key and channel tokens, then:
+Edit `~/.config/gino/config.json` with your API key and channel tokens, then:
 
 ```sh
-./gino gateway
+gino gateway
 ```
 
 ### Cross-Compile
@@ -102,7 +103,7 @@ Gino includes a SQLite-backed knowledge system that gives your agent real memory
 
 ### Enabling the Brain
 
-Add to `~/.gino/config.json`:
+Add to `~/.config/gino/config.json`:
 
 ```json
 {
@@ -166,7 +167,7 @@ Gino can be triggered by external systems via a Unix domain socket. Signals are 
 
 ```sh
 # Send a signal from any script
-echo '{"action":"motion_detected"}' | socat - UNIX-CONNECT:~/.gino/signal.sock
+echo '{"action":"motion_detected"}' | socat - UNIX-CONNECT:~/.local/share/gino/workspace/.gino/signals.sock
 ```
 
 MCP servers can self-declare actions at startup via the protocol handshake — no manual registration needed.
@@ -248,15 +249,15 @@ All jobs persist across restarts. Cron jobs recompute their next fire time on re
 
 ## Skills
 
-Skills are reusable knowledge modules stored in `~/.gino/workspace/skills/`. Each skill is a markdown file with instructions, examples, and procedures. The agent loads them automatically and uses them when relevant.
+Skills are reusable knowledge modules stored in `~/.local/share/gino/workspace/skills/`. Each skill is a markdown file with instructions, examples, and procedures. The agent loads them automatically and uses them when relevant.
 
 Create a skill:
 
 ```sh
 # Gino can create skills for you — just ask!
 # Or create manually:
-mkdir -p ~/.gino/workspace/skills/deploy
-cat > ~/.gino/workspace/skills/deploy/SKILL.md << 'EOF'
+mkdir -p ~/.local/share/gino/workspace/skills/deploy
+cat > ~/.local/share/gino/workspace/skills/deploy/SKILL.md << 'EOF'
 # Deploy Skill
 
 ## Deploy to Production
@@ -292,7 +293,20 @@ The agent automatically extracts important facts from conversations and saves th
 
 ## Configuration
 
-All config lives in `~/.gino/config.json`:
+Gino follows the XDG Base Directory spec:
+
+| Purpose | Default | Environment |
+|---------|---------|-------------|
+| Config (`config.json`, OAuth tokens) | `~/.config/gino` | `XDG_CONFIG_HOME` |
+| Data (workspace, brain DB, projects) | `~/.local/share/gino` | `XDG_DATA_HOME` |
+| State (cron, background jobs, signal routes) | `~/.local/state/gino` | `XDG_STATE_HOME` |
+
+`-home DIR` (or `GINO_HOME`) pins the legacy single-root layout where all
+three live together. Existing `~/.gino` installs keep working automatically.
+
+Prefer a wizard? `gino provider add <host>` discovers the OpenAI-compatible endpoint, picks a model, and writes the provider block for you.
+
+The config file is `~/.config/gino/config.json`:
 
 ```json
 {
@@ -327,7 +341,7 @@ All config lives in `~/.gino/config.json`:
 }
 ```
 
-Run `./gino onboard` to generate a starter config interactively.
+Run `gino onboard` to generate a starter config interactively.
 
 ### Channel Monitoring (Discord)
 
@@ -359,7 +373,10 @@ All config values can be overridden via environment variables (useful for Docker
 | `GINO_MAX_TOOL_ITERATIONS` | Max tool call loops per message |
 | `GINO_BRAIN_ENABLED` | Enable the knowledge brain |
 | `GINO_BRAIN_EMBEDDING_MODEL` | Ollama embedding model name |
-| `GINO_HOME` | Home directory path |
+| `GINO_CONFIG_DIR` | Config directory (default: `$XDG_CONFIG_HOME/gino`) |
+| `GINO_DATA_DIR` | Data directory (default: `$XDG_DATA_HOME/gino`) |
+| `GINO_STATE_DIR` | State directory (default: `$XDG_STATE_HOME/gino`) |
+| `GINO_HOME` | Legacy single-root path: sets all three dirs |
 | `GINO_SIGNAL_SOCKET` | Signal socket path |
 | `GINO_WEB_TIMEOUT_S` | Web tool timeout (default: 30) |
 | `GINO_WEB_MAX_RESPONSE_BYTES` | Web tool response size limit (default: 1MB) |

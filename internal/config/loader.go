@@ -3,14 +3,14 @@ package config
 import (
 	"encoding/json"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 )
 
-// LoadConfig loads config from <homeDir>/config.json if present, then applies any environment variable overrides on top.
-func LoadConfig(homeDir string) (Config, error) {
-	path := filepath.Join(homeDir, "config.json")
+// LoadConfig loads config.json from the config directory if present, then
+// applies any environment variable overrides on top.
+func LoadConfig(paths Paths) (Config, error) {
+	path := paths.ConfigFile()
 	var cfg Config
 	f, err := os.Open(path)
 	if err == nil {

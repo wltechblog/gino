@@ -123,7 +123,7 @@ func TestSignalDeferredBehindActiveTurn(t *testing.T) {
 		signalStarted: make(chan struct{}),
 	}
 
-	ag := NewAgentLoop(b, p, p.GetDefaultModel(), 5, "", nil, nil, nil, nil, nil, "", config.SandboxConfig{}, "", 0, 0, nil, config.WebConfig{}, config.SearchConfig{}, "")
+	ag := NewAgentLoop(b, p, p.GetDefaultModel(), 5, "", nil, nil, nil, nil, nil, config.Paths{}, config.SandboxConfig{}, "", 0, 0, nil, config.WebConfig{}, config.SearchConfig{}, "")
 	defer ag.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -234,7 +234,7 @@ func TestSignalRunsWhenNoActiveTurn(t *testing.T) {
 		signalStarted: make(chan struct{}),
 	}
 
-	ag := NewAgentLoop(b, p, p.GetDefaultModel(), 5, "", nil, nil, nil, nil, nil, "", config.SandboxConfig{}, "", 0, 0, nil, config.WebConfig{}, config.SearchConfig{}, "")
+	ag := NewAgentLoop(b, p, p.GetDefaultModel(), 5, "", nil, nil, nil, nil, nil, config.Paths{}, config.SandboxConfig{}, "", 0, 0, nil, config.WebConfig{}, config.SearchConfig{}, "")
 	defer ag.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())

@@ -38,7 +38,7 @@ func TestProfileProjectWorkspaceSeparation(t *testing.T) {
 
 	b := chat.NewHub(10)
 	p := providers.NewStubProvider()
-	ag := NewAgentLoopWithProfileWorkspace(b, p, p.GetDefaultModel(), 3, project, profile, nil, nil, nil, nil, nil, "", config.SandboxConfig{}, "", 0, 0, nil, config.WebConfig{}, config.SearchConfig{}, "")
+	ag := NewAgentLoopWithProfileWorkspace(b, p, p.GetDefaultModel(), 3, project, profile, nil, nil, nil, nil, nil, config.Paths{}, config.SandboxConfig{}, "", 0, 0, nil, config.WebConfig{}, config.SearchConfig{}, "")
 	defer ag.Close()
 
 	sys := ag.context.BuildMessages(nil, "hello", "cli", "1", "", "", nil, nil)[0].Content
@@ -114,7 +114,7 @@ func TestNewAgentLoopKeepsSingleWorkspace(t *testing.T) {
 
 	b := chat.NewHub(10)
 	p := providers.NewStubProvider()
-	ag := NewAgentLoop(b, p, p.GetDefaultModel(), 3, ws, nil, nil, nil, nil, nil, "", config.SandboxConfig{}, "", 0, 0, nil, config.WebConfig{}, config.SearchConfig{}, "")
+	ag := NewAgentLoop(b, p, p.GetDefaultModel(), 3, ws, nil, nil, nil, nil, nil, config.Paths{}, config.SandboxConfig{}, "", 0, 0, nil, config.WebConfig{}, config.SearchConfig{}, "")
 	defer ag.Close()
 
 	sys := ag.context.BuildMessages(nil, "hello", "cli", "1", "", "", nil, nil)[0].Content

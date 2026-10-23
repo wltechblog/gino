@@ -1,11 +1,26 @@
 VERSION ?= $(shell grep 'const version' cmd/gino/main.go | awk -F'"' '{print $$2}')
 LDFLAGS := -ldflags="-s -w"
+PREFIX ?= /usr/local
+BINDIR ?= $(PREFIX)/bin
 
-.PHONY: build clean build-all build-telegram build-discord build-slack build-lite
+.PHONY: build clean build-all build-telegram build-discord build-slack build-lite install install-user uninstall
 
 # Default: full build for current platform
 build:
 	CGO_ENABLED=0 go build -v $(LDFLAGS) -o gino ./cmd/gino
+
+# Install the built binary to $(BINDIR). Override PREFIX for a custom prefix,
+# or DESTDIR for packaging.
+install: build
+	install -d "$(DESTDIR)$(BINDIR)"
+	install -m 0755 gino "$(DESTDIR)$(BINDIR)/gino"
+
+# User-local install without root: ~/.local/bin.
+install-user:
+	$(MAKE) install PREFIX="$(HOME)/.local"
+
+uninstall:
+	rm -f "$(DESTDIR)$(BINDIR)/gino"
 
 # Single-channel builds (smaller binaries)
 build-telegram:

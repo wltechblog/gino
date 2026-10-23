@@ -79,3 +79,45 @@ func TestDefaultConfig_ChannelsDisabled(t *testing.T) {
 		t.Error("Discord should be disabled in the default config")
 	}
 }
+
+func TestWorkspaceComplete(t *testing.T) {
+	d := t.TempDir()
+	if WorkspaceComplete(d) {
+		t.Fatal("empty dir must not be complete")
+	}
+	if err := InitializeWorkspace(d); err != nil {
+		t.Fatal(err)
+	}
+	if !WorkspaceComplete(d) {
+		t.Fatal("initialized workspace must be complete")
+	}
+	if err := os.RemoveAll(filepath.Join(d, "skills")); err != nil {
+		t.Fatal(err)
+	}
+	if WorkspaceComplete(d) {
+		t.Fatal("workspace without skills must not be complete")
+	}
+}
+
+func TestProviderNeedsSetup(t *testing.T) {
+	cfg := DefaultConfig("/ws")
+	if !cfg.ProviderNeedsSetup() {
+		t.Fatal("default config must be flagged as needing provider setup")
+	}
+
+	cfg.Providers.OpenAI.APIKey = "sk-real"
+	if cfg.ProviderNeedsSetup() {
+		t.Fatal("real key must not need setup")
+	}
+
+	cfg.Providers.OpenAI.APIKey = PlaceholderAPIKey
+	cfg.Providers.Fallbacks = []FallbackConfig{{APIKey: "k", APIBase: "https://example.invalid/v1", Model: "m"}}
+	if cfg.ProviderNeedsSetup() {
+		t.Fatal("a configured fallback should take over from the placeholder")
+	}
+
+	cfg.Providers.OpenAI = nil
+	if cfg.ProviderNeedsSetup() {
+		t.Fatal("nil provider selects stub mode, not setup")
+	}
+}

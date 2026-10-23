@@ -76,11 +76,18 @@ your keyboard.
 
 - `/usr/local/bin/gino` — the binary
 - `/opt/gino` — cloned source (build directory)
-- `/root/.gino/config.json` — generated config (existing configs are backed
-  up, and overwrite requires confirmation)
+- `/root/.config/gino/config.json` — generated config (existing configs are
+  backed up, and overwrite requires confirmation)
+- `/root/.local/share/gino/` — workspace, brain database, project registry
+- `/root/.local/state/gino/` — cron jobs, background jobs, signal routes
+
+If `/root/.gino` already exists from an older install and no XDG config does,
+the installer keeps using that single-root tree instead of migrating silently.
 - `gino-ollama` container + systemd unit — brain (advanced mode only)
-- `gino doctor` — post-install health check (binary, config, provider
-  reachability, brain tier, gateway service state)
+- `gino doctor [-fix]` — post-install health check (binary, config, provider
+  reachability, brain tier, gateway service state). `-fix` creates missing
+  directories and workspace files; a corrupt config is backed up before
+  defaults are written.
 - `gino-gateway` systemd unit — Telegram gateway mode only (refreshed on
   re-runs when present)
 
@@ -93,7 +100,8 @@ GINO_INSTALL_TEST=1 bash install/install.sh
 ```
 
 with `GINO_INSTALL_{REPO_DIR,GINO_HOME,BIN_DIR,OLLAMA_DATA,UNIT_DIR}`
-environment overrides redirecting every write path. In test mode the script
+environment overrides redirecting every write path. `GINO_INSTALL_GINO_HOME`
+pins the legacy single-root layout instead of the XDG one. In test mode the script
 skips apt/container/systemd setup entirely — it exercises the prompts and config
 generation against a scratch directory.
 

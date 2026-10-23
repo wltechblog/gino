@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -106,7 +107,7 @@ func checkSystem(checks *[]doctorCheck) {
 // expandTilde expands a leading ~/ the same way the agent does.
 func expandTilde(p string) string {
 	if strings.HasPrefix(p, "~/") {
-		home, err := userHomeDir()
+		home, err := config.UserHomeDir()
 		if err != nil {
 			return p
 		}
@@ -115,29 +116,50 @@ func expandTilde(p string) string {
 	return p
 }
 
-// checkWorkspace verifies home dir, config, workspace, skills, git identity.
-func checkWorkspace(checks *[]doctorCheck, homeDir string, cfg config.Config) {
+// checkWorkspace verifies the runtime paths, config, workspace, skills, and
+// git identity.
+func checkWorkspace(checks *[]doctorCheck, paths config.Paths, cfg config.Config) {
 	add := func(name, status, detail string) {
 		*checks = append(*checks, doctorCheck{name, status, detail})
 	}
 
-	if _, err := os.Stat(filepath.Join(homeDir, "config.json")); err == nil {
-		add("config", statusOK, homeDir)
+	if _, err := os.Stat(paths.ConfigFile()); err == nil {
+		add("config", statusOK, paths.ConfigFile())
 	} else {
-		add("config", statusFail, fmt.Sprintf("no config.json under %s — run `gino onboard`", homeDir))
+		add("config", statusFail, fmt.Sprintf("no config.json at %s — run `gino onboard`", paths.ConfigFile()))
+	}
+
+	layout := "xdg"
+	if paths.IsUnified() {
+		layout = "unified home"
+	}
+	add("paths", statusOK, fmt.Sprintf("%s (config %s, data %s, state %s)", layout, paths.ConfigDir, paths.DataDir, paths.StateDir))
+	for _, dir := range []struct{ name, path string }{
+		{"data dir", paths.DataDir},
+		{"state dir", paths.StateDir},
+	} {
+		if !statIsDir(dir.path) {
+			add(dir.name, statusWarn, fmt.Sprintf("%s does not exist yet", dir.path))
+		}
 	}
 
 	ws := cfg.Agents.Defaults.Workspace
+	wsPath := ws
 	switch {
 	case ws == "":
-		add("workspace", statusSkip, "not set (defaults to profile workspace)")
+		wsPath = paths.Workspace()
+		if statIsDir(wsPath) {
+			add("workspace", statusOK, wsPath)
+		} else {
+			add("workspace", statusWarn, fmt.Sprintf("%s does not exist yet (created on first run)", wsPath))
+		}
 	case statIsDir(expandTilde(ws)):
 		add("workspace", statusOK, ws)
 	default:
 		add("workspace", statusFail, fmt.Sprintf("%s does not exist or is not a directory", ws))
 	}
 
-	if _, err := os.Stat(filepath.Join(homeDir, "skills")); err == nil {
+	if _, err := os.Stat(filepath.Join(expandTilde(wsPath), "skills")); err == nil {
 		add("skills", statusOK, "skills directory present")
 	} else {
 		add("skills", statusSkip, "no skills directory yet (optional)")
@@ -169,6 +191,10 @@ func checkProvider(checks *[]doctorCheck, cfg config.Config) {
 		add("provider", statusFail, "no providers.openai block — the agent has no LLM to talk to")
 		return
 	}
+	if cfg.ProviderNeedsSetup() {
+		add("provider", statusFail, "placeholder API key from onboarding — set providers.openai.apiKey or GINO_API_KEY")
+		return
+	}
 
 	base := strings.TrimRight(oc.APIBase, "/")
 	if base == "" {
@@ -192,9 +218,13 @@ func checkProvider(checks *[]doctorCheck, cfg config.Config) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	keyLabel := redactedKey(key)
+	if key == "" {
+		keyLabel = "no key"
+	}
 	switch resp.StatusCode {
 	case 200:
-		add("provider", statusOK, fmt.Sprintf("%s reachable (key %s)", base, redactedKey(key)))
+		add("provider", statusOK, fmt.Sprintf("%s reachable (key %s)", base, keyLabel))
 	case 401, 403:
 		add("provider", statusFail, fmt.Sprintf("%s rejected credentials (HTTP %d) — check apiKey", base, resp.StatusCode))
 	case 404:
@@ -326,20 +356,113 @@ func checkLogging(checks *[]doctorCheck, cfg config.Config) {
 	}
 }
 
+// doctorFix is one repair attempted by `gino doctor -fix`.
+type doctorFix struct {
+	name   string
+	detail string
+	ok     bool
+}
+
+// applyDoctorFixes repairs the problems doctor can safely fix on its own:
+// missing base directories, a missing or unparseable config, and an
+// incomplete workspace. It never overwrites user files; a corrupt config is
+// moved aside before defaults are written.
+func applyDoctorFixes(paths config.Paths) []doctorFix {
+	var fixes []doctorFix
+	add := func(name, detail string, ok bool) {
+		fixes = append(fixes, doctorFix{name: name, detail: detail, ok: ok})
+	}
+
+	for _, dir := range []struct{ name, path string }{
+		{"config dir", paths.ConfigDir},
+		{"data dir", paths.DataDir},
+		{"state dir", paths.StateDir},
+	} {
+		if statIsDir(dir.path) {
+			continue
+		}
+		if err := os.MkdirAll(dir.path, 0o755); err != nil {
+			add(dir.name, fmt.Sprintf("cannot create %s: %v", dir.path, err), false)
+		} else {
+			add(dir.name, "created "+dir.path, true)
+		}
+	}
+
+	cfg, loadErr := config.LoadConfig(paths)
+	configFile := paths.ConfigFile()
+	switch _, statErr := os.Stat(configFile); {
+	case os.IsNotExist(statErr):
+		if _, _, err := config.Onboard(paths); err != nil {
+			add("config", "cannot create default config: "+err.Error(), false)
+		} else {
+			add("config", "created "+configFile+" (set your API key before use)", true)
+		}
+		cfg, _ = config.LoadConfig(paths)
+	case statErr != nil:
+		add("config", fmt.Sprintf("cannot inspect %s: %v", configFile, statErr), false)
+	case loadErr != nil:
+		backup := fmt.Sprintf("%s.corrupt.%d", configFile, time.Now().Unix())
+		if err := os.Rename(configFile, backup); err != nil {
+			add("config", fmt.Sprintf("cannot back up corrupt config: %v", err), false)
+		} else if _, _, err := config.Onboard(paths); err != nil {
+			add("config", "backed up corrupt config to "+backup+" but onboarding failed: "+err.Error(), false)
+		} else {
+			add("config", "backed up corrupt config to "+backup+" and wrote defaults", true)
+			cfg, _ = config.LoadConfig(paths)
+		}
+	}
+
+	ws := expandWorkspace(cfg.Agents.Defaults.Workspace, paths)
+	if !config.WorkspaceComplete(ws) {
+		if err := config.InitializeWorkspace(ws); err != nil {
+			add("workspace", fmt.Sprintf("cannot initialize %s: %v", ws, err), false)
+		} else {
+			add("workspace", "initialized "+ws, true)
+		}
+	}
+
+	return fixes
+}
+
 // runDoctor is the `gino doctor` subcommand: post-install health check that
 // verifies everything a working Gino needs, without spending tokens.
-func runDoctor(homeFlag string) {
-	homeDir := resolveHomeDir(homeFlag)
-	cfg, cfgErr := config.LoadConfig(homeDir)
+func runDoctor(paths config.Paths, args []string) {
+	fs := flag.NewFlagSet("doctor", flag.ExitOnError)
+	fix := fs.Bool("fix", false, "repair fixable problems, then re-check")
+	_ = fs.Parse(args)
 
-	fmt.Printf("🩺 gino doctor — checking %s\n\n", homeDir)
+	fmt.Printf("🩺 gino doctor — checking %s\n\n", paths.ConfigDir)
+
+	if *fix {
+		fixes := applyDoctorFixes(paths)
+		fmt.Println("🔧 fixes")
+		if len(fixes) == 0 {
+			fmt.Println("  nothing to fix")
+		}
+		w := 0
+		for _, f := range fixes {
+			if len(f.name) > w {
+				w = len(f.name)
+			}
+		}
+		for _, f := range fixes {
+			icon := statusIcon(statusOK)
+			if !f.ok {
+				icon = statusIcon(statusFail)
+			}
+			fmt.Printf("  %s %-*s  %s\n", icon, w, f.name, f.detail)
+		}
+		fmt.Println()
+	}
+
+	cfg, cfgErr := config.LoadConfig(paths)
 
 	var checks []doctorCheck
 	checkSystem(&checks)
 	if cfgErr != nil {
 		checks = append(checks, doctorCheck{"config", statusFail, fmt.Sprintf("config.json parse error: %v — fix it, or delete and re-run `gino onboard`", cfgErr)})
 	} else {
-		checkWorkspace(&checks, homeDir, cfg)
+		checkWorkspace(&checks, paths, cfg)
 		checkProvider(&checks, cfg)
 		checkReasoning(&checks, cfg)
 		checkVision(&checks, cfg)

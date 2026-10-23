@@ -48,7 +48,7 @@ func (p *hallucinatingProvider) GetModelContext(_ context.Context, _ string) (in
 func TestToolNotFoundCircuitBreaker(t *testing.T) {
 	b := chat.NewHub(64)
 	p := &hallucinatingProvider{}
-	ag := NewAgentLoop(b, p, p.GetDefaultModel(), 50, t.TempDir(), nil, nil, nil, nil, nil, "", config.SandboxConfig{}, "", 0, 0, nil, config.WebConfig{}, config.SearchConfig{}, "")
+	ag := NewAgentLoop(b, p, p.GetDefaultModel(), 50, t.TempDir(), nil, nil, nil, nil, nil, config.Paths{}, config.SandboxConfig{}, "", 0, 0, nil, config.WebConfig{}, config.SearchConfig{}, "")
 	defer ag.Close()
 
 	done := make(chan string, 1)

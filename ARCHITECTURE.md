@@ -48,6 +48,7 @@ internal/
   config/
     schema.go               — Config structs (JSON)
     loader.go               — LoadConfig + env overrides
+    paths.go                — XDG/config/data/state path resolution
     onboard.go              — Default config, workspace init, bootstrap files
   cron/
     scheduler.go            — In-memory cron (1s ticker, fire callback)
@@ -69,7 +70,7 @@ embeds/
 ## Core Flow
 
 ### 1. Gateway Startup (cmd/gino/main.go gatewayCmd)
-1. Load config from ~/.gino/config.json + env overrides
+1. Load config from $XDG_CONFIG_HOME/gino/config.json + env overrides
 2. Create chat.Hub (buffered inbound/outbound channels)
 3. Create cron.Scheduler with fire callback → Hub.In
 4. Create AgentLoop (registers all tools, MCP clients, brain)

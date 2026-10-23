@@ -42,7 +42,7 @@ func TestSetSignalRegistrySweepsConnectedClients(t *testing.T) {
 	mcpCfg := map[string]config.MCPServerConfig{
 		"fake": {Command: "sh", Args: []string{script}},
 	}
-	ag := NewAgentLoop(b, prov, prov.GetDefaultModel(), 5, t.TempDir(), nil, mcpCfg, nil, nil, nil, "", config.SandboxConfig{}, "", 0, 0, nil, config.WebConfig{}, config.SearchConfig{}, "")
+	ag := NewAgentLoop(b, prov, prov.GetDefaultModel(), 5, t.TempDir(), nil, mcpCfg, nil, nil, nil, config.Paths{}, config.SandboxConfig{}, "", 0, 0, nil, config.WebConfig{}, config.SearchConfig{}, "")
 	defer ag.Close()
 
 	reg := signal.NewRegistry(nil)

@@ -91,7 +91,7 @@ func (p *finishAfterProvider) GetModelContext(ctx context.Context, model string)
 }
 
 func newPauseTestAgent(b *chat.Hub, prov providers.LLMProvider, maxIter int) *AgentLoop {
-	ag := NewAgentLoop(b, prov, prov.GetDefaultModel(), maxIter, "", nil, nil, nil, nil, nil, "", config.SandboxConfig{}, "", 0, 0, nil, config.WebConfig{}, config.SearchConfig{}, "")
+	ag := NewAgentLoop(b, prov, prov.GetDefaultModel(), maxIter, "", nil, nil, nil, nil, nil, config.Paths{}, config.SandboxConfig{}, "", 0, 0, nil, config.WebConfig{}, config.SearchConfig{}, "")
 	ag.SetSessionAutoTitle(false) // auto-titler would add extra provider calls and race counts
 	return ag
 }

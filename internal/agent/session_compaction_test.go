@@ -33,7 +33,7 @@ func (p *summaryProvider) GetModelContext(ctx context.Context, m string) (int, e
 func newLoopForCompaction(t *testing.T, prov providers.LLMProvider) *AgentLoop {
 	t.Helper()
 	b := chat.NewHub(10)
-	ag := NewAgentLoop(b, prov, "test", 5, "", nil, nil, nil, nil, nil, "", config.SandboxConfig{}, "", 0, 0, nil, config.WebConfig{}, config.SearchConfig{}, "")
+	ag := NewAgentLoop(b, prov, "test", 5, "", nil, nil, nil, nil, nil, config.Paths{}, config.SandboxConfig{}, "", 0, 0, nil, config.WebConfig{}, config.SearchConfig{}, "")
 	t.Cleanup(func() { ag.Close() })
 	return ag
 }

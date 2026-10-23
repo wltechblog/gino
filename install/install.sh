@@ -20,7 +20,8 @@
 #
 # Test hook (developers): GINO_INSTALL_TEST=1 skips package installation,
 # podman/Ollama and systemd, and lets you override paths:
-#   GINO_INSTALL_REPO_DIR / GINO_INSTALL_GINO_HOME / GINO_INSTALL_BIN_DIR
+#   GINO_INSTALL_REPO_DIR / GINO_INSTALL_GINO_HOME (legacy unified root) /
+#   GINO_INSTALL_BIN_DIR
 
 set -euo pipefail
 
@@ -29,7 +30,26 @@ TEST="${GINO_INSTALL_TEST:-0}"
 REPO_URL="${GINO_INSTALL_REPO_URL:-https://github.com/wltechblog/gino.git}"
 REPO_DIR="${GINO_INSTALL_REPO_DIR:-/opt/gino}"
 BIN_DIR="${GINO_INSTALL_BIN_DIR:-/usr/local/bin}"
-GINO_HOME="${GINO_INSTALL_GINO_HOME:-/root/.gino}"
+# XDG layout by default. Setting GINO_INSTALL_GINO_HOME pins the legacy
+# single-root layout (config, data, and state in one directory), which older
+# installs and the Docker image still use.
+if [ -n "${GINO_INSTALL_GINO_HOME:-}" ]; then
+    GINO_CONFIG_DIR="$GINO_INSTALL_GINO_HOME"
+    GINO_DATA_DIR="$GINO_INSTALL_GINO_HOME"
+    GINO_STATE_DIR="$GINO_INSTALL_GINO_HOME"
+elif [ "$TEST" != "1" ] &&
+     [ -z "${XDG_CONFIG_HOME:-}" ] && [ -z "${XDG_DATA_HOME:-}" ] && [ -z "${XDG_STATE_HOME:-}" ] &&
+     [ -d /root/.gino ] && [ ! -f /root/.config/gino/config.json ]; then
+    # Pre-XDG install: keep using its single-root tree so a re-run never
+    # abandons an existing config, workspace, or memory.
+    GINO_CONFIG_DIR="/root/.gino"
+    GINO_DATA_DIR="/root/.gino"
+    GINO_STATE_DIR="/root/.gino"
+else
+    GINO_CONFIG_DIR="${XDG_CONFIG_HOME:-/root/.config}/gino"
+    GINO_DATA_DIR="${XDG_DATA_HOME:-/root/.local/share}/gino"
+    GINO_STATE_DIR="${XDG_STATE_HOME:-/root/.local/state}/gino"
+fi
 UNIT_DIR="${GINO_INSTALL_UNIT_DIR:-/etc/systemd/system}"
 OLLAMA_NAME="gino-ollama"
 OLLAMA_DATA="${GINO_INSTALL_OLLAMA_DATA:-/opt/gino-ollama}"
@@ -480,8 +500,8 @@ if [ "$TEST" != "1" ]; then
 fi
 
 # ── 7. config.json ──────────────────────────────────────────────────────────
-mkdir -p "$GINO_HOME/workspace"
-CONFIG="${GINO_HOME}/config.json"
+mkdir -p "$GINO_CONFIG_DIR" "$GINO_DATA_DIR/workspace" "$GINO_STATE_DIR"
+CONFIG="${GINO_CONFIG_DIR}/config.json"
 
 if [ -f "$CONFIG" ]; then
     printf '\n' >&3
@@ -574,7 +594,7 @@ EOF
 {
     "agents": {
         "defaults": {
-            "workspace": "${GINO_HOME}/workspace",
+            "workspace": "${GINO_DATA_DIR}/workspace",
             "model": "${MODEL}",
             "maxTokens": 16384,
             "temperature": 0.7,
@@ -645,13 +665,11 @@ if [ -f "${UNIT_DIR}/gino-gateway.service" ] || { [ "$TEST" != "1" ] && [ "$TG_E
     if [ "$OLLAMA_MODE" = "installed" ] || [ "$OLLAMA_MODE" = "existing" ]; then
         GATEWAY_OLLAMA_DEPS=" gino-ollama.service"
     fi
-    # systemd services run with $HOME unset; pin it (plus -home on the
-    # ExecStart) so the gateway never resolves a relative home dir.
-    HOME_PARENT="${GINO_HOME%/*}"
-    UNIT_HOME_ENV=""
-    if [ -n "$HOME_PARENT" ] && [ "$HOME_PARENT" != "$GINO_HOME" ]; then
-        UNIT_HOME_ENV="Environment=HOME=${HOME_PARENT}
-"
+    # systemd services run with $HOME unset; pin it (plus explicit path flags
+    # on the ExecStart) so the gateway never resolves relative paths.
+    SERVICE_HOME="/root"
+    if [ -n "${GINO_INSTALL_GINO_HOME:-}" ]; then
+        SERVICE_HOME="$(dirname "$GINO_INSTALL_GINO_HOME")"
     fi
     cat > "${UNIT_DIR}/gino-gateway.service" <<EOF
 [Unit]
@@ -661,8 +679,9 @@ Wants=network-online.target${GATEWAY_OLLAMA_DEPS}
 
 [Service]
 Type=simple
-${UNIT_HOME_ENV}ExecStart=${BIN_DIR}/gino gateway -home ${GINO_HOME}
-WorkingDirectory=${GINO_HOME}
+Environment=HOME=${SERVICE_HOME}
+ExecStart=${BIN_DIR}/gino gateway -config-dir ${GINO_CONFIG_DIR} -data-dir ${GINO_DATA_DIR} -state-dir ${GINO_STATE_DIR}
+WorkingDirectory=${GINO_DATA_DIR}
 Restart=on-failure
 RestartSec=5
 
@@ -694,6 +713,8 @@ printf '\033[1m── Install complete ─────────────�
     fi
     printf '  repo       : %s\n' "$REPO_DIR"
     printf '  config     : %s (%s)\n' "$CONFIG" "${CONFIG_ACTION:-new}"
+    printf '  data       : %s\n' "$GINO_DATA_DIR"
+    printf '  state      : %s\n' "$GINO_STATE_DIR"
     printf '  sandbox    : yolo (string commands on)\n'
     if [ "$BRAIN_ADVANCED" = "true" ]; then
         printf '  brain      : advanced (%s @ %s)\n' "$EMBED_MODEL" "$OLLAMA_URL"

@@ -655,18 +655,18 @@ type SignalTargetRecorder interface {
 	BindSource(source, channel, chatID string)
 }
 
-func NewAgentLoop(b *chat.Hub, provider providers.LLMProvider, model string, maxIterations int, workspace string, scheduler *cron.Scheduler, mcpServers map[string]config.MCPServerConfig, allowedDirs []string, disableTools []string, brainCfg *config.BrainConfig, homeDir string, sandbox config.SandboxConfig, signalSocketPath string, maxTurnMessages int, maxToolResultChars int, compactionCfg *config.CompactionConfig, webCfg config.WebConfig, searchCfg config.SearchConfig, visionModel string) *AgentLoop {
+func NewAgentLoop(b *chat.Hub, provider providers.LLMProvider, model string, maxIterations int, workspace string, scheduler *cron.Scheduler, mcpServers map[string]config.MCPServerConfig, allowedDirs []string, disableTools []string, brainCfg *config.BrainConfig, paths config.Paths, sandbox config.SandboxConfig, signalSocketPath string, maxTurnMessages int, maxToolResultChars int, compactionCfg *config.CompactionConfig, webCfg config.WebConfig, searchCfg config.SearchConfig, visionModel string) *AgentLoop {
 	return NewAgentLoopWithProfileWorkspace(
 		b, provider, model, maxIterations,
 		workspace, workspace,
 		scheduler, mcpServers, allowedDirs, disableTools,
-		brainCfg, homeDir, sandbox, signalSocketPath,
+		brainCfg, paths, sandbox, signalSocketPath,
 		maxTurnMessages, maxToolResultChars, compactionCfg,
 		webCfg, searchCfg, visionModel,
 	)
 }
 
-func NewAgentLoopWithProfileWorkspace(b *chat.Hub, provider providers.LLMProvider, model string, maxIterations int, workspace, profileWorkspace string, scheduler *cron.Scheduler, mcpServers map[string]config.MCPServerConfig, allowedDirs []string, disableTools []string, brainCfg *config.BrainConfig, homeDir string, sandbox config.SandboxConfig, signalSocketPath string, maxTurnMessages int, maxToolResultChars int, compactionCfg *config.CompactionConfig, webCfg config.WebConfig, searchCfg config.SearchConfig, visionModel string) *AgentLoop {
+func NewAgentLoopWithProfileWorkspace(b *chat.Hub, provider providers.LLMProvider, model string, maxIterations int, workspace, profileWorkspace string, scheduler *cron.Scheduler, mcpServers map[string]config.MCPServerConfig, allowedDirs []string, disableTools []string, brainCfg *config.BrainConfig, paths config.Paths, sandbox config.SandboxConfig, signalSocketPath string, maxTurnMessages int, maxToolResultChars int, compactionCfg *config.CompactionConfig, webCfg config.WebConfig, searchCfg config.SearchConfig, visionModel string) *AgentLoop {
 	if model == "" {
 		model = provider.GetDefaultModel()
 	}
@@ -728,7 +728,7 @@ func NewAgentLoopWithProfileWorkspace(b *chat.Hub, provider providers.LLMProvide
 		register(tools.NewWebSearchTool())
 		log.Println("Web search: using DuckDuckGo (no API key required)")
 	}
-	spTool := tools.NewSpawnToolDisabled(homeDir, workspace, b)
+	spTool := tools.NewSpawnToolDisabled(paths, workspace, b)
 	register(spTool)
 
 	// Register vision tool if a vision model is configured
@@ -785,7 +785,7 @@ func NewAgentLoopWithProfileWorkspace(b *chat.Hub, provider providers.LLMProvide
 
 	// Connect to configured MCP servers and register their tools.
 	var mcpClients []*mcp.Client
-	tokenStore := mcp.NewTokenStore(homeDir)
+	tokenStore := mcp.NewTokenStore(paths.ConfigDir)
 	for name, cfg := range mcpServers {
 		var client *mcp.Client
 		var err error
@@ -836,7 +836,7 @@ func NewAgentLoopWithProfileWorkspace(b *chat.Hub, provider providers.LLMProvide
 	// Initialize knowledge brain (optional)
 	var brainInst *brain.Brain
 	if brainCfg != nil && brainCfg.Enabled {
-		brainInst = initBrain(homeDir, profileWorkspace, brainCfg, provider)
+		brainInst = initBrain(paths, profileWorkspace, brainCfg, provider)
 	}
 	if brainInst != nil {
 		register(tools.NewBrainSearchTool(brainInst))
@@ -909,7 +909,7 @@ func NewAgentLoopWithProfileWorkspace(b *chat.Hub, provider providers.LLMProvide
 
 	// Load the project registry so workspaces can be switched at runtime
 	// (/project) and so the persisted active project survives restarts.
-	if reg, err := LoadProjectRegistry(homeDir); err != nil {
+	if reg, err := LoadProjectRegistry(paths.DataDir); err != nil {
 		log.Printf("projects: registry unavailable: %v", err)
 	} else {
 		al.projects = reg
@@ -3549,8 +3549,8 @@ func memorySlug(s string) string {
 	return strings.Trim(result, "-")
 }
 
-func initBrain(homeDir, workspace string, cfg *config.BrainConfig, provider providers.LLMProvider) *brain.Brain {
-	dbPath := filepath.Join(homeDir, "brain.db")
+func initBrain(paths config.Paths, workspace string, cfg *config.BrainConfig, provider providers.LLMProvider) *brain.Brain {
+	dbPath := paths.BrainDB()
 
 	var embedder brain.EmbeddingProvider
 

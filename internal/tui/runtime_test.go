@@ -43,7 +43,7 @@ func (p *blockingProvider) GetModelContext(ctx context.Context, model string) (i
 func TestStartRuntimeConsumesInboundMessages(t *testing.T) {
 	ws := t.TempDir()
 	buf := &syncBuffer{}
-	s := New(config.Config{}, providers.NewStubProvider(), ws, ws)
+	s := New(config.Config{}, providers.NewStubProvider(), config.Paths{ConfigDir: ws, DataDir: ws, StateDir: ws}, ws)
 	s.out = buf
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -72,7 +72,7 @@ func TestStartRuntimeConsumesInboundMessages(t *testing.T) {
 func TestSendMessageReceivesStubResponse(t *testing.T) {
 	ws := t.TempDir()
 	buf := &syncBuffer{}
-	s := New(config.Config{}, providers.NewStubProvider(), ws, ws)
+	s := New(config.Config{}, providers.NewStubProvider(), config.Paths{ConfigDir: ws, DataDir: ws, StateDir: ws}, ws)
 	s.out = buf
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -102,7 +102,7 @@ func TestSendMessageTimeoutCancelsActiveTurn(t *testing.T) {
 	ws := t.TempDir()
 	p := newBlockingProvider()
 	buf := &syncBuffer{}
-	s := New(config.Config{}, p, ws, ws)
+	s := New(config.Config{}, p, config.Paths{ConfigDir: ws, DataDir: ws, StateDir: ws}, ws)
 	s.out = buf
 	s.responseWait = 400 * time.Millisecond
 

@@ -121,7 +121,7 @@ func (b *Brain) IngestFile(ctx context.Context, sourceID, filePath string) (int6
 }
 
 // ImportMemories imports Gino's existing memory directory into the brain.
-// This is the "initial import" feature — scans ~/.gino/workspace/memory/
+// This is the "initial import" feature — scans the workspace memory directory
 // and creates brain pages from daily notes and MEMORY.md.
 func (b *Brain) ImportMemories(ctx context.Context, memoryDir string) (int, error) {
 	// Create a "memories" source if it doesn't exist

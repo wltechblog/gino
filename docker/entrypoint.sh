@@ -85,7 +85,7 @@ start_ollama() {
 init_config() {
     if [ ! -f "${CONFIG}" ]; then
         echo "🔧 First run — generating config..."
-        gino onboard 2>/dev/null || true
+        gino onboard -home "${GINO_HOME}" 2>/dev/null || true
     fi
 }
 
@@ -159,4 +159,6 @@ apply_env
 
 echo ""
 echo "🤖 Starting Gino: $@"
-exec gino "$@"
+# The container keeps the legacy single-root layout so the mounted volume
+# holds config, workspace, and state together.
+exec gino "$@" -home "${GINO_HOME}"

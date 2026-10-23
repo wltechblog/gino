@@ -194,11 +194,11 @@ You can also manage skills manually:
 
 ```bash
 # List skills
-ls ~/.gino/workspace/skills/
+ls ~/.local/share/gino/workspace/skills/
 
 # Create skill
-mkdir -p ~/.gino/workspace/skills/my-skill
-cat > ~/.gino/workspace/skills/my-skill/SKILL.md <<EOF
+mkdir -p ~/.local/share/gino/workspace/skills/my-skill
+cat > ~/.local/share/gino/workspace/skills/my-skill/SKILL.md <<EOF
 ---
 name: my-skill
 description: My custom skill
@@ -210,7 +210,7 @@ Content here...
 EOF
 
 # Delete skill
-rm -rf ~/.gino/workspace/skills/my-skill
+rm -rf ~/.local/share/gino/workspace/skills/my-skill
 ```
 
 ## Troubleshooting

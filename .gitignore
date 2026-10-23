@@ -43,4 +43,4 @@ Thumbs.db
 *.psd
 ollama-bin/
 !ollama-bin/.gitkeep
-gino
+/gino

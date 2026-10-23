@@ -144,7 +144,7 @@ func spawnTestConfig(binary string) config.SpawnConfig {
 // (hub may be nil) when an async task finishes and tries to deliver.
 func TestSpawnAsyncHubNilNoPanic(t *testing.T) {
 	binary := writeFakeGino(t, "echo NIL-HUB-OUTPUT\n")
-	tk := NewSpawnToolDisabled(t.TempDir(), t.TempDir(), nil)
+	tk := NewSpawnToolDisabled(unifiedTestPaths(t.TempDir()), t.TempDir(), nil)
 	tk.Configure(spawnTestConfig(binary), "")
 
 	if _, err := tk.Execute(context.Background(), map[string]interface{}{

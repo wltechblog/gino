@@ -74,7 +74,7 @@ func (p *signalBudgetProvider) GetModelContext(ctx context.Context, model string
 func newSignalBudgetLoop(t *testing.T, p providers.LLMProvider, maxIter, blocks int) (*AgentLoop, *chat.Hub) {
 	t.Helper()
 	b := chat.NewHub(16)
-	ag := NewAgentLoop(b, p, p.GetDefaultModel(), maxIter, "", nil, nil, nil, nil, nil, "", config.SandboxConfig{}, "", 0, 0, nil, config.WebConfig{}, config.SearchConfig{}, "")
+	ag := NewAgentLoop(b, p, p.GetDefaultModel(), maxIter, "", nil, nil, nil, nil, nil, config.Paths{}, config.SandboxConfig{}, "", 0, 0, nil, config.WebConfig{}, config.SearchConfig{}, "")
 	if blocks > 0 {
 		ag.SetSignalBudgetBlocks(blocks)
 	}

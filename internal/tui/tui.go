@@ -424,7 +424,7 @@ type ChatSession struct {
 	provider  providers.LLMProvider
 	cfg       config.Config
 	Model     string // exported so main.go can override with -M flag
-	homeDir   string
+	paths     config.Paths
 	profileWS string
 	ws        string
 	herdr     *herdrReporter
@@ -463,13 +463,13 @@ const defaultResponseWait = 15 * time.Minute
 
 // New creates a new TUI chat session using the configured workspace for both
 // profile state and tool execution.
-func New(cfg config.Config, provider providers.LLMProvider, homeDir, ws string) *ChatSession {
-	return NewWithProject(cfg, provider, homeDir, ws, ws)
+func New(cfg config.Config, provider providers.LLMProvider, paths config.Paths, ws string) *ChatSession {
+	return NewWithProject(cfg, provider, paths, ws, ws)
 }
 
 // NewWithProject creates a TUI session with persistent profile state separated
 // from the active project working directory.
-func NewWithProject(cfg config.Config, provider providers.LLMProvider, homeDir, profileWS, projectWS string) *ChatSession {
+func NewWithProject(cfg config.Config, provider providers.LLMProvider, paths config.Paths, profileWS, projectWS string) *ChatSession {
 	if profileWS == "" {
 		profileWS = projectWS
 	}
@@ -483,7 +483,7 @@ func NewWithProject(cfg config.Config, provider providers.LLMProvider, homeDir, 
 		cfg:       cfg,
 		provider:  provider,
 		Model:     model,
-		homeDir:   homeDir,
+		paths:     paths,
 		profileWS: profileWS,
 		ws:        projectWS,
 		herdr:     newHerdrReporter(),
@@ -617,7 +617,7 @@ func (s *ChatSession) startRuntime(ctx context.Context) {
 		nil, // scheduler — cron not active in TUI
 		s.cfg.MCPServers, s.cfg.Agents.Defaults.AllowedDirs,
 		s.cfg.Agents.Defaults.DisableTools,
-		s.cfg.Brain, s.homeDir,
+		s.cfg.Brain, s.paths,
 		s.cfg.Agents.Defaults.Sandbox,
 		"", // signal socket — not active in TUI
 		s.cfg.Agents.Defaults.MaxTurnMessages,

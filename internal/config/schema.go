@@ -81,7 +81,7 @@ type SignalActionConfig struct {
 	Silent bool `json:"silent,omitempty"`
 }
 
-func (sc SignalConfig) GetSocketPath(homeDir, workspace string) string {
+func (sc SignalConfig) GetSocketPath(workspace string) string {
 	if sc.SocketPath != "" {
 		return sc.SocketPath
 	}
@@ -459,6 +459,20 @@ type ProvidersConfig struct {
 	// ordering — only the primary/fallbacks chain does that.
 	Presets map[string]*ProviderConfig `json:"presets,omitempty"`
 }
+
+// ProviderNeedsSetup reports whether the primary provider still uses the
+// onboarding placeholder and no fallback is available to take over.
+func (c Config) ProviderNeedsSetup() bool {
+	oc := c.Providers.OpenAI
+	if oc == nil {
+		return false
+	}
+	return oc.APIKey == PlaceholderAPIKey && len(c.Providers.Fallbacks) == 0
+}
+
+// PlaceholderAPIKey is the sentinel written by onboard until the user supplies
+// real credentials. Requests using it are guaranteed to fail.
+const PlaceholderAPIKey = "sk-or-v1-REPLACE_ME"
 
 type ProviderConfig struct {
 	APIKey  string `json:"apiKey"`
