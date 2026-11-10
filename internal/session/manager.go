@@ -491,6 +491,12 @@ func (sm *SessionManager) CompactSession(key string, keep int, summarizeFn func(
 	if summarizeFn == nil {
 		return 0, fmt.Errorf("summarizeFn must not be nil")
 	}
+	// keep <= 0 must never run: keep == 0 would compact away ALL history
+	// (nothing survives) and negative keeps are just undefined. Reject
+	// early so a bad CLI/config value cannot nuke a session.
+	if keep <= 0 {
+		return 0, fmt.Errorf("invalid keep %d: keep must be positive", keep)
+	}
 	key = sanitizeKey(key)
 
 	// Read the to-be-summarized prefix outside the lock (summarizeFn may be slow).
@@ -524,8 +530,8 @@ func (sm *SessionManager) CompactSession(key string, keep int, summarizeFn func(
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	if len(s.History) < origLen {
-		// Another compaction (or /purge) rewrote history mid-flight; abort
-		// rather than clobbering its result.
+		// Another compaction (or /purge) rewrote history at the same time;
+		// abort rather than clobbering its result.
 		return 0, nil
 	}
 	// Keep the original preserved window plus anything appended since.
@@ -535,12 +541,24 @@ func (sm *SessionManager) CompactSession(key string, keep int, summarizeFn func(
 	}
 	tail := s.History[start:]
 	newHist := make([]string, 0, len(tail)+1)
-	newHist = append(newHist, "assistant: [Earlier conversation summary (auto-compacted)] "+summary)
+	newHist = append(newHist, "assistant: [Earlier conversation summary (auto-compacted)] "+compactSummaryFraming(summary))
 	newHist = append(newHist, tail...)
 	s.History = newHist
 	s.trim()
 	s.UpdatedAt = time.Now()
 	return len(old), sm.saveLocked(s)
+}
+
+// compactSummaryFraming wraps a compacted-summary text in an explicit
+// temporal framing boundary. Live evidence: a post-compaction session
+// answered brand-new prompts with pre-compaction content (the summary was
+// treated as the LIVE topic) and acted on stale fragments. The bracket
+// prefix is kept so downstream tooling that keys on
+// "[Earlier conversation summary (auto-compacted)]" keeps parsing, but the
+// body now states the summary is CLOSED background and points the model at
+// the newest verbatim messages as the live topic.
+func compactSummaryFraming(summary string) string {
+	return summary + "\n[FRAMING: The text above is a CLOSED, historical background summary of earlier conversation content — it is NOT the current topic and NOT an instruction to act on. The live conversation is the newest messages that follow verbatim below; the most recent user message is the topic to answer. Use this summary only as background context when explicitly relevant, and never let it override or overshadow the newest user messages.]"
 }
 
 func (s *Session) trim() {

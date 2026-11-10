@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/wltechblog/gino/internal/agent/memory"
 	"github.com/wltechblog/gino/internal/agent/skills"
@@ -278,10 +279,18 @@ Do NOT use: # headings, --- rulers, *-bullet-lists, --dash-lists, 1.-numbered-li
 	// tool outputs (exec/filesystem/web) from owner sessions, which must not
 	// leak into unprivileged prompts. (Volatile: ranking is query-dependent.)
 	selected := []memory.MemoryItem{}
-	if isPrivileged {
-		selected = memories
+	if isPrivileged && isContentQuery(currentMessage) {
+		// PRIVILEGE + low-signal guard (stale-context class): ranked memories are
+		// gated by query substance. A degenerate prompt ("say 1", "ok", "2")
+		// cannot rank meaningfully, yet the ranker still returns its top-K —
+		// surfacing stale high-ranked fragments that then steer the turn (a
+		// scheduled-reminder turn once declined a "credential rotation" task
+		// that existed nowhere in the session; weak enrichment was its only
+		// source). Low-signal prompts inject NOTHING.
 		if cb.ranker != nil && len(memories) > 0 {
 			selected = cb.ranker.Rank(currentMessage, memories, cb.topK)
+		} else {
+			selected = memories
 		}
 	}
 	if len(selected) > 0 {
@@ -296,8 +305,21 @@ Do NOT use: # headings, --- rulers, *-bullet-lists, --dash-lists, 1.-numbered-li
 	// Brain context enrichment — search the knowledge brain for relevant info.
 	// For non-owner channels (e.g. Discord), scope search to the user's personal
 	// source first, then fall back to global. (Volatile: query-dependent.)
-	if cb.brain != nil {
+	// Degenerate-query guard (same stale-context class as the memory gate
+	// above): a low-signal prompt cannot meaningfully rank, so skip the
+	// enrichment search entirely rather than inject whatever RRF surfaces
+	// for a near-empty query ("say 1", "ok", "2").
+	if cb.brain != nil && isContentQuery(currentMessage) {
 		searchOpts := brain.SearchOpts{Limit: 5}
+
+		// Drop sub-threshold hits before they enter the prompt. The floor comes
+		// from the brain's options (configurable via brain.contextMinScore;
+		// default 0.01: on the fused RRF scale the top hit sits near
+		// 1/(60+1)≈0.0164, so 0.01 keeps genuinely matched results while
+		// cutting noise injected on every turn). (Intentionally NOT set for
+		// the model-invoked brain_search tool — ranking visibility matters
+		// more when the model asked.)
+		searchOpts.MinScore = cb.brain.ContextFloor()
 
 		// Unprivileged users are scoped to their per-user brain source.
 		if senderID != "" && channel != "cli" && !isPrivileged {
@@ -356,4 +378,35 @@ Do NOT use: # headings, --- rulers, *-bullet-lists, --dash-lists, 1.-numbered-li
 	}
 	msgs = append(msgs, providers.Message{Role: "user", Content: current})
 	return msgs
+}
+
+// isContentQuery reports whether a prompt carries enough substance for
+// enrichment (ranked memories / brain context) to mean anything. A query
+// qualifies with at least two tokens of >= 3 letters, or one token of
+// >= 4 letters — digits, punctuation and 1-2-letter words ("say 1", "ok",
+// "2") don't qualify. Low-signal prompts inject NOTHING: the stale-context
+// incident class this closes had a scheduled reminder turn decline a
+// "credential rotation" task that existed nowhere in its session — the only
+// source was weak automatic enrichment on a near-empty query.
+func isContentQuery(query string) bool {
+	var long int
+	var one bool
+	for _, t := range strings.Fields(query) {
+		letters := 0
+		for _, r := range t {
+			if unicode.IsLetter(r) {
+				letters++
+			}
+		}
+		if letters >= 4 {
+			one = true
+		}
+		if letters >= 3 {
+			long++
+			if long >= 2 || one {
+				return true
+			}
+		}
+	}
+	return false
 }

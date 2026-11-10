@@ -104,17 +104,20 @@ func (b *Brain) Search(ctx context.Context, query string, opts SearchOpts) ([]Se
 	if len(ftsResults) == 0 {
 		ranked := b.rrfRank(vecResults)
 		ranked = b.applyRecency(ranked, opts)
+		ranked = b.applyMinScore(ranked, opts)
 		return b.rankToResults(ranked, opts.Limit), nil
 	}
 	if len(vecResults) == 0 {
 		ranked := b.rrfRank(ftsResults)
 		ranked = b.applyRecency(ranked, opts)
+		ranked = b.applyMinScore(ranked, opts)
 		return b.rankToResults(ranked, opts.Limit), nil
 	}
 
 	// Reciprocal Rank Fusion, then recency decay
 	merged := b.rrfFuse(ftsResults, vecResults)
 	merged = b.applyRecency(merged, opts)
+	merged = b.applyMinScore(merged, opts)
 	return b.rankToResults(merged, opts.Limit), nil
 }
 
@@ -361,6 +364,44 @@ func (b *Brain) applyRecency(results []rankedResult, opts SearchOpts) []rankedRe
 		return results[i].Score > results[j].Score
 	})
 	return results
+}
+
+// applyMinScore drops results at or below the caller's minimum-score floor.
+//
+// MinScore is a genuinely optional gate: the fused scale is rank-based
+// (RRF k=60 → top hit ≈ 0.0167, decaying with rank; recency decay scales it
+// further), so the ONLY universally safe default is "no floor". That is why
+// SearchOpts.MinScore defaulted to 0 = disabled and why the runtime context
+// builder uses a tiny 0.01 threshold instead. Values above ~0.02 will prune
+// hard on this scale — treat 0.01–0.015 as "keep only genuinely matched
+// hits" rather than as a cosine threshold.
+//
+// Note the comparison is `score <= minScore` (not `<`): a caller asking for
+// "at least 0.01" should not receive a result that lands exactly on the
+// floor — a floor value that admits its own boundary is a classic off-by-one
+// footgun for the next caller who tunes it.
+// ContextFloor returns the relevance floor for AUTOMATIC context
+// enrichment (the per-turn brain lookup folded into the prompt). This is
+// b.opts.ContextMinScore — configurable via brain.contextMinScore, default
+// 0.01 on the fused RRF scale (top organic hit ≈ 0.0164). The
+// model-invoked brain_search tool deliberately does NOT apply this floor:
+// when the model asked, ranking visibility matters more than recall
+// hygiene.
+func (b *Brain) ContextFloor() float64 {
+	return b.opts.ContextMinScore
+}
+
+func (b *Brain) applyMinScore(results []rankedResult, opts SearchOpts) []rankedResult {
+	if opts.MinScore <= 0 {
+		return results
+	}
+	out := results[:0]
+	for _, r := range results {
+		if r.Score > opts.MinScore {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // parseTimeField parses updated_at columns which may be RFC3339 strings

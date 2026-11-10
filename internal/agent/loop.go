@@ -564,10 +564,11 @@ type AgentLoop struct {
 	profileWorkspace        string
 
 	// Per-session turn management for async processing and cancellation.
-	mu          sync.Mutex
-	active      map[string]*activeTurn    // sessionKey -> active turn (nil = idle)
-	pending     map[string][]pendingMsg   // sessionKey -> queued messages for active turn
-	signalQueue map[string][]chat.Inbound // sessionKey -> signals deferred while a turn ran
+	mu                    sync.Mutex
+	active                map[string]*activeTurn    // sessionKey -> active turn (nil = idle)
+	pending               map[string][]pendingMsg   // sessionKey -> queued messages for active turn
+	flushPendingAtTurnEnd bool                      // flush turn-end orphans as their own turns instead of parking them on the next unrelated turn
+	signalQueue           map[string][]chat.Inbound // sessionKey -> signals deferred while a turn ran
 
 	// bgWG tracks background goroutines (e.g. turn memory extraction) so
 	// tests can wait for them to finish before cleaning up temp dirs.
@@ -886,6 +887,7 @@ func NewAgentLoopWithProfileWorkspace(b *chat.Hub, provider providers.LLMProvide
 		enableToolErrorMessages: true,
 		active:                  make(map[string]*activeTurn),
 		pending:                 make(map[string][]pendingMsg),
+		flushPendingAtTurnEnd:   defaultFlushPendingAtTurnEnd,
 		signalQueue:             make(map[string][]chat.Inbound),
 		paused:                  make(map[string]*pausedTurn),
 		compactor:               comp,
@@ -1695,6 +1697,59 @@ func (a *AgentLoop) queuePendingMsg(sessionKey, content, sender string) {
 	})
 }
 
+// flushOrphanedPending drains any user messages left in the pending queue at
+// turn end and re-dispatches each as its own proper turn, FIFO. This is the
+// turn-end half of pending-queue ownership: the mid-turn drain injects input
+// the running turn can still see; anything that lands after the final LLM
+// call (or during answer-send) arrives too late for that and must not be
+// parked on the next unrelated turn. Re-dispatch goes through the normal
+// dispatchMessage path, so drained messages get full routing, fresh context
+// enrichment, and their own reply — the newest message answers LAST.
+// Runs after the caller deleted the active turn, so hasActiveTurn is false
+// and the re-dispatched messages start turns instead of re-queuing.
+func (a *AgentLoop) flushOrphanedPending(ctx context.Context, sessionKey string) {
+	a.mu.Lock()
+	n := len(a.pending[sessionKey])
+	a.mu.Unlock()
+	if n == 0 {
+		return
+	}
+	// Re-dispatch on the ORIGINAL channel/chatID the queued messages belong
+	// to: session keys are "channel:chatID", and a flush re-dispatch that
+	// hardcoded the cli channel would send telegram/discord orphans to a
+	// channel with no subscriber (reply dropped) and fork a phantom
+	// "cli:telegram:<id>" session. Under an active project the turn ran
+	// under the namespaced key "proj:<name>:channel:chatID" — strip the
+	// namespace (namespacedKey is idempotent, so it round-trips unchanged
+	// in dispatchMessage). ChatIDs may themselves contain colons, so only
+	// cut as many components as the known prefix shapes require.
+	key := sessionKey
+	if strings.HasPrefix(key, "proj:") {
+		rest := strings.TrimPrefix(key, "proj:") // <name>:channel:chatID
+		if _, remainder, ok := strings.Cut(rest, ":"); ok {
+			key = remainder // channel:chatID
+		}
+	}
+	channel, chatID, ok := strings.Cut(key, ":")
+	if !ok {
+		channel, chatID = "cli", key
+	}
+	for i := 0; i < n; i++ {
+		text := a.drainPendingMsgs(sessionKey)
+		if strings.TrimSpace(text) == "" {
+			break
+		}
+		log.Printf("Turn-end pending flush for %s — re-dispatching orphaned input (%d queued)", sessionKey, n)
+		a.dispatchMessage(context.WithoutCancel(ctx), chat.Inbound{
+			Channel:  channel,
+			SenderID: "",
+			ChatID:   chatID,
+			Content:  text,
+			Metadata: map[string]interface{}{"pending_flush": true},
+		})
+	}
+}
+
 // pausedTurn is an iteration-limit-paused turn awaiting the user's
 // "continue". It snapshots everything processTurn had live: the message
 // chain mid-tool-exchange, the tool-call log, and iteration count, so
@@ -2000,12 +2055,28 @@ func (a *AgentLoop) resumePausedTurn(ctx context.Context, msg chat.Inbound) bool
 	a.mu.Unlock()
 
 	go func() {
-		defer close(at.done)
-		defer turnCancel()
-		a.processTurn(turnCtx, at, sessionKey, pt.msg, pt.sess, pt.messages)
+		// panic/terminal-error safety (FIX 1 contract: the turn-end flush
+		// must run on ALL exit paths): processTurn runs inside an inner
+		// wrapper that recovers; the cleanup below then always executes —
+		// the active entry is removed (a leaked entry would park the session
+		// "busy" forever), orphans are flushed, and done is closed so
+		// waiters don't hang.
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("agent: turn panic recovered for %s: %v", sessionKey, r)
+				}
+			}()
+			a.processTurn(turnCtx, at, sessionKey, pt.msg, pt.sess, pt.messages)
+		}()
+
 		a.mu.Lock()
 		delete(a.active, sessionKey)
+		flushAtEnd := a.flushPendingAtTurnEnd
 		a.mu.Unlock()
+		if flushAtEnd {
+			a.flushOrphanedPending(ctx, sessionKey)
+		}
 	}()
 
 	log.Printf("Resumed paused turn for %s (was at iteration %d)", sessionKey, pt.iteration)
@@ -2697,12 +2768,36 @@ func (a *AgentLoop) dispatchMessage(ctx context.Context, msg chat.Inbound) {
 		defer close(at.done)
 		defer turnCancel()
 
-		result := a.processTurn(turnCtx, at, signalSessionKey, msg, sess, messages)
+		// panic safety: processTurn runs in an inner wrapper that recovers;
+		// the turn-end cleanup below (active-entry delete, pending flush,
+		// deferred-signal release) then ALWAYS runs. result stays "" on a
+		// panic, making the post-turn result injection a no-op.
+		result := ""
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("agent: turn panic recovered for %s: %v", signalSessionKey, r)
+				}
+			}()
+			result = a.processTurn(turnCtx, at, signalSessionKey, msg, sess, messages)
+		}()
 
 		// Clean up active turn
 		a.mu.Lock()
 		delete(a.active, signalSessionKey)
+		// Turn-end pending-queue ownership: any user messages that queued while
+		// the final LLM call / answer-send was in flight would otherwise be
+		// orphaned here — parked under this session key until some FUTURE turn
+		// drains them as a mid-turn "[Additional input...]" AFTER that turn's
+		// newer prompt (the stale-answer treadmill). Flush them NOW as their
+		// own turns, FIFO. Deferred-signal release runs first (below) so a
+		// released signal owns the namespace; the flush runs after the active
+		// delete, so drained messages see no active turn and start properly.
+		flushAtEnd := a.flushPendingAtTurnEnd
 		a.mu.Unlock()
+		if flushAtEnd {
+			a.flushOrphanedPending(ctx, sessionKey)
+		}
 
 		// Flush any signals that were deferred while this turn ran. Each is
 		// re-dispatched through the normal path — now that no turn is
@@ -2768,9 +2863,6 @@ func (a *AgentLoop) dispatchMessage(ctx context.Context, msg chat.Inbound) {
 	}()
 }
 
-// processTurn runs the agent loop for a single message: LLM calls, tool execution, etc.
-// It respects the turn's context for cancellation.
-
 // isSignalSilent checks whether the inbound message originated from a silent signal.
 func isSignalSilent(msg chat.Inbound) bool {
 	if msg.Metadata == nil {
@@ -2780,11 +2872,16 @@ func isSignalSilent(msg chat.Inbound) bool {
 	return silent
 }
 
-// isSignalMessage checks whether the inbound message originated from the signal
-// listener (as opposed to a direct user message from Telegram/Discord/CLI).
 // silentMarker is the literal token the model ends its reply with when a
-// silent-signal turn produced nothing worth the user's attention.
+// wake-up turn produced nothing worth the user's attention.
 const silentMarker = "[silent]"
+
+// defaultFlushPendingAtTurnEnd controls whether user messages that arrive
+// while the final LLM call or answer-send is in flight are flushed as their
+// own turns at turn end (true, the fix) or parked on the next unrelated
+// turn (false, the legacy stale-answer treadmill). Tests use false to keep
+// the legacy single-turn semantics deterministic.
+const defaultFlushPendingAtTurnEnd = true
 
 // defaultSignalBudgetBlocks is the tool-iteration budget multiplier applied
 // to signal/background turns when no config override is set. Signal turns
@@ -2822,6 +2919,8 @@ func isSignalMessage(msg chat.Inbound) bool {
 	return ok
 }
 
+// processTurn runs the agent loop for a single message: LLM calls, tool execution, etc.
+// It respects the turn's context for cancellation.
 func (a *AgentLoop) processTurn(ctx context.Context, at *activeTurn, sessionKey string, msg chat.Inbound, sess *session.Session, messages []providers.Message) string {
 	// Privilege for this turn: derived from message metadata. Controls whether
 	// tool outputs enter shared short-term memory.
@@ -3595,6 +3694,7 @@ func initBrain(homeDir, workspace string, cfg *config.BrainConfig, provider prov
 	if cfg.RecencyWeight > 0 && cfg.RecencyWeight < 1 {
 		opts.RecencyWeight = cfg.RecencyWeight
 	}
+	opts.ContextMinScore = cfg.ContextMinScore
 
 	brainInst, err := brain.Init(dbPath, embedder, opts)
 	if err != nil {

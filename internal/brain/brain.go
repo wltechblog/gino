@@ -34,6 +34,14 @@ type Options struct {
 	// RecencyWeight controls time-decay ranking: score *= RecencyWeight^ageDays.
 	// 0.985 default halves a page's score every ~46 days. Values <= 0 or >= 1 disable decay.
 	RecencyWeight float64
+
+	// ContextMinScore is the relevance floor applied to *automatic context
+	// enrichment* searches (SearchContext / MinScore when the caller does
+	// not set its own). On the fused RRF scale the top organic hit sits near
+	// 1/(60+1)≈0.0164, so 0.01 keeps genuinely matched results while cutting
+	// the zero-score FTS noise that used to surface on every turn.
+	// <= 0 disables the default.
+	ContextMinScore float64
 }
 
 // DefaultOptions returns sensible defaults for a Pi-scale brain.
@@ -43,6 +51,7 @@ func DefaultOptions() Options {
 		EmbeddingDims:   768,
 		DefaultSourceID: "default",
 		RecencyWeight:   0.985,
+		ContextMinScore: 0.01,
 	}
 }
 
@@ -51,7 +60,7 @@ type Page struct {
 	ID          int64             `json:"id"`
 	SourceID    string            `json:"source_id"`
 	Slug        string            `json:"slug"`
-	Type        string            `json:"type"`        // note, person, company, concept, conversation
+	Type        string            `json:"type"` // note, person, company, concept, conversation
 	Title       string            `json:"title"`
 	Content     string            `json:"content"`
 	ContentHash string            `json:"content_hash"`
@@ -105,10 +114,10 @@ type SearchResult struct {
 type SearchOpts struct {
 	Limit       int      `json:"limit,omitempty"`        // max results (default 10)
 	Sources     []string `json:"sources,omitempty"`      // restrict to these source IDs
-	Types       []string `json:"types,omitempty"`         // restrict to these page types
-	MinScore    float64  `json:"min_score,omitempty"`     // minimum RRF score
-	VectorOnly  bool     `json:"vector_only,omitempty"`   // skip FTS, vector search only
-	KeywordOnly bool     `json:"keyword_only,omitempty"`  // skip vector, FTS only
+	Types       []string `json:"types,omitempty"`        // restrict to these page types
+	MinScore    float64  `json:"min_score,omitempty"`    // minimum RRF score
+	VectorOnly  bool     `json:"vector_only,omitempty"`  // skip FTS, vector search only
+	KeywordOnly bool     `json:"keyword_only,omitempty"` // skip vector, FTS only
 }
 
 // MaintainReport summarizes what a maintenance cycle did.
@@ -176,8 +185,8 @@ func Init(dbPath string, embedder EmbeddingProvider, opts Options) (*Brain, erro
 	}
 	if err := runMigrations(db); err != nil {
 		if err := db.Close(); err != nil {
-		return nil, fmt.Errorf("close db after migration failure: %w", err)
-	}
+			return nil, fmt.Errorf("close db after migration failure: %w", err)
+		}
 		return nil, err
 	}
 	// Seed default source

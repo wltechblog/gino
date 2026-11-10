@@ -22,6 +22,12 @@ type BrainConfig struct {
 	RemoteModel    string `json:"remoteModel,omitempty"`    // fallback remote model name
 
 	RecencyWeight float64 `json:"recencyWeight,omitempty"` // search ranking time-decay: score *= w^ageDays; 0 disables (default 0.985)
+
+	// ContextMinScore is the relevance floor for AUTOMATIC context enrichment
+	// (the per-turn brain lookup folded into the prompt). Default 0.01 on the
+	// fused RRF scale (top organic hit ≈ 0.0164). <= 0 disables the floor.
+	// NOT applied to the model-invoked brain_search tool.
+	ContextMinScore float64 `json:"contextMinScore,omitempty"`
 }
 
 // MCPServerConfig describes a single MCP server connection.
