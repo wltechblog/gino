@@ -27,6 +27,11 @@ type ContextBuilder struct {
 	skillsLoader     *skills.Loader
 	brain            *brain.Brain
 	oauthNotifier    func() map[string]string // returns server→authURL for pending OAuth
+
+	// memFloor is the minimum position-derived relevance for a ranked memory
+	// to inject into the "Relevant memories" block. 0 disables (legacy
+	// behavior: every ranked item injects). See memory.FilterByFloor.
+	memFloor float64
 }
 
 func NewContextBuilder(workspace string, r memory.Ranker, topK int) *ContextBuilder {
@@ -50,6 +55,15 @@ func NewContextBuilderWithProfile(workspace, profileWorkspace string, r memory.R
 // SetBrain attaches a knowledge brain for context enrichment.
 func (cb *ContextBuilder) SetBrain(b *brain.Brain) {
 	cb.brain = b
+}
+
+// SetMemoryFloor sets the minimum position-derived relevance for ranked
+// memories to inject (memory.FilterByFloor scale). 0 disables. Wired from
+// agents.defaults.sessionCompaction.memoryMinScore via SetSessionCompaction.
+func (cb *ContextBuilder) SetMemoryFloor(floor float64) {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	cb.memFloor = floor
 }
 
 // SetOAuthNotifier attaches a function that returns pending OAuth server names
@@ -271,27 +285,36 @@ Do NOT use: # headings, --- rulers, *-bullet-lists, --dash-lists, 1.-numbered-li
 	// must not see MEMORY.md or the daily note — those hold owner/admin facts.
 	// (Volatile placement: write_memory during a turn must not invalidate the
 	// cached stable prefix.)
-	if memoryContext != "" && isPrivileged {
+	// LOW-SIGNAL GUARD (stale-context class, GINO-RAILS-005): memoryContext is
+	// the raw owner memory dump (MEMORY.md + today's note), not query-ranked —
+	// on degenerate prompts ("say 1", "ok", "2") it injected unrelated stale
+	// fragments that then steered the turn (presence beats rank for an LLM).
+	// Suppress it unless the prompt carries enough substance for any context
+	// to be relevant. Privilege gate is unchanged and independent.
+	if memoryContext != "" && isPrivileged && isContentQuery(currentMessage) {
 		volatileParts = append(volatileParts, "Memory:\n"+memoryContext)
 	}
 
 	// Top-K ranked memories. PRIVACY: gated by privilege — these include
 	// tool outputs (exec/filesystem/web) from owner sessions, which must not
 	// leak into unprivileged prompts. (Volatile: ranking is query-dependent.)
+	// LOW-SIGNAL GUARD (stale-context class): ranked memories are gated by
+	// query substance — a degenerate prompt cannot rank meaningfully, yet the
+	// ranker still returns its top-K, surfacing stale fragments that steer
+	// the turn. MEM-FLOOR (GINO-RAILS-005, ported from joist): ranked (and
+	// unranked fallback) items must also clear cb.memFloor — below-floor
+	// items never inject (0 disables).
 	selected := []memory.MemoryItem{}
 	if isPrivileged && isContentQuery(currentMessage) {
-		// PRIVILEGE + low-signal guard (stale-context class): ranked memories are
-		// gated by query substance. A degenerate prompt ("say 1", "ok", "2")
-		// cannot rank meaningfully, yet the ranker still returns its top-K —
-		// surfacing stale high-ranked fragments that then steer the turn (a
-		// scheduled-reminder turn once declined a "credential rotation" task
-		// that existed nowhere in the session; weak enrichment was its only
-		// source). Low-signal prompts inject NOTHING.
 		if cb.ranker != nil && len(memories) > 0 {
 			selected = cb.ranker.Rank(currentMessage, memories, cb.topK)
 		} else {
 			selected = memories
 		}
+		cb.mu.RLock()
+		floor := cb.memFloor
+		cb.mu.RUnlock()
+		selected = memory.FilterByFloor(selected, floor)
 	}
 	if len(selected) > 0 {
 		var sb strings.Builder

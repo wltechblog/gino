@@ -1221,13 +1221,18 @@ func (a *AgentLoop) SetSignalBudgetBlocks(n int) {
 }
 
 // SetSessionCompaction enables LLM-based summarization of old persisted
-// session history. Pass nil to disable.
+// session history. Pass nil to disable. The compaction config also carries
+// agents.defaults.sessionCompaction.memoryMinScore: a per-item relevance
+// floor for the "Relevant memories" prompt block (see memory.FilterByFloor).
 func (a *AgentLoop) SetSessionCompaction(cfg *config.SessionCompactionConfig) {
 	if cfg == nil {
 		a.sessComp = nil
 		return
 	}
 	a.sessComp = newSessionCompactor(a.provider, a.model, *cfg)
+	if a.context != nil {
+		a.context.SetMemoryFloor(cfg.MemoryMinScore)
+	}
 }
 
 // StopTurn cancels the active turn for a session key, if one is running.

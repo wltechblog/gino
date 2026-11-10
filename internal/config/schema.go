@@ -26,7 +26,9 @@ type BrainConfig struct {
 	// ContextMinScore is the relevance floor for AUTOMATIC context enrichment
 	// (the per-turn brain lookup folded into the prompt). Default 0.01 on the
 	// fused RRF scale (top organic hit ≈ 0.0164). <= 0 disables the floor.
-	// NOT applied to the model-invoked brain_search tool.
+	// Since t-gino-rails-002 the model-invoked brain_search tool applies the
+	// same floor, so this knob gates every brain-result surface (0 disables
+	// both).
 	ContextMinScore float64 `json:"contextMinScore,omitempty"`
 }
 
@@ -223,6 +225,16 @@ type SessionCompactionConfig struct {
 	// KeepRecent is the number of newest entries preserved verbatim through
 	// compaction. Default 16.
 	KeepRecent int `json:"keepRecent,omitempty"`
+
+	// MemoryMinScore is the minimum position-derived relevance for a ranked
+	// memory to inject into the "Relevant memories" prompt block (same
+	// reciprocal-rank scale as brain.contextMinScore; see memory.FilterByFloor).
+	// 0 disables the floor (default; all ranked items inject). Complements the
+	// low-signal guard: content queries still only inject memories that clear
+	// the floor. Recommended 0.01 (keeps genuinely matched top-K items, drops
+	// rank-tail filler); joist ships the same knob with a 0 default and the
+	// same recommendation — the deployed value is Josh's call.
+	MemoryMinScore float64 `json:"memoryMinScore,omitempty"`
 }
 
 // WebConfig configures the web fetch tool.

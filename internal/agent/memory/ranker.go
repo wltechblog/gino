@@ -91,3 +91,28 @@ func (s *SimpleRanker) Rank(query string, memories []MemoryItem, top int) []Memo
 	}
 	return out
 }
+
+// FilterByFloor drops items whose position-derived relevance score falls
+// below floor, using the same reciprocal-rank scale as brain search:
+// score(i) = 1/(i+10) for 0-based position i (rank 0 → 0.1, rank 9 → 0.05).
+// MemoryItem carries no intrinsic score, so position in the ranked list is
+// the only relevance signal available; the floor therefore bounds how deep
+// into the ranked list injection reaches (0.01 = everything within top-K,
+// 0.095 = only the single top item). floor <= 0 disables filtering —
+// unset/0 keeps legacy behavior (all ranked items inject). An item exactly
+// ON the floor injects (>= semantics; note this is the opposite boundary of
+// brain applyMinScore's strictly-greater rule — each is documented where it
+// lives). Wired from agents.defaults.sessionCompaction.memoryMinScore via
+// ContextBuilder.SetMemoryFloor.
+func FilterByFloor(items []MemoryItem, floor float64) []MemoryItem {
+	if floor <= 0 || len(items) == 0 {
+		return items
+	}
+	out := make([]MemoryItem, 0, len(items))
+	for i, m := range items {
+		if 1.0/float64(i+10) >= floor {
+			out = append(out, m)
+		}
+	}
+	return out
+}
