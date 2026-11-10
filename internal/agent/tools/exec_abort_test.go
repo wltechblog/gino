@@ -175,6 +175,43 @@ func TestAbortNoTargetIsNoop(t *testing.T) {
 	}
 }
 
+// TestAbortDuringStartWindowRace hammers the narrow window where runCmd
+// calls exec.Cmd.Start while concurrent aborts read the process handle —
+// the exact overlap (Start mutating the Cmd vs abortMatching reading
+// ic.cmd.Process/Pid) that -race flagged as a DATA RACE before the
+// inFlightMu serialization existed (regression for fix/gino-rails-003).
+// Also asserts the command still dies with the "aborted by user" error,
+// proving the added synchronization did not change abort semantics: an
+// abort landing during Start must surface as an abort (not a plain exec
+// error), and aborts landing after Start must still kill instantly.
+func TestAbortDuringStartWindowRace(t *testing.T) {
+	tool := newAbortTestTool(t)
+	done := make(chan error, 1)
+	ctx := WithExecSession(withPerCallTimeout(context.Background(), 30*time.Second), "telegram:777")
+	go func() {
+		_, err := tool.runCmd(ctx, "sh", []string{"-c", "sleep 25; echo late"}, "")
+		done <- err
+	}()
+	// Aborts at ~2ms cadence from before the command is registered well
+	// past its Start: some land pre-registration (no-ops), some inside the
+	// Start instant (must flip ic.aborted so Start-failure paths report
+	// "aborted"), most after Start (must process-group-kill immediately).
+	go func() {
+		for i := 0; i < 200; i++ {
+			tool.AbortSession("telegram:777")
+			time.Sleep(2 * time.Millisecond)
+		}
+	}()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "aborted by user") {
+			t.Fatalf("expected abort error, got: %v", err)
+		}
+	case <-time.After(8 * time.Second):
+		t.Fatal("command did not return after aborts (aborted semantics broken)")
+	}
+}
+
 // TestExecStringInflightRegistration verifies string-form (yolo) commands
 // are also registered for abort tracking.
 func TestExecStringInflightRegistration(t *testing.T) {

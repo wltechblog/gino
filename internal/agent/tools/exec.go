@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -45,12 +46,37 @@ type ExecTool struct {
 	// ("channel:chatID") so /abort can kill a session's foreground execs
 	// without stopping the turn itself.
 	inFlight map[string]map[*inflightCmd]struct{}
+
+	// inFlightMu serializes exec.Cmd.Start (inside runCmd) against
+	// abortMatching's process-handle reads + process-group kill. Start
+	// mutates the Cmd struct (allocates Process, sets Pid); reading
+	// ic.cmd.Process concurrently with Start was the -race DATA RACE.
+	// The lock is held ONLY for the Start instant and the kill instant —
+	// never across Wait — so aborting a long-running command still kills
+	// it immediately (abort semantics unchanged). Deliberately NOT t.mu:
+	// runCmd holds this around Start while a command is being spawned,
+	// and tests poll inFlight under t.mu.RLock() — reusing t.mu would
+	// let aborters block those polls (and abort waits on this lock while
+	// holding t.mu, which would self-deadlock).
+	inFlightMu sync.Mutex
 }
 
 // inflightCmd is one live exec command registered for abort tracking.
 type inflightCmd struct {
-	cmd     *exec.Cmd
+	cmd *exec.Cmd
+
+	// mu guards aborted: written by abortMatching, read by runCmd after
+	// Wait returns — different goroutines, so the flag needs its own lock.
+	mu      sync.Mutex
 	aborted bool // set when AbortSession targeted this command
+}
+
+// wasAborted reports whether AbortSession targeted this command. Call it
+// only after the command's Wait has returned.
+func (ic *inflightCmd) wasAborted() bool {
+	ic.mu.Lock()
+	defer ic.mu.Unlock()
+	return ic.aborted
 }
 
 func NewExecTool(timeoutSecs int) *ExecTool {
@@ -579,9 +605,39 @@ func (t *ExecTool) runCmd(ctx context.Context, prog string, args []string, dir s
 	t.registerInflight(session, ic)
 	defer t.unregisterInflight(session, ic)
 
-	b, err := cmd.CombinedOutput()
+	// CombinedOutput equivalent: one shared buffer for both fds, assigned
+	// BEFORE Start — os/exec captures the output descriptors at Start time,
+	// so assignments after Start are silently ignored (output lost). With
+	// an identical writer on both fields Start reuses a single pipe with
+	// one copying goroutine (no interleaving race); the buffer is read
+	// only after Wait has reaped the process.
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+
+	// Start under inFlightMu so a concurrent abortMatching cannot read
+	// ic.cmd.Process while Start mutates the Cmd — the -race DATA RACE this
+	// closes. Once Start returns, Process/Pid stay immutable for the
+	// command's lifetime, so abort may safely inspect and kill while Wait
+	// runs. The lock is never held across Wait: a blocked abort must not
+	// stall until the command's natural timeout (abort semantics unchanged).
+	t.inFlightMu.Lock()
+	startErr := cmd.Start()
+	t.inFlightMu.Unlock()
+	if startErr != nil {
+		if ic.wasAborted() {
+			return "", fmt.Errorf("exec aborted by user: %w", startErr)
+		}
+		if cctx.Err() == context.DeadlineExceeded {
+			return "", fmt.Errorf("exec error: timed out after %s: %w", deadline, startErr)
+		}
+		return "", fmt.Errorf("exec error: %w", startErr)
+	}
+
+	err := cmd.Wait()
+	b := buf.Bytes()
 	if err != nil {
-		if ic.aborted {
+		if ic.wasAborted() {
 			return string(b), fmt.Errorf("exec aborted by user: %w", err)
 		}
 		if cctx.Err() == context.DeadlineExceeded {
@@ -688,12 +744,23 @@ func (t *ExecTool) abortMatching(match func(string) bool) int {
 			continue
 		}
 		for ic := range m {
+			ic.mu.Lock()
 			ic.aborted = true
+			// inFlightMu guards the Cmd-handle reads (ic.cmd / Process /
+			// Pid) against exec.Cmd.Start inside runCmd — Start mutates
+			// the Cmd struct, and concurrent reads were the -race DATA
+			// RACE. After Start returns, Process/Pid are immutable, so
+			// this kill is safe the rest of the command's life. The lock
+			// is never held across runCmd's Wait: aborts still land
+			// instantly on running commands (semantics unchanged).
+			t.inFlightMu.Lock()
 			if ic.cmd != nil && ic.cmd.Process != nil {
 				// Process-group kill — same reason as runCmd's Cancel.
 				_ = syscall.Kill(-ic.cmd.Process.Pid, syscall.SIGKILL)
 				killed++
 			}
+			t.inFlightMu.Unlock()
+			ic.mu.Unlock()
 		}
 		delete(t.inFlight, key)
 	}
