@@ -54,7 +54,15 @@ func (t *BrainSearchTool) Execute(ctx context.Context, args map[string]interface
 		limit = int(l)
 	}
 
-	results, err := t.brain.Search(ctx, query, brain.SearchOpts{Limit: limit})
+	// Apply the brain's configured relevance floor (brain.contextMinScore,
+	// default 0.01 on the fused RRF scale) to model-invoked searches too.
+	// Live specimen (GINO-RAILS-002): a legit query ("Dev Core team Discord")
+	// surfaced ingenic-docs noise at score 0.01/0.02 — the enrichment path
+	// was floored since 07c2406, but this tool returned raw low-score
+	// results the model then treated as fact. Ranking visibility is kept by
+	// the score in the output; sub-threshold noise is not worth shipping.
+	// An explicit 0 (or negative) contextMinScore disables the floor.
+	results, err := t.brain.Search(ctx, query, brain.SearchOpts{Limit: limit, MinScore: t.brain.ContextFloor()})
 	if err != nil {
 		return "", fmt.Errorf("brain search failed: %w", err)
 	}
@@ -227,8 +235,10 @@ func NewBrainStatusTool(b *brain.Brain) *BrainStatusTool {
 	return &BrainStatusTool{brain: b}
 }
 
-func (t *BrainStatusTool) Name() string        { return "brain_status" }
-func (t *BrainStatusTool) Description() string { return "Show knowledge brain statistics (pages, entities, embeddings, etc.)" }
+func (t *BrainStatusTool) Name() string { return "brain_status" }
+func (t *BrainStatusTool) Description() string {
+	return "Show knowledge brain statistics (pages, entities, embeddings, etc.)"
+}
 func (t *BrainStatusTool) Parameters() map[string]interface{} { return nil }
 
 func (t *BrainStatusTool) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
@@ -254,8 +264,10 @@ func NewBrainMaintainTool(b *brain.Brain) *BrainMaintainTool {
 	return &BrainMaintainTool{brain: b}
 }
 
-func (t *BrainMaintainTool) Name() string        { return "brain_maintain" }
-func (t *BrainMaintainTool) Description() string { return "Run brain maintenance: backfill missing embeddings, extract entities, prune orphaned data" }
+func (t *BrainMaintainTool) Name() string { return "brain_maintain" }
+func (t *BrainMaintainTool) Description() string {
+	return "Run brain maintenance: backfill missing embeddings, extract entities, prune orphaned data"
+}
 func (t *BrainMaintainTool) Parameters() map[string]interface{} { return nil }
 
 func (t *BrainMaintainTool) Execute(ctx context.Context, args map[string]interface{}) (string, error) {

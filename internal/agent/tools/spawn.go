@@ -426,6 +426,31 @@ func agentLabel(name string) string {
 	return name
 }
 
+// syncBuffer is a mutex-guarded string accumulator. runChild feeds ONE
+// instance to BOTH cmd.Stdout and cmd.Stderr; os/exec drains those two
+// pipes on independent goroutines, so a plain strings.Builder here is a
+// data race (concurrent Write → copyCheck addr check), surfacing under
+// -race as DATA RACE reports and lost stdout fragments (ported from
+// joist a4223aa, t-joist-childlog-race-001). Every write funnels through
+// one lock; String() is only read after cmd.Run returns but is guarded
+// too so future concurrent readers cannot race.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 // runChild executes the gino agent subprocess, killing the whole process
 // group on cancellation (the child may itself shell out). WaitDelay bounds
 // the wait for grandchildren to exit after the group kill. extraEnv holds
@@ -443,7 +468,10 @@ func (t *SpawnTool) runChild(ctx context.Context, argv []string, extraEnv []stri
 		return nil
 	}
 	cmd.WaitDelay = 5 * time.Second
-	var combined strings.Builder
+	// One SHARED, mutex-guarded accumulator for both output streams (see
+	// syncBuffer above — a plain strings.Builder here raced under os/exec's
+	// concurrent stdout/stderr copiers).
+	var combined syncBuffer
 	cmd.Stdout = &combined
 	cmd.Stderr = &combined
 	if err := cmd.Run(); err != nil {

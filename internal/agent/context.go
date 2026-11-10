@@ -316,9 +316,10 @@ Do NOT use: # headings, --- rulers, *-bullet-lists, --dash-lists, 1.-numbered-li
 		// from the brain's options (configurable via brain.contextMinScore;
 		// default 0.01: on the fused RRF scale the top hit sits near
 		// 1/(60+1)≈0.0164, so 0.01 keeps genuinely matched results while
-		// cutting noise injected on every turn). (Intentionally NOT set for
-		// the model-invoked brain_search tool — ranking visibility matters
-		// more when the model asked.)
+		// cutting noise injected on every turn). The model-invoked brain_search
+		// tool applies the same floor since GINO-RAILS-002: its output printed
+		// sub-threshold noise ("score: 0.01/0.02") that the model treated as
+		// fact despite the visible ranking — for an LLM, presence beats rank.
 		searchOpts.MinScore = cb.brain.ContextFloor()
 
 		// Unprivileged users are scoped to their per-user brain source.

@@ -380,3 +380,39 @@ func TestSpawnProfileTimeoutUsed(t *testing.T) {
 		t.Errorf("profile timeout not applied: %q", out)
 	}
 }
+
+// TestSpawnSyncCombinedStreamsSurviveRace pins the syncBuffer fix (ported
+// from joist a4223aa): runChild feeds ONE accumulator to BOTH cmd.Stdout
+// and cmd.Stderr, which os/exec drains on independent goroutines — a plain
+// strings.Builder there is a data race (pre-fix repro: go test -race
+// -run TestSpawnSync ./... reported DATA RACE through runChild). The child
+// below interleaves both streams heavily so the copiers genuinely race;
+// both streams must arrive intact in the tool result.
+func TestSpawnSyncCombinedStreamsSurviveRace(t *testing.T) {
+	binary := writeFakeGino(t, "i=1; while [ $i -le 100 ]; do echo \"out-$i\"; echo \"err-$i\" >&2; i=$((i+1)); done; echo RACE-PROBE-STDOUT; echo RACE-PROBE-STDERR >&2\n")
+	tk := spawnTestTool(t, binary, t.TempDir())
+
+	out, err := tk.Execute(t.Context(), map[string]interface{}{
+		"agent": "docs-research",
+		"task":  "stream both ways",
+	})
+	if err != nil {
+		t.Fatalf("spawn failed: %v", err)
+	}
+	if !strings.Contains(out, "RACE-PROBE-STDOUT") {
+		t.Errorf("stdout marker lost (possible copier race fragmentation): %q", out)
+	}
+	if !strings.Contains(out, "RACE-PROBE-STDERR") {
+		t.Errorf("stderr marker lost: %q", out)
+	}
+	// Lines are interleaved from two pipes into one accumulator; under the
+	// pre-fix race, writes were lost or the -race detector aborted. The
+	// 4096-byte tool-result tail window keeps the newest lines, so count
+	// probes rather than exact-order assertions.
+	if got := strings.Count(out, "out-"); got < 90 {
+		t.Errorf("stdout lines dropped (got %d/100): %q", got, out)
+	}
+	if got := strings.Count(out, "err-"); got < 90 {
+		t.Errorf("stderr lines dropped (got %d/100): %q", got, out)
+	}
+}
