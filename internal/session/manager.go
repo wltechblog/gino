@@ -15,6 +15,50 @@ import (
 // MaxHistorySize is the maximum number of messages kept in a session.
 const MaxHistorySize = 50
 
+// MaxMessageChars clamps a single history entry (t-gino-rails-006 item 4).
+// Session entries were historically unbounded, so one fat tool dump could
+// balloon a session file to multiple MB and (on injection) the LLM request.
+// Head+tail framing keeps both the command/intent (start) and the result
+// summary (end) of a clamped entry.
+const MaxMessageChars = 24_000
+
+// maxMessageTailKeep is how much of a clamped entry's tail is preserved.
+const maxMessageTailKeep = 4_000
+
+// MaxHistoryChars is the total serialized-history budget per session
+// (t-gino-rails-006 item 4). trim() drops OLDEST entries while the total
+// exceeds it, so even 50 entries of clamped-but-fat content cannot push a
+// session file (or an injected context) past ~half a megabyte.
+const MaxHistoryChars = 400_000
+
+// clampMessageChars clamps one history entry to max chars, preserving a
+// head and a tail with an explicit elision marker between them. Entries
+// already within the cap pass through untouched.
+func clampMessageChars(s string, max int) string {
+	if max <= 0 || len(s) <= max {
+		return s
+	}
+	const markerTpl = "\n[... %d chars elided by session size cap ...]\n"
+	if max <= maxMessageTailKeep+128 {
+		return s[:max] // degenerate tiny cap: hard truncate
+	}
+	// Budget the head using the WIDEST possible marker (digit count of
+	// len(s) is the upper bound), so the assembled result is guaranteed
+	// <= max regardless of how many digits the elided count turns out to
+	// need.
+	wide := fmt.Sprintf(markerTpl, len(s))
+	head := max - maxMessageTailKeep - len(wide)
+	if head < 0 {
+		head = 0
+	}
+	elided := len(s) - head - maxMessageTailKeep
+	if elided <= 0 {
+		return s
+	}
+	marker := fmt.Sprintf(markerTpl, elided)
+	return s[:head] + marker + s[len(s)-maxMessageTailKeep:]
+}
+
 // Session holds a short chat history.
 type Session struct {
 	Key   string `json:"key"`
@@ -272,6 +316,9 @@ func (sm *SessionManager) syncFromDiskLocked() {
 }
 
 func (s *Session) AddMessage(role, content string) {
+	// Per-entry clamp (t-gino-rails-006 item 4): one fat tool dump must
+	// not balloon the session file or the injected context.
+	content = clampMessageChars(content, MaxMessageChars)
 	s.History = append(s.History, role+": "+content)
 	if s.CreatedAt.IsZero() {
 		s.CreatedAt = time.Now()
@@ -562,7 +609,24 @@ func compactSummaryFraming(summary string) string {
 }
 
 func (s *Session) trim() {
+	// Count cap (existing behavior).
 	if len(s.History) > MaxHistorySize {
 		s.History = s.History[len(s.History)-MaxHistorySize:]
+	}
+	// Total-char budget (t-gino-rails-006 item 4): even clamped entries
+	// can sum past the cap; drop OLDEST entries until within budget so
+	// the session file and injected context stay bounded. Always keep at
+	// least the newest entry (it is the live topic).
+	if MaxHistoryChars > 0 {
+		for len(s.History) > 1 {
+			total := 0
+			for i := range s.History {
+				total += len(s.History[i])
+			}
+			if total <= MaxHistoryChars {
+				break
+			}
+			s.History = s.History[1:]
+		}
 	}
 }
