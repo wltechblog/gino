@@ -98,6 +98,11 @@ func applyEnvOverrides(cfg *Config) {
 	if v := os.Getenv("GINO_LOG_LEVEL"); v != "" {
 		cfg.Agents.Defaults.LogLevel = strings.ToLower(strings.TrimSpace(v))
 	}
+	if v := os.Getenv("GINO_MAX_REQUEST_CHARS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			cfg.Agents.Defaults.MaxRequestChars = &n
+		}
+	}
 }
 
 // LogsSilenced reports whether routine logging is disabled

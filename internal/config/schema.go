@@ -157,6 +157,16 @@ type AgentDefaults struct {
 	// to the user — all as JSON. Intended for debugging; very noisy.
 	Verbose bool `json:"verbose,omitempty"`
 
+	// MaxRequestChars caps the serialized LLM request size (all message
+	// contents combined, in characters). Requests above this get an
+	// emergency structural trim before sending (providers.SetMaxRequestChars,
+	// t-gino-rails-006 item 2). Nil = default 240000 (DefaultMaxRequestChars,
+	// ≈60-80k real tokens — well under any sane context window); explicit 0
+	// disables the emergency trim entirely (long-session hosts that know
+	// their model absorbs more); a positive value overrides the default.
+	// Env override: GINO_MAX_REQUEST_CHARS (positive values only).
+	MaxRequestChars *int `json:"maxRequestChars,omitempty"`
+
 	// Analytics enables token usage analytics as JSON: per-request usage
 	// (LLM USAGE) and per-turn aggregate usage (TURN USAGE). Includes
 	// prompt/completion/total/cached/reasoning token counts, the serving

@@ -16,6 +16,12 @@ func NewProviderFromConfig(cfg config.Config) LLMProvider {
 		return NewStubProvider()
 	}
 
+	// Emergency request-trim cap (t-gino-rails-006 item 2): process-wide,
+	// so it is wired once here rather than per-provider. Unset = package
+	// default (240000); explicit 0 disables the trim; positive overrides.
+	// GINO_MAX_REQUEST_CHARS reaches this point via the loader.
+	applyTrimCapFromConfig(cfg.Agents.Defaults.MaxRequestChars)
+
 	primary := NewOpenAIProviderWithRetry(
 		cfg.Providers.OpenAI.APIKey,
 		cfg.Providers.OpenAI.APIBase,
@@ -107,6 +113,15 @@ func effectiveMaxRetries(cfg int) int {
 		return cfg
 	}
 	return 2
+}
+
+// applyTrimCapFromConfig applies the config-resolved trim cap.
+// nil = keep the package default; 0 = disable the trim; positive = override.
+func applyTrimCapFromConfig(maxRequestChars *int) {
+	if maxRequestChars == nil {
+		return
+	}
+	SetMaxRequestChars(*maxRequestChars)
 }
 
 // effectiveRetryBaseWait returns cfg if positive, else the default (2 seconds).
