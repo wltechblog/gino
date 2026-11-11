@@ -50,6 +50,25 @@ func effectiveTrimCap() int64 {
 	return trimCap.Load()
 }
 
+// EffectiveMaxRequestChars returns the current emergency-trim cap in
+// characters (0 = trim disabled). Exported for the agent layer's
+// char-budget turn trim (t-gino-rails-006 item 3), which pre-shrinks a
+// chain before the LLM call so the emergency net downstream stays a net.
+func EffectiveMaxRequestChars() int {
+	return int(trimCap.Load())
+}
+
+// RequestChars estimates the serialized request size (all message contents
+// plus tool-call arguments) in characters — the same counter the emergency
+// trim gate uses. Exported for the agent layer's pre-flight budget check.
+func RequestChars(messages []Message) int {
+	total := 0
+	for i := range messages {
+		total += msgChars(&messages[i])
+	}
+	return total
+}
+
 // emergencyTrimCount counts every firing of emergencyTrimMessages since
 // process start. Observable via EmergencyTrimCount() (monotonic test/ops
 // hook — a non-zero value means the agent IS losing context to the wire

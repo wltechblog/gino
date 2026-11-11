@@ -3035,6 +3035,12 @@ signalLoop:
 			}
 		}
 
+		// Size-aware guard (t-gino-rails-006 item 3): even when the count
+		// trim above was a no-op, a short-but-fat chain must shrink before
+		// the LLM call, or the provider hard-rejects the request and the
+		// turn burns its whole iteration budget on rejected calls.
+		messages, userMsgIdx = trimTurnForTokens(messages, userMsgIdx)
+
 		// Checkpoint the current turn state before each LLM invocation.
 		if err := a.checkpoints.Save(sessionKey, &ActiveTurn{
 			Channel:        msg.Channel,
@@ -3554,6 +3560,11 @@ func (a *AgentLoop) ProcessDirectWithSessionAndSystemPrompt(content string, time
 				messages, userMsgIdx = trimTurnMessages(messages, userMsgIdx, a.maxTurnMessages)
 			}
 		}
+
+		// Size-aware guard (t-gino-rails-006 item 3): see the call in
+		// processTurn — short-but-fat chains must shrink before the LLM
+		// call even when the count trim was a no-op.
+		messages, userMsgIdx = trimTurnForTokens(messages, userMsgIdx)
 
 		resp, err := a.provider.Chat(ctx, messages, a.tools.Definitions(), a.model)
 		if err != nil {
