@@ -2,9 +2,11 @@ package providers
 
 import (
 	"fmt"
+	"log"
+	"sync/atomic"
 )
 
-// maxRequestChars is the hard cap on the serialized request size (all
+// DefaultMaxRequestChars is the hard cap on the serialized request size (all
 // message contents combined, in characters). Requests above this get an
 // emergency structural trim before being sent. This guards the
 // provider-layer retry path, which replays the SAME message slice on
@@ -16,7 +18,49 @@ import (
 // 240k chars ~= 60-80k real tokens for JSON-dense tool output (tool
 // output tokenizes ~2.5-3 chars/token; the agent-side chars/4 estimate
 // undercounts). Well under any sane context window.
-const maxRequestChars = 240_000
+//
+// Configurable via agents.defaults.maxRequestChars: unset resolves to
+// this default; an explicit value <= 0 disables the trim entirely (for
+// long-session hosts that know their context window can absorb more).
+const DefaultMaxRequestChars = 240_000
+
+// trimCap holds the effective serialized-request cap. It is process-wide
+// (the cap protects the wire, not a single provider) and defaults to
+// DefaultMaxRequestChars. SetMaxRequestChars rewrites it; 0 disables the
+// emergency trim entirely. atomic: Chat runs concurrently across sessions.
+var trimCap atomic.Int64
+
+func init() {
+	trimCap.Store(DefaultMaxRequestChars)
+}
+
+// SetMaxRequestChars sets the emergency trim cap (serialized request size,
+// in characters). n <= 0 disables the emergency trim entirely. Wired from
+// agents.defaults.maxRequestChars at config load; see DefaultMaxRequestChars.
+func SetMaxRequestChars(n int) {
+	if n <= 0 {
+		trimCap.Store(0)
+		return
+	}
+	trimCap.Store(int64(n))
+}
+
+// effectiveTrimCap returns the current cap, or 0 when the trim is disabled.
+func effectiveTrimCap() int64 {
+	return trimCap.Load()
+}
+
+// emergencyTrimCount counts every firing of emergencyTrimMessages since
+// process start. Observable via EmergencyTrimCount() (monotonic test/ops
+// hook — a non-zero value means the agent IS losing context to the wire
+// cap, even when the log line scrolls away).
+var emergencyTrimCount atomic.Uint64
+
+// EmergencyTrimCount returns how many times the emergency request trim has
+// fired since process start.
+func EmergencyTrimCount() uint64 {
+	return emergencyTrimCount.Load()
+}
 
 // stubNote is spliced in where history was elided.
 const stubNote = "[Earlier conversation trimmed automatically to keep the request within the model's context window. Recent messages below carry the current state.]"
@@ -53,7 +97,7 @@ func clampContent(s string, limit int) string {
 }
 
 // emergencyTrimMessages structurally trims an oversized message slice so
-// the request fits within maxRequestChars:
+// the request fits within the trim cap:
 //   - preserves ALL system messages (identity/instructions)
 //   - preserves the trailing conversational tail (head+tail keep window)
 //   - preserves tool-call/tool-result pairing (an assistant tool_calls
@@ -64,15 +108,26 @@ func clampContent(s string, limit int) string {
 //
 // It is intentionally structural (no LLM summarization): cheap,
 // deterministic, and safe to run on every retry.
+//
+// VISIBILITY (GINO-RAILS-006): every firing logs a one-line before/after
+// report — the silent trim was the #1 regression class (hosts degraded
+// answer quality for days with zero signal about WHY). Every firing also
+// bumps EmergencyTrimCount().
 func emergencyTrimMessages(messages []Message) []Message {
+	capChars := effectiveTrimCap()
+	if capChars <= 0 {
+		return messages // trim disabled via maxRequestChars <= 0
+	}
+
 	total := 0
 	for i := range messages {
 		total += msgChars(&messages[i])
 	}
-	if total <= maxRequestChars {
+	if total <= int(capChars) {
 		return messages // healthy request, untouched
 	}
 
+	emergencyTrimCount.Add(1)
 	n := len(messages)
 	head, tail := 0, n-1
 	for head < n && messages[head].Role == "system" {
@@ -80,10 +135,11 @@ func emergencyTrimMessages(messages []Message) []Message {
 	}
 
 	keep := make([]bool, n)
+	sysKept := head
 	for i := 0; i < head; i++ {
 		keep[i] = true
 	}
-	budget := maxRequestChars
+	budget := int(capChars)
 	for i := 0; i < head; i++ {
 		budget -= msgChars(&messages[i])
 	}
@@ -143,11 +199,16 @@ func emergencyTrimMessages(messages []Message) []Message {
 
 	out := make([]Message, 0, n)
 	stubbed := false
+	stubCount := 0
+	keptCount := 0
+	firstKept, lastKept := -1, -1
+	clampApplied := false
 	for i := 0; i < n; i++ {
 		if keep[i] {
 			if stubbed {
 				out = append(out, Message{Role: "user", Content: stubNote})
 				stubbed = false
+				stubCount++
 			}
 			m := messages[i]
 			// Orphan-call guard: a kept assistant tool_call whose result
@@ -163,26 +224,33 @@ func emergencyTrimMessages(messages []Message) []Message {
 				}
 			}
 			out = append(out, m)
+			keptCount++
+			if firstKept < 0 {
+				firstKept = i
+			}
+			lastKept = i
 			continue
 		}
 		stubbed = true
 	}
 	if stubbed {
 		out = append(out, Message{Role: "user", Content: stubNote})
+		stubCount++
 	}
 
 	// Final safety: clamp any remaining fat message (kept tail can still
 	// exceed the cap on its own).
 	const minClamp = 2000
-	total = 0
+	totalAfter := 0
 	for i := range out {
-		total += msgChars(&out[i])
+		totalAfter += msgChars(&out[i])
 	}
-	if total > maxRequestChars {
-		per := maxRequestChars / (len(out) + 1)
+	if totalAfter > int(capChars) {
+		per := int(capChars) / (len(out) + 1)
 		if per < minClamp {
 			per = minClamp
 		}
+		clampApplied = true
 		for i := range out {
 			if len(out[i].Images) > 0 && msgChars(&out[i]) > per {
 				out[i].Images = nil
@@ -191,7 +259,14 @@ func emergencyTrimMessages(messages []Message) []Message {
 				out[i].Content = clampContent(out[i].Content, per)
 			}
 		}
+		totalAfter = 0
+		for i := range out {
+			totalAfter += msgChars(&out[i])
+		}
 	}
+
+	log.Printf("[request-trim] firing: %d chars > cap %d: %d -> %d messages (dropped %d, stubs %d, clamped %v, kept window msg[%d..%d] + %d system), %d chars after — trim #%d",
+		total, capChars, n, len(out), n-keptCount, stubCount, clampApplied, firstKept, lastKept, sysKept, totalAfter, emergencyTrimCount.Load())
 
 	return out
 }
