@@ -406,31 +406,68 @@ Do NOT use: # headings, --- rulers, *-bullet-lists, --dash-lists, 1.-numbered-li
 
 // isContentQuery reports whether a prompt carries enough substance for
 // enrichment (ranked memories / brain context) to mean anything. A query
-// qualifies with at least two tokens of >= 3 letters, or one token of
-// >= 4 letters — digits, punctuation and 1-2-letter words ("say 1", "ok",
-// "2") don't qualify. Low-signal prompts inject NOTHING: the stale-context
-// incident class this closes had a scheduled reminder turn decline a
-// "credential rotation" task that existed nowhere in its session — the only
-// source was weak automatic enrichment on a near-empty query.
+// qualifies via any of:
+//   - two tokens of >= 3 letters, or one token of >= 4 letters (original
+//     rule; digits, punctuation and 1-2-letter words don't qualify)
+//   - one ALL-CAPS token of 2-3 letters ("API", "DNS", "SQL", "CI") —
+//     capitalization is deliberate and marks a technical referent
+//   - one mixed letter+digit token of >= 3 chars ("ipv6", "gpio3", "md5")
+//   - one digit-run of >= 3 digits ("502", "8080") — status codes / ports
+//
+// Low-signal prompts ("say 1", "ok", "2", "42") still inject NOTHING: the
+// stale-context incident class this closes had a scheduled reminder turn
+// decline a "credential rotation" task that existed nowhere in its session
+// — the only source was weak automatic enrichment on a near-empty query.
+// The technical extensions above close the opposite failure mode (work
+// order t-gino-rails-006 item 4): short technical prompts like "noorio
+// wifi gpio?", "API", "ipv6", or "why 502" were classified degenerate and
+// silently lost ranked-memory + brain enrichment.
 func isContentQuery(query string) bool {
 	var long int
-	var one bool
 	for _, t := range strings.Fields(query) {
-		letters := 0
+		letters, digits := 0, 0
 		for _, r := range t {
 			if unicode.IsLetter(r) {
 				letters++
+			} else if unicode.IsDigit(r) {
+				digits++
 			}
 		}
 		if letters >= 4 {
-			one = true
+			return true
 		}
 		if letters >= 3 {
 			long++
-			if long >= 2 || one {
+			if long >= 2 {
 				return true
 			}
 		}
+		// All-caps short acronym: "API", "DNS", "SQL". The token must be
+		// upper-case as written ("API" qualifies, "api" needs a partner).
+		// 3+ letters only — 2-letter all-caps is mostly shouting ("OK",
+		// "NO", "HI") rather than a technical referent.
+		if letters >= 3 && letterCount(t) == letters && strings.ToUpper(t) == t {
+			return true
+		}
+		// Mixed letter+digit identifier: "ipv6", "gpio3", "md5".
+		if letters > 0 && digits > 0 && letters+digits >= 3 {
+			return true
+		}
+		// Digit-run status/port: "502", "8080".
+		if digits >= 3 && letters == 0 {
+			return true
+		}
 	}
 	return false
+}
+
+// letterCount counts letter runes in a token (helper for the all-caps rule).
+func letterCount(t string) int {
+	n := 0
+	for _, r := range t {
+		if unicode.IsLetter(r) {
+			n++
+		}
+	}
+	return n
 }

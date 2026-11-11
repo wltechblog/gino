@@ -57,13 +57,26 @@ func TestBuildMessagesIncludesMemories(t *testing.T) {
 
 // TestIsContentQuery covers the low-signal heuristic directly.
 func TestIsContentQuery(t *testing.T) {
-	low := []string{"", "  ", "1", "2", "say 1", "ok", "42", "- ?", "!!!"}
+	low := []string{"", "  ", "1", "2", "say 1", "ok", "42", "- ?", "!!!", "ok !", "OK", "NO", "HI"}
 	for _, q := range low {
 		if isContentQuery(q) {
 			t.Errorf("isContentQuery(%q) = true, want false (low-signal)", q)
 		}
 	}
-	high := []string{"deploy the staging cluster", "what is 42?", "fix the api", "résumé update"}
+	// Real short technical prompts (work order t-gino-rails-006 item 4):
+	// none of these may be classified degenerate and lose enrichment.
+	high := []string{
+		"deploy the staging cluster", "what is 42?", "fix the api", "résumé update",
+		"noorio wifi gpio?", // canonical item-4 example
+		"API",               // bare all-caps acronym
+		"DNS", "SQL", "JWT", // all-caps 3-letter acronyms
+		"ipv6",         // bare mixed letter+digit identifier
+		"gpio3", "md5", // identifier with trailing digits
+		"why 502",         // digit-run status code
+		"8080",            // port number alone
+		"check CI status", // acronym alongside normal words
+		"version v1.2?",   // dotted identifier survives via mixed rule? (v1.2: letters+digits)
+	}
 	for _, q := range high {
 		if !isContentQuery(q) {
 			t.Errorf("isContentQuery(%q) = false, want true", q)
